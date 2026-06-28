@@ -9,7 +9,29 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class GitExecutor {
 
+  /** The exit code and combined stdout/stderr of a finished git invocation. */
+  public record ExecResult(int exitCode, String output) {}
+
   public String exec(java.io.File cwd, String... command) throws Exception {
+    ExecResult result = execAllowNonZero(cwd, command);
+    if (result.exitCode() != 0) {
+      throw new RuntimeException(
+          "Command failed ["
+              + result.exitCode()
+              + "]: "
+              + String.join(" ", command)
+              + "\n"
+              + result.output());
+    }
+    return result.output();
+  }
+
+  /**
+   * Runs git and returns the exit code alongside the output instead of throwing on a non-zero exit.
+   * Use this for commands whose non-zero exit is a meaningful answer rather than a failure — e.g.
+   * {@code git merge-tree}, which exits 1 to report merge conflicts.
+   */
+  public ExecResult execAllowNonZero(java.io.File cwd, String... command) throws Exception {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd);
@@ -21,11 +43,7 @@ public class GitExecutor {
       output = reader.lines().collect(Collectors.joining("\n"));
     }
     int exitCode = p.waitFor();
-    if (exitCode != 0) {
-      throw new RuntimeException(
-          "Command failed [" + exitCode + "]: " + String.join(" ", command) + "\n" + output);
-    }
-    return output;
+    return new ExecResult(exitCode, output);
   }
 
   public String getCurrentBranch(Path worktreePath) {
