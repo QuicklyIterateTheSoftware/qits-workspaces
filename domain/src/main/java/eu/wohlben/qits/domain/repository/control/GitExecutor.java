@@ -53,4 +53,15 @@ public class GitExecutor {
       throw new RuntimeException("Failed to get current branch", e);
     }
   }
+
+  /**
+   * The full commit SHA currently checked out in {@code worktreePath} ({@code git rev-parse HEAD}).
+   */
+  public String getCurrentCommit(Path worktreePath) {
+    try {
+      return exec(worktreePath.toFile(), "git", "rev-parse", "HEAD").trim();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to get current commit", e);
+    }
+  }
 }
