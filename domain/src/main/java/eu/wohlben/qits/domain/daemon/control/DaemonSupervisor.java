@@ -15,10 +15,10 @@ import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.daemon.entity.LogObserverKind;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
+import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -62,8 +62,10 @@ public class DaemonSupervisor {
     TailSink tail;
     ScheduledFuture<?> pending;
 
-    /** File-source tails; started once per instance, closed when it settles. */
-    List<FileTailSource> tails = List.of();
+    /**
+     * File-source tails (run inside the container); started once per instance, closed on settle.
+     */
+    List<ContainerTailSource> tails = List.of();
 
     Instance(String repoId, String worktreeId, RepositoryDaemonDto daemon) {
       this.repoId = repoId;
@@ -95,6 +97,8 @@ public class DaemonSupervisor {
 
   @Inject LogClassifier classifier;
 
+  @Inject ContainerRuntime containers;
+
   /** Without a ready pattern, STARTING flips to READY after this long (if still alive). */
   @ConfigProperty(name = "qits.daemons.ready-grace-ms", defaultValue = "10000")
   long readyGraceMillis;
@@ -110,10 +114,6 @@ public class DaemonSupervisor {
   /** How often FILE log sources are polled for growth/rotation. */
   @ConfigProperty(name = "qits.daemons.file-tail-poll-ms", defaultValue = "500")
   long fileTailPollMillis;
-
-  /** Worktree checkouts live here (same convention as {@code CommandService}). */
-  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
-  String dataDir;
 
   @PreDestroy
   void shutdown() {
@@ -256,23 +256,21 @@ public class DaemonSupervisor {
   }
 
   /**
-   * One {@code tail -F} per FILE source, feeding its own set of observers. Paths are re-checked
-   * against the worktree root at start (they were validated lexically at definition time). Tails
-   * outlive restarts and stop when the instance settles — see {@link #transition}.
+   * One {@code tail -F} per FILE source, run <em>inside the worktree's container</em> (the working
+   * tree lives at {@code /workspace} there, not on the host), each feeding its own set of
+   * observers. Source paths are relative to {@code /workspace} and re-guarded here against
+   * traversal (they were validated lexically at definition time too). Tails outlive restarts and
+   * stop when the instance settles — see {@link #transition}.
    */
-  private List<FileTailSource> startFileTails(Instance instance) {
+  private List<ContainerTailSource> startFileTails(Instance instance) {
     List<LogSourceDto> sources = instance.daemon.sources();
     if (sources == null || sources.isEmpty() || instance.daemon.observers().isEmpty()) {
       return List.of();
     }
-    Path root =
-        Path.of(dataDir, instance.repoId, "worktrees", instance.worktreeId)
-            .toAbsolutePath()
-            .normalize();
-    List<FileTailSource> tails = new ArrayList<>();
+    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    List<ContainerTailSource> tails = new ArrayList<>();
     for (LogSourceDto source : sources) {
-      Path file = root.resolve(source.path()).normalize();
-      if (!file.startsWith(root)) {
+      if (!isSafeRelativePath(source.path())) {
         LOG.warnf("Skipping log source outside the worktree: %s", source.path());
         continue;
       }
@@ -280,13 +278,48 @@ public class DaemonSupervisor {
       for (var observer : instance.daemon.observers()) {
         observers.add(observerFor(observer, instance));
       }
-      tails.add(new FileTailSource(file, source.path(), observers, scheduler, fileTailPollMillis));
+      tails.add(
+          new ContainerTailSource(tailArgv(container, source.path()), source.path(), observers));
     }
     return tails;
   }
 
+  /**
+   * The command that tails one source inside the container: {@code tail -n 0 -F -- <path>} run with
+   * workdir {@code /workspace}. {@code -n 0} starts at end (history is not replayed); {@code -F}
+   * retries a missing file and reopens on rotation, so a late-appearing log is read from line 1.
+   */
+  private List<String> tailArgv(String container, String path) {
+    List<String> argv =
+        new ArrayList<>(containers.execArgv(container, false, "/workspace", Map.of()));
+    argv.add("tail");
+    argv.add("--sleep-interval=" + (fileTailPollMillis / 1000.0));
+    argv.add("-n");
+    argv.add("0");
+    argv.add("-F");
+    argv.add("--");
+    argv.add(path);
+    return argv;
+  }
+
+  /**
+   * Rejects an absolute source path or one that could climb out of {@code /workspace} via {@code
+   * ..}.
+   */
+  private static boolean isSafeRelativePath(String path) {
+    if (path == null || path.isBlank() || path.startsWith("/") || path.indexOf('\0') >= 0) {
+      return false;
+    }
+    for (String segment : path.split("/")) {
+      if (segment.equals("..")) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private static void closeTails(Instance instance) {
-    for (FileTailSource tail : instance.tails) {
+    for (ContainerTailSource tail : instance.tails) {
       tail.close();
     }
     instance.tails = List.of();
