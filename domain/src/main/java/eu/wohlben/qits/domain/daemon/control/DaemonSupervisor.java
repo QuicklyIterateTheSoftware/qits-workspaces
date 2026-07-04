@@ -8,6 +8,8 @@ import eu.wohlben.qits.domain.daemon.control.DaemonResolutionService.ResolvedDae
 import eu.wohlben.qits.domain.daemon.dto.DaemonConfigurationDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
+import eu.wohlben.qits.domain.daemon.dto.LogObserverDto;
+import eu.wohlben.qits.domain.daemon.dto.LogSourceDto;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventKind;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
@@ -17,6 +19,7 @@ import eu.wohlben.qits.domain.error.NotFoundException;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,6 +63,9 @@ public class DaemonSupervisor {
     TailSink tail;
     ScheduledFuture<?> pending;
 
+    /** File-source tails; started once per instance, closed when it settles. */
+    List<FileTailSource> tails = List.of();
+
     Instance(String repoId, String worktreeId, ResolvedDaemon daemon) {
       this.repoId = repoId;
       this.worktreeId = worktreeId;
@@ -73,7 +79,7 @@ public class DaemonSupervisor {
 
   private final ScheduledExecutorService scheduler =
       Executors.newScheduledThreadPool(
-          2,
+          4,
           runnable -> {
             Thread thread = new Thread(runnable, "daemon-supervisor");
             thread.setDaemon(true);
@@ -101,6 +107,14 @@ public class DaemonSupervisor {
   /** First restart delay; doubles per consecutive restart, capped at 30s. */
   @ConfigProperty(name = "qits.daemons.restart-backoff-initial-ms", defaultValue = "1000")
   long restartBackoffInitialMillis;
+
+  /** How often FILE log sources are polled for growth/rotation. */
+  @ConfigProperty(name = "qits.daemons.file-tail-poll-ms", defaultValue = "500")
+  long fileTailPollMillis;
+
+  /** Worktree checkouts live here (same convention as {@code CommandService}). */
+  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
+  String dataDir;
 
   @PreDestroy
   void shutdown() {
@@ -184,18 +198,12 @@ public class DaemonSupervisor {
       sinks.add(
           new ReadyPatternSink(Pattern.compile(daemon.readyPattern()), () -> markReady(instance)));
     }
+    List<ObservedLineListener> outputObservers = new ArrayList<>();
     for (var observer : daemon.observers()) {
-      if (observer.kind() == LogObserverKind.PATTERN) {
-        sinks.add(
-            new PatternLogObserver(
-                Pattern.compile(observer.pattern()),
-                observer.severity() != null ? observer.severity() : DaemonEventSeverity.ERROR,
-                finding -> onFinding(instance, finding)));
-      } else {
-        sinks.add(
-            new LogLevelObserver(classifier, scheduler, finding -> onFinding(instance, finding)));
-      }
+      outputObservers.add(observerFor(observer, instance));
     }
+    ProcessOutputTap outputTap =
+        outputObservers.isEmpty() ? null : new ProcessOutputTap(outputObservers);
 
     CommandDto command =
         commandService.launchDaemon(
@@ -206,8 +214,12 @@ public class DaemonSupervisor {
             daemon.environment(),
             (commandId, exitCode, terminatedManually) ->
                 handleExit(instance, commandId, exitCode, terminatedManually),
+            outputTap,
             sinks.toArray(CommandOutputSink[]::new));
     instance.commandId = command.id();
+    if (instance.tails.isEmpty()) {
+      instance.tails = startFileTails(instance);
+    }
     transition(
         instance,
         DaemonStatus.STARTING,
@@ -224,6 +236,61 @@ public class DaemonSupervisor {
               readyGraceMillis,
               TimeUnit.MILLISECONDS);
     }
+  }
+
+  /**
+   * One observer instance per (observer definition, source), so LOG_LEVEL batches stay contiguous
+   * within one source and anchors are coherent. Findings are dispatched onto the scheduler rather
+   * than synchronously: a producer delivers lines under its own monitor (the file tail's final
+   * drain even runs under the supervisor monitor), so acquiring the supervisor monitor inline from
+   * an observer callback could deadlock.
+   */
+  private ObservedLineListener observerFor(LogObserverDto observer, Instance instance) {
+    if (observer.kind() == LogObserverKind.PATTERN) {
+      return new PatternLogObserver(
+          Pattern.compile(observer.pattern()),
+          observer.severity() != null ? observer.severity() : DaemonEventSeverity.ERROR,
+          finding -> scheduler.execute(() -> onFinding(instance, finding)));
+    }
+    return new LogLevelObserver(
+        classifier, scheduler, finding -> scheduler.execute(() -> onFinding(instance, finding)));
+  }
+
+  /**
+   * One {@code tail -F} per FILE source, feeding its own set of observers. Paths are re-checked
+   * against the worktree root at start (they were validated lexically at definition time). Tails
+   * outlive restarts and stop when the instance settles — see {@link #transition}.
+   */
+  private List<FileTailSource> startFileTails(Instance instance) {
+    List<LogSourceDto> sources = instance.daemon.sources();
+    if (sources == null || sources.isEmpty() || instance.daemon.observers().isEmpty()) {
+      return List.of();
+    }
+    Path root =
+        Path.of(dataDir, instance.repoId, "worktrees", instance.worktreeId)
+            .toAbsolutePath()
+            .normalize();
+    List<FileTailSource> tails = new ArrayList<>();
+    for (LogSourceDto source : sources) {
+      Path file = root.resolve(source.path()).normalize();
+      if (!file.startsWith(root)) {
+        LOG.warnf("Skipping log source outside the worktree: %s", source.path());
+        continue;
+      }
+      List<ObservedLineListener> observers = new ArrayList<>();
+      for (var observer : instance.daemon.observers()) {
+        observers.add(observerFor(observer, instance));
+      }
+      tails.add(new FileTailSource(file, source.path(), observers, scheduler, fileTailPollMillis));
+    }
+    return tails;
+  }
+
+  private static void closeTails(Instance instance) {
+    for (FileTailSource tail : instance.tails) {
+      tail.close();
+    }
+    instance.tails = List.of();
   }
 
   private synchronized void markReady(Instance instance) {
@@ -250,13 +317,22 @@ public class DaemonSupervisor {
       return; // Late-arriving classification after the run ended.
     }
     events.publish(
-        event(
-            instance,
+        new DaemonEventDto(
+            instance.repoId,
+            instance.worktreeId,
+            instance.daemon.id(),
+            instance.daemon.name(),
             DaemonEventKind.ERROR_DETECTED,
             finding.severity(),
             instance.status,
             finding.errorType() + ": " + finding.summary(),
-            finding.logExcerpt()));
+            finding.logExcerpt(),
+            instance.commandId,
+            finding.source(),
+            finding.anchorFrom(),
+            finding.anchorTo(),
+            finding.sourceEpoch(),
+            Instant.now()));
     if (instance.status == DaemonStatus.READY && finding.severity() == DaemonEventSeverity.ERROR) {
       // The ERROR_DETECTED event above already carried the evidence; the DEGRADED transition
       // itself is INFO so the agent isn't notified twice for one finding.
@@ -366,29 +442,26 @@ public class DaemonSupervisor {
       String summary,
       String logExcerpt) {
     instance.status = status;
+    if (!isLive(status)) {
+      closeTails(instance);
+    }
     events.publish(
-        event(instance, DaemonEventKind.STATUS_CHANGED, severity, status, summary, logExcerpt));
-  }
-
-  private DaemonEventDto event(
-      Instance instance,
-      DaemonEventKind kind,
-      DaemonEventSeverity severity,
-      DaemonStatus status,
-      String summary,
-      String logExcerpt) {
-    return new DaemonEventDto(
-        instance.repoId,
-        instance.worktreeId,
-        instance.daemon.id(),
-        instance.daemon.name(),
-        kind,
-        severity,
-        status,
-        summary,
-        logExcerpt,
-        instance.commandId,
-        Instant.now());
+        new DaemonEventDto(
+            instance.repoId,
+            instance.worktreeId,
+            instance.daemon.id(),
+            instance.daemon.name(),
+            DaemonEventKind.STATUS_CHANGED,
+            severity,
+            status,
+            summary,
+            logExcerpt,
+            instance.commandId,
+            null,
+            null,
+            null,
+            null,
+            Instant.now()));
   }
 
   private static void cancelPending(Instance instance) {
@@ -421,7 +494,8 @@ public class DaemonSupervisor {
                 instance.daemon.scope(),
                 instance.daemon.repositoryId(),
                 instance.daemon.environment(),
-                instance.daemon.observers());
+                instance.daemon.observers(),
+                instance.daemon.sources());
     if (instance == null) {
       return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null);
     }

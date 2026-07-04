@@ -2,35 +2,40 @@ package eu.wohlben.qits.domain.daemon.control;
 
 import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
+import eu.wohlben.qits.domain.daemon.mapper.DaemonEventMapper;
+import eu.wohlben.qits.domain.daemon.persistence.DaemonEventRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.util.ArrayDeque;
-import java.util.Deque;
+import jakarta.transaction.Transactional;
+import java.time.Instant;
 import java.util.List;
 import org.jboss.logging.Logger;
 
 /**
- * The hub daemon events flow through: it retains a bounded recent-events ring for the UI feed and
- * forwards everything above INFO to the agent sink. In-memory next to the supervisor — the durable
- * history is the daemon commands' logs.
+ * The hub daemon events flow through: every published event is persisted as a {@code daemon_event}
+ * row (synchronously — events are throttled and low-volume, and a durable row is the point) and
+ * everything above INFO is forwarded to the agent sink. The write replaces the old in-memory ring:
+ * with the row committed before publish returns, the DB is the feed. A persistence failure is
+ * logged and does not block the agent notification.
  */
 @ApplicationScoped
 public class DaemonEventService {
 
   private static final Logger LOG = Logger.getLogger(DaemonEventService.class);
 
-  private static final int MAX_RETAINED = 500;
+  @Inject DaemonEventPersister persister;
 
-  private final Deque<DaemonEventDto> recent = new ArrayDeque<>();
+  @Inject DaemonEventRepository daemonEventRepository;
+
+  @Inject DaemonEventMapper daemonEventMapper;
 
   @Inject DaemonAgentNotifier agentNotifier;
 
   public void publish(DaemonEventDto event) {
-    synchronized (recent) {
-      recent.addLast(event);
-      while (recent.size() > MAX_RETAINED) {
-        recent.removeFirst();
-      }
+    try {
+      persister.persist(event);
+    } catch (RuntimeException e) {
+      LOG.warnf(e, "Failed to persist daemon event: %s", event.summary());
     }
     if (event.severity() != null && event.severity() != DaemonEventSeverity.INFO) {
       try {
@@ -41,13 +46,20 @@ public class DaemonEventService {
     }
   }
 
-  /** Recent events for one worktree, newest first. */
-  public List<DaemonEventDto> recent(String repoId, String worktreeId) {
-    synchronized (recent) {
-      return recent.stream()
-          .filter(e -> e.repoId().equals(repoId) && e.worktreeId().equals(worktreeId))
-          .sorted((a, b) -> b.timestamp().compareTo(a.timestamp()))
-          .toList();
-    }
+  /** Durable events, newest first; null criteria mean "don't filter" (everything-visible). */
+  @Transactional
+  public List<DaemonEventDto> query(
+      String repoId,
+      String worktreeId,
+      DaemonEventSeverity severity,
+      Instant since,
+      String source,
+      int page,
+      int pageSize) {
+    return daemonEventRepository
+        .find(repoId, worktreeId, severity, since, source, page, pageSize)
+        .stream()
+        .map(daemonEventMapper::toDto)
+        .toList();
   }
 }

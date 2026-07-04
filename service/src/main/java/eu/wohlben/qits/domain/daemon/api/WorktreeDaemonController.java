@@ -1,8 +1,6 @@
 package eu.wohlben.qits.domain.daemon.api;
 
-import eu.wohlben.qits.domain.daemon.control.DaemonEventService;
 import eu.wohlben.qits.domain.daemon.control.DaemonSupervisor;
-import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -16,8 +14,8 @@ import java.util.List;
 
 /**
  * The runtime surface of daemons in one worktree: the effective daemons with their supervised
- * status (all of them, running or not — the everything-visible convention), start/stop, and the
- * recent event feed.
+ * status (all of them, running or not — the everything-visible convention) and start/stop. The
+ * event feed moved to the durable {@code /daemon-events} endpoint.
  */
 @Path("/repositories/{repoId}/worktrees/{worktreeId}/daemons")
 @Produces(MediaType.APPLICATION_JSON)
@@ -25,8 +23,6 @@ import java.util.List;
 public class WorktreeDaemonController {
 
   @Inject DaemonSupervisor daemonSupervisor;
-
-  @Inject DaemonEventService daemonEventService;
 
   public static record ListWorktreeDaemonsRequest() {
     public record Response(List<Entry> entries) {
@@ -68,16 +64,5 @@ public class WorktreeDaemonController {
       @PathParam("worktreeId") String worktreeId,
       @PathParam("daemonId") String daemonId) {
     return new StopDaemonRequest.Response(daemonSupervisor.stop(repoId, worktreeId, daemonId));
-  }
-
-  public static record ListDaemonEventsRequest() {
-    public record Response(List<DaemonEventDto> events) {}
-  }
-
-  @GET
-  @Path("/events")
-  public ListDaemonEventsRequest.Response events(
-      @PathParam("repoId") String repoId, @PathParam("worktreeId") String worktreeId) {
-    return new ListDaemonEventsRequest.Response(daemonEventService.recent(repoId, worktreeId));
   }
 }

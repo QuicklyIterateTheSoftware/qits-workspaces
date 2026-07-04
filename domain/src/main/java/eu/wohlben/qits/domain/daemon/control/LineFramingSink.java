@@ -44,10 +44,15 @@ abstract class LineFramingSink implements CommandOutputSink {
     if (line.endsWith("\r")) {
       line = line.substring(0, line.length() - 1);
     }
-    line = ANSI_ESCAPES.matcher(line).replaceAll("");
+    line = stripAnsi(line);
     if (!line.isBlank()) {
       onLine(line);
     }
+  }
+
+  /** Shared by every line producer that feeds observers (this sink, taps, file tails). */
+  static String stripAnsi(String text) {
+    return ANSI_ESCAPES.matcher(text).replaceAll("");
   }
 
   /** One clean output line (non-blank, ANSI-stripped). Called under the sink's own monitor. */

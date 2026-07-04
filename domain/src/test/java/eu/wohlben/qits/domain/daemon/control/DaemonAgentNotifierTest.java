@@ -80,6 +80,10 @@ public class DaemonAgentNotifierTest {
         summary,
         excerpt,
         "cmd-1",
+        null,
+        null,
+        null,
+        null,
         Instant.now());
   }
 
@@ -124,7 +128,7 @@ public class DaemonAgentNotifierTest {
   private List<CommandLogLineDto> awaitLogContaining(String commandId, String needle)
       throws InterruptedException {
     for (int i = 0; i < 40; i++) {
-      List<CommandLogLineDto> lines = commandService.log(commandId);
+      List<CommandLogLineDto> lines = commandService.log(commandId, null);
       if (lines.stream().anyMatch(l -> l.content().contains(needle))) {
         return lines;
       }
