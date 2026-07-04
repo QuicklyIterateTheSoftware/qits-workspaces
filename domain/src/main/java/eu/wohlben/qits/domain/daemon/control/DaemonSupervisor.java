@@ -211,6 +211,7 @@ public class DaemonSupervisor {
             daemon.name(),
             daemon.startScript(),
             daemon.environment(),
+            daemon.otel(),
             (commandId, exitCode, terminatedManually) ->
                 handleExit(instance, commandId, exitCode, terminatedManually),
             outputTap,
