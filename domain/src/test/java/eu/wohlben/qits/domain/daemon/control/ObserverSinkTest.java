@@ -6,19 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
  * Pure unit tests for the observer sinks: line framing over raw PTY chunks, the PATTERN observer
- * (match, severity, throttle), and the MODEL observer's gating — quiet logs never reach the
- * classifier, an error batch produces exactly one call and one finding carrying the excerpt.
+ * (match, severity, throttle), the LOG_LEVEL observer's batching (quiet logs produce nothing, an
+ * error batch produces one finding carrying the offset-based excerpt), and the local log-level
+ * classifier itself.
  */
 public class ObserverSinkTest {
 
@@ -59,104 +58,66 @@ public class ObserverSinkTest {
   }
 
   @Test
-  public void modelObserverGatesQuietLogsAndClassifiesErrorBatches() throws Exception {
-    AtomicInteger calls = new AtomicInteger();
+  public void logLevelObserverIgnoresQuietLogsAndClassifiesErrorBatches() throws Exception {
     CountDownLatch findingLatch = new CountDownLatch(1);
     List<ObserverFinding> findings = new ArrayList<>();
-    LogClassifier classifier =
-        new LogClassifier() {
-          @Override
-          public boolean enabled() {
-            return true;
-          }
-
-          @Override
-          public Optional<Classification> classify(String promptOverride, String logBatch) {
-            calls.incrementAndGet();
-            assertTrue(logBatch.contains("Traceback"), "batch carries the lines: " + logBatch);
-            return Optional.of(
-                new Classification(
-                    DaemonEventSeverity.ERROR, "ZeroDivisionError", "division by zero", 1));
-          }
-        };
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     try {
-      ModelLogObserver observer =
-          new ModelLogObserver(
-              null,
-              classifier,
+      LogLevelObserver observer =
+          new LogLevelObserver(
+              new LogLevelClassifier(),
               scheduler,
               finding -> {
                 findings.add(finding);
                 findingLatch.countDown();
               });
 
-      // Quiet, healthy output: buffered, debounced, then dropped by the pre-filter — no call.
+      // Quiet, healthy output: buffered, debounced, classified as unremarkable — no finding.
       observer.write("GET / 200 5ms\nGET /favicon.ico 200 1ms\n");
       Thread.sleep(2500);
-      assertEquals(0, calls.get(), "quiet logs must never reach the model");
+      assertEquals(0, findings.size(), "quiet logs must not produce findings");
 
-      // An error batch: one call for the whole batch, one finding with the offset-based excerpt.
+      // An error batch: one finding for the whole burst, excerpt starting at the evidence.
       observer.write("serving request\nTraceback (most recent call last):\n");
       observer.write("ZeroDivisionError: division by zero\n");
       assertTrue(findingLatch.await(10, TimeUnit.SECONDS), "finding should arrive after debounce");
-      assertEquals(1, calls.get(), "one classification call per batch");
+      assertEquals(1, findings.size(), "one finding per batch");
       ObserverFinding finding = findings.get(0);
       assertEquals(DaemonEventSeverity.ERROR, finding.severity());
-      assertEquals("ZeroDivisionError", finding.errorType());
       assertTrue(
           finding.logExcerpt().startsWith("Traceback"),
-          "excerpt starts at the reported offset: " + finding.logExcerpt());
+          "excerpt starts at the classified offset: " + finding.logExcerpt());
     } finally {
       scheduler.shutdownNow();
     }
   }
 
   @Test
-  public void modelObserverIsInertWithoutAnApiKey() throws Exception {
-    AtomicInteger calls = new AtomicInteger();
-    LogClassifier disabled =
-        new LogClassifier() {
-          @Override
-          public boolean enabled() {
-            return false;
-          }
+  public void logLevelClassifierReadsTheSeverityVocabularyLogsCarry() {
+    LogLevelClassifier classifier = new LogLevelClassifier();
 
-          @Override
-          public Optional<Classification> classify(String promptOverride, String logBatch) {
-            calls.incrementAndGet();
-            return Optional.empty();
-          }
-        };
-    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    try {
-      ModelLogObserver observer = new ModelLogObserver(null, disabled, scheduler, finding -> {});
-      observer.write("Traceback (most recent call last): error error error\n");
-      Thread.sleep(2500);
-      assertEquals(0, calls.get());
-    } finally {
-      scheduler.shutdownNow();
-    }
-  }
+    // Routine output — including "0 errors" wording — is unremarkable.
+    assertTrue(classifier.classify("GET /api/users 200 12ms").isEmpty());
+    assertTrue(classifier.classify("Found 0 errors. Watching for file changes.").isEmpty());
+    assertTrue(classifier.classify("webpack compiled successfully in 421 ms").isEmpty());
 
-  @Test
-  public void classifierReplyParsingIsStrictButLenient() {
-    assertTrue(AnthropicLogClassifier.parse("NONE").isEmpty());
-    assertTrue(AnthropicLogClassifier.parse("").isEmpty());
-    assertTrue(AnthropicLogClassifier.parse("garbage without pipes").isEmpty());
-    assertTrue(AnthropicLogClassifier.parse("BOGUS|type|summary|0").isEmpty());
-
-    var parsed =
-        AnthropicLogClassifier.parse("ERROR|port-in-use|Port 3000 is already in use|2")
+    // An exception class name is the strongest signal and becomes the errorType.
+    var npe =
+        classifier
+            .classify("request in\njava.lang.NullPointerException: s is null\n\tat Api.java:42")
             .orElseThrow();
-    assertEquals(DaemonEventSeverity.ERROR, parsed.severity());
-    assertEquals("port-in-use", parsed.errorType());
-    assertEquals("Port 3000 is already in use", parsed.summary());
-    assertEquals(2, parsed.firstLineOffset());
+    assertEquals(DaemonEventSeverity.ERROR, npe.severity());
+    assertEquals("NullPointerException", npe.errorType());
+    assertEquals(1, npe.firstLineOffset(), "offset points at the exception line");
 
-    var malformedOffset =
-        AnthropicLogClassifier.parse("WARNING|deprecation|Something old|not-a-number")
-            .orElseThrow();
-    assertEquals(0, malformedOffset.firstLineOffset(), "bad offset defaults to batch start");
+    // Level tokens classify too; ERROR beats an earlier WARNING in the same batch.
+    var levelToken =
+        classifier.classify("WARN slow query (1.2s)\nERROR: connection refused").orElseThrow();
+    assertEquals(DaemonEventSeverity.ERROR, levelToken.severity());
+    assertEquals("error-log", levelToken.errorType());
+    assertEquals(1, levelToken.firstLineOffset());
+
+    var warning = classifier.classify("DeprecationWarning: DEP0123 something old").orElseThrow();
+    assertEquals(DaemonEventSeverity.WARNING, warning.severity());
   }
 }

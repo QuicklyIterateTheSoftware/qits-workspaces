@@ -193,8 +193,7 @@ public class DaemonSupervisor {
                 finding -> onFinding(instance, finding)));
       } else {
         sinks.add(
-            new ModelLogObserver(
-                observer.prompt(), classifier, scheduler, finding -> onFinding(instance, finding)));
+            new LogLevelObserver(classifier, scheduler, finding -> onFinding(instance, finding)));
       }
     }
 
