@@ -49,8 +49,12 @@ public class WorkspaceRecreateIT {
 
   private static final String IMAGE =
       System.getProperty("qits.workspace.image", "qits/workspace:latest");
+  // The effective host a container uses to reach the app — resolved exactly as the app does
+  // (auto → host.docker.internal on plain Linux, the WSL2 eth0 IP on WSL2), so this IT needs no
+  // -Dqits.workspace.git-host on either environment. An explicit -D override is still honoured.
   private static final String GIT_HOST =
-      System.getProperty("qits.workspace.git-host", "host.docker.internal");
+      eu.wohlben.qits.domain.repository.control.GitHostResolver.resolve(
+          System.getProperty("qits.workspace.git-host", "auto"));
   private static final int PORT = 8080;
 
   /**
@@ -68,9 +72,8 @@ public class WorkspaceRecreateIT {
         overrides.put("qits.repositories.data-dir", dataDir.toString());
         overrides.put("quarkus.datasource.jdbc.url", "jdbc:h2:mem:recreate-it;DB_CLOSE_DELAY=-1");
         overrides.put("qits.speech.warmup-on-start", "false");
-        // The address a container uses to reach this app for clone/push. Defaults to
-        // host.docker.internal (so the test self-skips where that isn't container-reachable); on
-        // WSL2 + Docker Desktop pass the distro's eth0 IP: -Dqits.workspace.git-host=<ip>.
+        // Pin the app's git-host to the same value the test's probe resolved (auto → the eth0 IP on
+        // WSL2, host.docker.internal on plain Linux), so app and test agree exactly.
         overrides.put("qits.workspace.git-host", GIT_HOST);
         return overrides;
       } catch (Exception e) {
