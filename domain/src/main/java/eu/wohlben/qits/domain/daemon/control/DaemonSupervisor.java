@@ -4,12 +4,11 @@ import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 import eu.wohlben.qits.domain.command.control.CommandRegistry;
 import eu.wohlben.qits.domain.command.control.CommandService;
 import eu.wohlben.qits.domain.command.dto.CommandDto;
-import eu.wohlben.qits.domain.daemon.control.DaemonResolutionService.ResolvedDaemon;
-import eu.wohlben.qits.domain.daemon.dto.DaemonConfigurationDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
 import eu.wohlben.qits.domain.daemon.dto.LogObserverDto;
 import eu.wohlben.qits.domain.daemon.dto.LogSourceDto;
+import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventKind;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
@@ -55,7 +54,7 @@ public class DaemonSupervisor {
   private static final class Instance {
     final String repoId;
     final String worktreeId;
-    ResolvedDaemon daemon;
+    RepositoryDaemonDto daemon;
     DaemonStatus status = DaemonStatus.STOPPED;
     int restartCount;
     String commandId;
@@ -66,7 +65,7 @@ public class DaemonSupervisor {
     /** File-source tails; started once per instance, closed when it settles. */
     List<FileTailSource> tails = List.of();
 
-    Instance(String repoId, String worktreeId, ResolvedDaemon daemon) {
+    Instance(String repoId, String worktreeId, RepositoryDaemonDto daemon) {
       this.repoId = repoId;
       this.worktreeId = worktreeId;
       this.daemon = daemon;
@@ -90,7 +89,7 @@ public class DaemonSupervisor {
 
   @Inject CommandRegistry registry;
 
-  @Inject DaemonResolutionService resolutionService;
+  @Inject RepositoryDaemonService repositoryDaemonService;
 
   @Inject DaemonEventService events;
 
@@ -126,7 +125,7 @@ public class DaemonSupervisor {
    * — "restart" beats two dev servers fighting over a port.
    */
   public synchronized DaemonInstanceDto start(String repoId, String worktreeId, String daemonId) {
-    ResolvedDaemon daemon = resolutionService.resolveForRepository(repoId, daemonId);
+    RepositoryDaemonDto daemon = repositoryDaemonService.resolve(repoId, daemonId);
     Key key = new Key(repoId, worktreeId, daemonId);
     Instance existing = instances.get(key);
     if (existing != null && isLive(existing.status)) {
@@ -174,12 +173,12 @@ public class DaemonSupervisor {
     return toInstanceDto(instance, null);
   }
 
-  /** Every effective daemon of the repository with its runtime state in this worktree. */
+  /** Every daemon of the repository with its runtime state in this worktree. */
   public List<DaemonInstanceDto> effectiveDaemons(String repoId, String worktreeId) {
-    List<DaemonConfigurationDto> definitions = resolutionService.effectiveDaemons(repoId);
+    List<RepositoryDaemonDto> definitions = repositoryDaemonService.resolveAll(repoId);
     synchronized (this) {
       List<DaemonInstanceDto> result = new ArrayList<>(definitions.size());
-      for (DaemonConfigurationDto definition : definitions) {
+      for (RepositoryDaemonDto definition : definitions) {
         Instance instance = instances.get(new Key(repoId, worktreeId, definition.id()));
         result.add(toInstanceDto(instance, definition));
       }
@@ -190,7 +189,7 @@ public class DaemonSupervisor {
   // --- Lifecycle internals (all under the supervisor monitor) ---------------------------------
 
   private void launch(Instance instance) {
-    ResolvedDaemon daemon = instance.daemon;
+    RepositoryDaemonDto daemon = instance.daemon;
     List<CommandOutputSink> sinks = new ArrayList<>();
     instance.tail = new TailSink();
     sinks.add(instance.tail);
@@ -478,24 +477,8 @@ public class DaemonSupervisor {
         || status == DaemonStatus.RESTARTING;
   }
 
-  private DaemonInstanceDto toInstanceDto(Instance instance, DaemonConfigurationDto definition) {
-    DaemonConfigurationDto daemon =
-        definition != null
-            ? definition
-            : new DaemonConfigurationDto(
-                instance.daemon.id(),
-                instance.daemon.name(),
-                instance.daemon.description(),
-                instance.daemon.startScript(),
-                instance.daemon.readyPattern(),
-                instance.daemon.stopSignal(),
-                instance.daemon.restartPolicy(),
-                instance.daemon.maxRestarts(),
-                instance.daemon.scope(),
-                instance.daemon.repositoryId(),
-                instance.daemon.environment(),
-                instance.daemon.observers(),
-                instance.daemon.sources());
+  private DaemonInstanceDto toInstanceDto(Instance instance, RepositoryDaemonDto definition) {
+    RepositoryDaemonDto daemon = definition != null ? definition : instance.daemon;
     if (instance == null) {
       return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null);
     }
