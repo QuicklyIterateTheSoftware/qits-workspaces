@@ -62,6 +62,15 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @Override
   public ExecResult exec(
       String container, String workdir, Map<String, String> env, String... argv) {
+    // The agent auth check (AgentAuthStatus) must be deterministic here, not depend on the host's
+    // real `claude` login: report signed in so chat launches take the chat path. Tests that
+    // exercise the not-signed-in login redirect override AgentAuthStatus itself.
+    if (argv.length >= 3
+        && "claude".equals(argv[0])
+        && "auth".equals(argv[1])
+        && "status".equals(argv[2])) {
+      return new ExecResult(0, "{\"loggedIn\": true, \"authMethod\": \"claudeai\"}");
+    }
     Info info = byName.get(container);
     Path dir = info == null ? null : info.dir();
     List<String> cmd = new ArrayList<>();
