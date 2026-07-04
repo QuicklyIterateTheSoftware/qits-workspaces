@@ -1,7 +1,9 @@
 package eu.wohlben.qits.domain.repository.control;
 
 import eu.wohlben.qits.domain.error.InternalServerErrorException;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
@@ -29,6 +31,40 @@ public class DockerExecutor implements ContainerRuntime {
 
   @ConfigProperty(name = "qits.workspace.image", defaultValue = "qits/workspace:latest")
   String image;
+
+  /**
+   * The shared named volume holding the coding agent's home ({@code ~/.claude} — the one-time OAuth
+   * login). Mounted read/write into every worktree container so an in-container {@code claude} can
+   * authenticate; blank disables the mount. See {@code docker/workspace/agent-login.sh}.
+   */
+  @ConfigProperty(name = "qits.workspace.claude-volume", defaultValue = "qits_shared_dot_claude")
+  String claudeVolume;
+
+  /** Where {@link #claudeVolume} mounts (and where agent launches point {@code HOME}). */
+  @ConfigProperty(name = "qits.workspace.claude-mount", defaultValue = "/claude-home")
+  String claudeMount;
+
+  /**
+   * Create the shared credential volume once at startup so it exists before any worktree container
+   * mounts it — and so an operator can run the one-time login before the first worktree is created.
+   * Best-effort: a missing/broken runtime just logs, exactly like the rest of this executor.
+   */
+  void onStart(@Observes StartupEvent event) {
+    ensureClaudeVolume();
+  }
+
+  /** Idempotent {@code docker volume create}; no-op when the volume name is blank. */
+  void ensureClaudeVolume() {
+    if (claudeVolume == null || claudeVolume.isBlank()) {
+      return;
+    }
+    ExecResult result = runCapturing(null, List.of(runtime, "volume", "create", claudeVolume));
+    if (result.exitCode() != 0) {
+      LOG.warnf(
+          "Could not ensure shared agent credential volume '%s' (agent auth may be unavailable): %s",
+          claudeVolume, result.output());
+    }
+  }
 
   @Override
   public String containerName(String worktreeId, String repoId) {
@@ -61,6 +97,14 @@ public class DockerExecutor implements ContainerRuntime {
     // Linux needs this flag for host.docker.internal to resolve to the docker bridge gateway; qits
     // controls container creation, so it is always set.
     argv.add("--add-host=host.docker.internal:host-gateway");
+    // The shared credential volume so an in-container `claude` can read the one-time OAuth login.
+    // Mounted read/write on every worktree container (agent and daemon share the container), so any
+    // command in the container can read the token off the volume — the accepted trade for the
+    // shared-login model (docs/features/2026-07-04_container-agent-sessions.md).
+    if (claudeVolume != null && !claudeVolume.isBlank()) {
+      argv.add("-v");
+      argv.add(claudeVolume + ":" + claudeMount);
+    }
     argv.add(image);
     argv.add("sleep");
     argv.add("infinity");
