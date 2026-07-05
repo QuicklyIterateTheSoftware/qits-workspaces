@@ -53,7 +53,7 @@ public class WorkspaceRecreateIT {
   // (auto → host.docker.internal on plain Linux, the WSL2 eth0 IP on WSL2), so this IT needs no
   // -Dqits.workspace.git-host on either environment. An explicit -D override is still honoured.
   private static final String GIT_HOST =
-      eu.wohlben.qits.domain.repository.control.GitHostResolver.resolve(
+      eu.wohlben.qits.domain.repository.control.QitsHostResolver.resolve(
           System.getProperty("qits.workspace.git-host", "auto"));
   private static final int PORT = 8080;
 
