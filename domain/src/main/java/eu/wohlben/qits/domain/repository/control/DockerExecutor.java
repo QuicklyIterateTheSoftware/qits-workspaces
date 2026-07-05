@@ -4,9 +4,9 @@ import eu.wohlben.qits.domain.error.InternalServerErrorException;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.inject.Inject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -30,20 +30,12 @@ public class DockerExecutor implements ContainerRuntime {
   @ConfigProperty(name = "qits.workspace.container-runtime", defaultValue = "docker")
   String runtime;
 
-  @ConfigProperty(name = "qits.workspace.image", defaultValue = "qits/workspace:latest")
-  String image;
-
   /**
-   * The shared named volume holding the coding agent's home ({@code ~/.claude} — the one-time OAuth
-   * login). Mounted read/write into every worktree container so an in-container {@code claude} can
-   * authenticate; blank disables the mount. See {@code docker/workspace/agent-login.sh}.
+   * Assembles the {@code docker run} argv (with the always-on cross-cutting config — credential
+   * volume, {@code qits.*} labels, host alias, host uid). This executor only prepends the runtime
+   * binary + {@code run} and shells it out.
    */
-  @ConfigProperty(name = "qits.workspace.claude-volume", defaultValue = "qits_shared_dot_claude")
-  String claudeVolume;
-
-  /** Where {@link #claudeVolume} mounts (and where agent launches point {@code HOME}). */
-  @ConfigProperty(name = "qits.workspace.claude-mount", defaultValue = "/claude-home")
-  String claudeMount;
+  @Inject WorkspaceContainerFactory containerFactory;
 
   /**
    * Create the shared credential volume once at startup so it exists before any worktree container
@@ -56,6 +48,7 @@ public class DockerExecutor implements ContainerRuntime {
 
   /** Idempotent {@code docker volume create}; no-op when the volume name is blank. */
   void ensureClaudeVolume() {
+    String claudeVolume = containerFactory.claudeVolume();
     if (claudeVolume == null || claudeVolume.isBlank()) {
       return;
     }
@@ -83,44 +76,13 @@ public class DockerExecutor implements ContainerRuntime {
       String parent,
       Collection<Integer> publishPorts) {
     String name = containerName(worktreeId, repoId);
+    // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
+    // qits.* labels, host alias, host uid); this executor only prepends the runtime + `run` verb.
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
-    argv.add("-d");
-    argv.add("--init");
-    argv.add("--name");
-    argv.add(name);
-    argv.add("--user");
-    argv.add(Long.toString(hostUid()));
-    argv.add("--label");
-    argv.add("qits.repository=" + repoId);
-    argv.add("--label");
-    argv.add("qits.worktree=" + worktreeId);
-    argv.add("--label");
-    argv.add("qits.branch=" + (branch == null ? "" : branch));
-    argv.add("--label");
-    argv.add("qits.parent=" + (parent == null ? "" : parent));
-    // Linux needs this flag for host.docker.internal to resolve to the docker bridge gateway; qits
-    // controls container creation, so it is always set.
-    argv.add("--add-host=host.docker.internal:host-gateway");
-    // The shared credential volume so an in-container `claude` can read the one-time OAuth login.
-    // Mounted read/write on every worktree container (agent and daemon share the container), so any
-    // command in the container can read the token off the volume — the accepted trade for the
-    // shared-login model (docs/features/2026-07-04_container-agent-sessions.md).
-    if (claudeVolume != null && !claudeVolume.isBlank()) {
-      argv.add("-v");
-      argv.add(claudeVolume + ":" + claudeMount);
-    }
-    // Ephemeral localhost publishing for web-viewable daemon ports (see ContainerRuntime#run).
-    if (publishPorts != null) {
-      for (Integer port : publishPorts) {
-        argv.add("-p");
-        argv.add("127.0.0.1:0:" + port);
-      }
-    }
-    argv.add(image);
-    argv.add("sleep");
-    argv.add("infinity");
+    argv.addAll(
+        containerFactory.forWorktree(repoId, worktreeId, branch, parent, publishPorts).toRunArgv());
 
     ExecResult result = runCapturing(null, argv);
     if (result.exitCode() != 0) {
@@ -238,19 +200,6 @@ public class DockerExecutor implements ContainerRuntime {
 
   private static String emptyToNull(String s) {
     return s == null || s.isBlank() ? null : s;
-  }
-
-  /**
-   * The host uid the container runs as, so cloned {@code /workspace} files are owned by the user.
-   */
-  private long hostUid() {
-    try {
-      Object uid = Files.getAttribute(Path.of(System.getProperty("user.home")), "unix:uid");
-      return ((Number) uid).longValue();
-    } catch (Exception e) {
-      // Fall back to a sane default; the container just won't match the host uid.
-      return 1000L;
-    }
   }
 
   private ExecResult runCapturing(Path cwd, List<String> command) {
