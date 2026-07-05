@@ -26,7 +26,7 @@ class WorkspaceContainerFactoryTest {
   void alwaysSeedsTheCredentialVolumeLabelsHostUserImageAndCommand() {
     List<String> argv =
         factory()
-            .forWorktree("repo12345678abc", "work", "main", "0parent", List.of(8080, 5173))
+            .forWorkspace("repo12345678abc", "work", "main", "0parent", List.of(8080, 5173))
             .toRunArgv();
 
     // The guarantee: the shared credential volume is mounted on every container.
@@ -36,13 +36,13 @@ class WorkspaceContainerFactoryTest {
     assertSequence(argv, "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude");
     // The qits.* reconciliation labels.
     assertSequence(argv, "--label", "qits.repository=repo12345678abc");
-    assertSequence(argv, "--label", "qits.worktree=work");
+    assertSequence(argv, "--label", "qits.workspace=work");
     assertSequence(argv, "--label", "qits.branch=main");
     assertSequence(argv, "--label", "qits.parent=0parent");
     // Host alias, host uid, deterministic name, image, entrypoint.
     assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
     assertTrue(argv.contains("--user"), argv.toString());
-    assertSequence(argv, "--name", "qits-wt-work-repo1234");
+    assertSequence(argv, "--name", "qits-ws-work-repo1234");
     assertTrue(argv.contains("qits/workspace:latest"), argv.toString());
     assertSequence(argv, "sleep", "infinity");
     // Declared daemon ports, published to localhost.
@@ -56,7 +56,7 @@ class WorkspaceContainerFactoryTest {
     f.claudeVolume = "";
 
     List<String> argv =
-        f.forWorktree("repo12345678abc", "work", "main", null, List.of()).toRunArgv();
+        f.forWorkspace("repo12345678abc", "work", "main", null, List.of()).toRunArgv();
 
     assertFalse(argv.contains("-v"), argv.toString());
     // With no shared volume there is nothing to point CLAUDE_CONFIG_DIR at, so it is omitted too.
@@ -65,7 +65,7 @@ class WorkspaceContainerFactoryTest {
     assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
     assertSequence(argv, "--label", "qits.repository=repo12345678abc");
     assertSequence(argv, "--label", "qits.parent=");
-    assertSequence(argv, "--name", "qits-wt-work-repo1234");
+    assertSequence(argv, "--name", "qits-ws-work-repo1234");
   }
 
   /** Assert {@code first} appears immediately followed by {@code second}. */

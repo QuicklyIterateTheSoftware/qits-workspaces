@@ -46,20 +46,21 @@ public class GitExecutor {
     return new ExecResult(exitCode, output);
   }
 
-  public String getCurrentBranch(Path worktreePath) {
+  public String getCurrentBranch(Path workspacePath) {
     try {
-      return exec(worktreePath.toFile(), "git", "branch", "--show-current").trim();
+      return exec(workspacePath.toFile(), "git", "branch", "--show-current").trim();
     } catch (Exception e) {
       throw new RuntimeException("Failed to get current branch", e);
     }
   }
 
   /**
-   * The full commit SHA currently checked out in {@code worktreePath} ({@code git rev-parse HEAD}).
+   * The full commit SHA currently checked out in {@code workspacePath} ({@code git rev-parse
+   * HEAD}).
    */
-  public String getCurrentCommit(Path worktreePath) {
+  public String getCurrentCommit(Path workspacePath) {
     try {
-      return exec(worktreePath.toFile(), "git", "rev-parse", "HEAD").trim();
+      return exec(workspacePath.toFile(), "git", "rev-parse", "HEAD").trim();
     } catch (Exception e) {
       throw new RuntimeException("Failed to get current commit", e);
     }

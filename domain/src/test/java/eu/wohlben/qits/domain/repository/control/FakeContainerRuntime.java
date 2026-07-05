@@ -18,13 +18,14 @@ import java.util.stream.Collectors;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * Test double for {@link ContainerRuntime} that emulates a per-worktree container as a local git
+ * Test double for {@link ContainerRuntime} that emulates a per-workspace container as a local git
  * clone on the host, so the whole suite exercises the container-routed code paths without a real
- * docker (or the running {@code /git} server). A container is a clone at the old host worktree path
- * ({@code <data-dir>/<repoId>/worktrees/<worktreeId>}); {@code exec} runs the command there via
- * {@code env -C}, rewriting the {@code http://…/git/<repoId>} clone URL to the on-disk bare origin
- * and {@code /workspace} to the worktree dir. Because {@code exec} runs real host processes, the
- * {@code setsid}-based process-group termination the registry relies on works end-to-end too.
+ * docker (or the running {@code /git} server). A container is a clone at the old host workspace
+ * path ({@code <data-dir>/<repoId>/workspaces/<workspaceId>}); {@code exec} runs the command there
+ * via {@code env -C}, rewriting the {@code http://…/git/<repoId>} clone URL to the on-disk bare
+ * origin and {@code /workspace} to the workspace dir. Because {@code exec} runs real host
+ * processes, the {@code setsid}-based process-group termination the registry relies on works
+ * end-to-end too.
  *
  * <p>Replaces {@link DockerExecutor} globally in this module's {@code @QuarkusTest}s via {@link
  * Mock}. Real-docker behavior is covered separately by integration tests behind {@code skipITs}.
@@ -40,7 +41,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
 
   private record Info(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       String branch,
       String parent,
       Path dir,
@@ -49,20 +50,20 @@ public class FakeContainerRuntime implements ContainerRuntime {
   private final Map<String, Info> byName = new ConcurrentHashMap<>();
 
   @Override
-  public String containerName(String worktreeId, String repoId) {
+  public String containerName(String workspaceId, String repoId) {
     String shortRepo = repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
-    return "qits-wt-" + worktreeId + "-" + shortRepo;
+    return "qits-ws-" + workspaceId + "-" + shortRepo;
   }
 
   @Override
   public String run(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       String branch,
       String parent,
       Collection<Integer> publishPorts) {
-    String name = containerName(worktreeId, repoId);
-    Path dir = Path.of(dataDir, repoId, "worktrees", worktreeId).toAbsolutePath();
+    String name = containerName(workspaceId, repoId);
+    Path dir = Path.of(dataDir, repoId, "workspaces", workspaceId).toAbsolutePath();
     try {
       Files.createDirectories(dir.getParent());
     } catch (Exception e) {
@@ -72,7 +73,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
         name,
         new Info(
             repoId,
-            worktreeId,
+            workspaceId,
             branch,
             parent,
             dir,
@@ -174,14 +175,14 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public List<ContainerInfo> listWorktreeContainers(String repoId) {
+  public List<ContainerInfo> listWorkspaceContainers(String repoId) {
     List<ContainerInfo> infos = new ArrayList<>();
     for (Info info : byName.values()) {
       if (info.repoId().equals(repoId)) {
         infos.add(
             new ContainerInfo(
-                containerName(info.worktreeId(), repoId),
-                info.worktreeId(),
+                containerName(info.workspaceId(), repoId),
+                info.workspaceId(),
                 info.branch(),
                 info.parent()));
       }

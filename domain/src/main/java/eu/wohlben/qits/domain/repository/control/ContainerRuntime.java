@@ -5,8 +5,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The per-worktree container runtime — the sibling of {@link GitExecutor} for the <em>other</em>
- * on-disk mutation qits performs. A worktree is a branch (host-side, in the bare origin) plus a
+ * The per-workspace container runtime — the sibling of {@link GitExecutor} for the <em>other</em>
+ * on-disk mutation qits performs. A workspace is a branch (host-side, in the bare origin) plus a
  * container that owns a clone of it under {@code /workspace}; every action script, dependency
  * install, dev server, daemon and coding-agent command runs inside that container via {@code exec},
  * so nothing untrusted ever touches the host home dir or its credentials.
@@ -21,14 +21,14 @@ public interface ContainerRuntime {
   record ExecResult(int exitCode, String output) {}
 
   /** A discovered workspace container, read back from its {@code qits.*} labels. */
-  record ContainerInfo(String name, String worktreeId, String branch, String parent) {}
+  record ContainerInfo(String name, String workspaceId, String branch, String parent) {}
 
-  /** The deterministic container name for a worktree — no {@code inspect} round-trip needed. */
-  String containerName(String worktreeId, String repoId);
+  /** The deterministic container name for a workspace — no {@code inspect} round-trip needed. */
+  String containerName(String workspaceId, String repoId);
 
   /**
-   * Creates and starts the worktree's container ({@code docker run -d … sleep infinity}) with the
-   * {@code qits.repository}/{@code qits.worktree}/{@code qits.branch}/{@code qits.parent} labels
+   * Creates and starts the workspace's container ({@code docker run -d … sleep infinity}) with the
+   * {@code qits.repository}/{@code qits.workspace}/{@code qits.branch}/{@code qits.parent} labels
    * that startup reconciliation reads back. Returns the container name. Throws on failure.
    *
    * <p>{@code publishPorts} are container ports published to an ephemeral localhost port on the
@@ -39,7 +39,7 @@ public interface ContainerRuntime {
    */
   String run(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       String branch,
       String parent,
       Collection<Integer> publishPorts);
@@ -78,7 +78,7 @@ public interface ContainerRuntime {
   void restart(String container);
 
   /** All workspace containers for a repository, read from their {@code qits.*} labels. */
-  List<ContainerInfo> listWorktreeContainers(String repoId);
+  List<ContainerInfo> listWorkspaceContainers(String repoId);
 
   // --- Daemon sessions: long-runners decoupled from the qits JVM ------------------------------
   //

@@ -8,8 +8,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Produces a {@link WorkspaceContainer} already seeded with the cross-cutting configuration every
- * worktree container must have — the container-creation analog of {@code CodingAgentFactory}.
- * Routing all creation through {@link #forWorktree} makes it structurally impossible to start a
+ * workspace container must have — the container-creation analog of {@code CodingAgentFactory}.
+ * Routing all creation through {@link #forWorkspace} makes it structurally impossible to start a
  * workspace container without the shared credential volume, the {@code qits.*} reconciliation
  * labels, the docker-host alias and the host uid. {@link DockerExecutor#run} is the sole caller; it
  * only prepends the runtime binary + {@code run} and executes the rendered argv.
@@ -22,7 +22,7 @@ public class WorkspaceContainerFactory {
 
   /**
    * The shared named volume holding the coding agent's home ({@code ~/.claude} — the one-time OAuth
-   * login). Mounted read/write into every worktree container so an in-container {@code claude} can
+   * login). Mounted read/write into every workspace container so an in-container {@code claude} can
    * authenticate; blank disables the mount. See {@code docker/workspace/agent-login.sh}.
    */
   @ConfigProperty(name = "qits.workspace.claude-volume", defaultValue = "qits_shared_dot_claude")
@@ -41,24 +41,25 @@ public class WorkspaceContainerFactory {
   }
 
   /**
-   * A {@link WorkspaceContainer} seeded for {@code worktreeId} of {@code repoId}: its deterministic
-   * name, the host uid, the four {@code qits.*} labels startup reconciliation reads back, the
-   * {@code host.docker.internal} alias Linux needs, the shared credential volume (whenever
-   * configured), every declared publish port, the image, and {@code sleep infinity} as the command.
-   * Everything safety-critical is already in place; the caller may keep chaining but need not.
+   * A {@link WorkspaceContainer} seeded for {@code workspaceId} of {@code repoId}: its
+   * deterministic name, the host uid, the four {@code qits.*} labels startup reconciliation reads
+   * back, the {@code host.docker.internal} alias Linux needs, the shared credential volume
+   * (whenever configured), every declared publish port, the image, and {@code sleep infinity} as
+   * the command. Everything safety-critical is already in place; the caller may keep chaining but
+   * need not.
    */
-  public WorkspaceContainer forWorktree(
+  public WorkspaceContainer forWorkspace(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       String branch,
       String parent,
       Collection<Integer> publishPorts) {
     WorkspaceContainer container =
         new WorkspaceContainer()
-            .name(containerName(worktreeId, repoId))
+            .name(containerName(workspaceId, repoId))
             .user(Long.toString(hostUid()))
             .label("qits.repository", repoId)
-            .label("qits.worktree", worktreeId)
+            .label("qits.workspace", workspaceId)
             .label("qits.branch", branch == null ? "" : branch)
             .label("qits.parent", parent == null ? "" : parent)
             // Linux needs this for host.docker.internal to resolve to the docker bridge gateway;
@@ -66,7 +67,8 @@ public class WorkspaceContainerFactory {
             // controls container creation, so it is always set.
             .addHost("host.docker.internal:host-gateway");
     // The shared credential volume so an in-container `claude` can read the one-time OAuth login.
-    // Mounted read/write on every worktree container (agent and daemon share the container), so any
+    // Mounted read/write on every workspace container (agent and daemon share the container), so
+    // any
     // command in the container can read the token off the volume — the accepted trade for the
     // shared-login model (docs/features/2026-07-04_container-agent-sessions.md).
     if (claudeVolume != null && !claudeVolume.isBlank()) {
@@ -86,13 +88,13 @@ public class WorkspaceContainerFactory {
   }
 
   /**
-   * The deterministic container name for a worktree — mirrors {@link
+   * The deterministic container name for a workspace — mirrors {@link
    * ContainerRuntime#containerName}. The short repo prefix keeps the name readable and well under
    * docker's length cap while staying effectively unique per repo.
    */
-  private String containerName(String worktreeId, String repoId) {
+  private String containerName(String workspaceId, String repoId) {
     String shortRepo = repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
-    return "qits-wt-" + worktreeId + "-" + shortRepo;
+    return "qits-ws-" + workspaceId + "-" + shortRepo;
   }
 
   /**

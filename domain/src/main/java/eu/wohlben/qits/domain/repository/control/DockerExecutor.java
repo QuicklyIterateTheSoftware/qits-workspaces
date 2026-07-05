@@ -38,9 +38,10 @@ public class DockerExecutor implements ContainerRuntime {
   @Inject WorkspaceContainerFactory containerFactory;
 
   /**
-   * Create the shared credential volume once at startup so it exists before any worktree container
-   * mounts it — and so an operator can run the one-time login before the first worktree is created.
-   * Best-effort: a missing/broken runtime just logs, exactly like the rest of this executor.
+   * Create the shared credential volume once at startup so it exists before any workspace container
+   * mounts it — and so an operator can run the one-time login before the first workspace is
+   * created. Best-effort: a missing/broken runtime just logs, exactly like the rest of this
+   * executor.
    */
   void onStart(@Observes StartupEvent event) {
     ensureClaudeVolume();
@@ -61,28 +62,30 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public String containerName(String worktreeId, String repoId) {
+  public String containerName(String workspaceId, String repoId) {
     // repoId is a UUID; the short prefix keeps the name readable and well under docker's length
     // cap while still being effectively unique per repo. Prefix keeps the first char alphanumeric.
     String shortRepo = repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
-    return "qits-wt-" + worktreeId + "-" + shortRepo;
+    return "qits-ws-" + workspaceId + "-" + shortRepo;
   }
 
   @Override
   public String run(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       String branch,
       String parent,
       Collection<Integer> publishPorts) {
-    String name = containerName(worktreeId, repoId);
+    String name = containerName(workspaceId, repoId);
     // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
     // qits.* labels, host alias, host uid); this executor only prepends the runtime + `run` verb.
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
     argv.addAll(
-        containerFactory.forWorktree(repoId, worktreeId, branch, parent, publishPorts).toRunArgv());
+        containerFactory
+            .forWorkspace(repoId, workspaceId, branch, parent, publishPorts)
+            .toRunArgv());
 
     ExecResult result = runCapturing(null, argv);
     if (result.exitCode() != 0) {
@@ -164,7 +167,7 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public List<ContainerInfo> listWorktreeContainers(String repoId) {
+  public List<ContainerInfo> listWorkspaceContainers(String repoId) {
     ExecResult result =
         runCapturing(
             null,
@@ -175,8 +178,12 @@ public class DockerExecutor implements ContainerRuntime {
                 "--filter",
                 "label=qits.repository=" + repoId,
                 "--format",
-                "{{.Names}}\t{{.Label \"qits.worktree\"}}\t{{.Label \"qits.branch\"}}\t{{.Label"
-                    + " \"qits.parent\"}}"));
+                // The trailing qits.worktree column is a one-release back-compat read: containers
+                // provisioned before the worktree→workspace rename carry the old label, so a
+                // reconcile can still adopt them instead of forcing a recreate. Remove once no
+                // pre-rename containers remain.
+                "{{.Names}}\t{{.Label \"qits.workspace\"}}\t{{.Label \"qits.branch\"}}\t{{.Label"
+                    + " \"qits.parent\"}}\t{{.Label \"qits.worktree\"}}"));
     if (result.exitCode() != 0) {
       LOG.warnf("Failed to list containers for repo %s: %s", repoId, result.output());
       return List.of();
@@ -188,11 +195,15 @@ public class DockerExecutor implements ContainerRuntime {
       }
       String[] parts = line.split("\t", -1);
       String name = parts.length > 0 ? parts[0] : "";
-      String worktreeId = parts.length > 1 ? parts[1] : "";
+      String workspaceId = parts.length > 1 ? parts[1] : "";
       String branch = parts.length > 2 ? emptyToNull(parts[2]) : null;
       String parent = parts.length > 3 ? emptyToNull(parts[3]) : null;
-      if (!worktreeId.isBlank()) {
-        infos.add(new ContainerInfo(name, worktreeId, branch, parent));
+      String legacyWorkspaceId = parts.length > 4 ? parts[4] : "";
+      if (workspaceId.isBlank()) {
+        workspaceId = legacyWorkspaceId; // pre-rename container labelled qits.worktree
+      }
+      if (!workspaceId.isBlank()) {
+        infos.add(new ContainerInfo(name, workspaceId, branch, parent));
       }
     }
     return infos;

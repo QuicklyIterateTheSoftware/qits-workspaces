@@ -122,7 +122,7 @@ public class WorkspaceRecreateIT {
             .extract()
             .path("project.id");
 
-    // Creating the repository clones the fixture and stands up the main worktree's container by
+    // Creating the repository clones the fixture and stands up the main workspace's container by
     // cloning over the /git server — the first real container clone-over-HTTP round trip.
     repoId =
         given()
@@ -137,19 +137,19 @@ public class WorkspaceRecreateIT {
             .extract()
             .path("repository.id");
 
-    // A worktree forked off master, materialized as a real container cloned from origin.
+    // A workspace forked off master, materialized as a real container cloned from origin.
     given()
         .contentType(ContentType.JSON)
         .body(
-            new WorktreeController.CreateWorktreeRequest(
+            new WorkspaceController.CreateWorkspaceRequest(
                 "recreate-wt", "master", "recreate-branch", null))
         .when()
-        .post("/api/repositories/" + repoId + "/worktrees")
+        .post("/api/repositories/" + repoId + "/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("worktree.runtimeStatus", equalTo("RUNNING"));
+        .body("workspace.runtimeStatus", equalTo("RUNNING"));
 
-    String container = "qits-wt-recreate-wt-" + shortRepo(repoId);
+    String container = "qits-ws-recreate-wt-" + shortRepo(repoId);
 
     // Commit and PUSH work through the container (over the real /git receive-pack)...
     execOk(
@@ -172,7 +172,7 @@ public class WorkspaceRecreateIT {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/repositories/" + repoId + "/worktrees/recreate-wt/ensure-container")
+        .post("/api/repositories/" + repoId + "/workspaces/recreate-wt/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("runtimeStatus", equalTo("RUNNING"));
