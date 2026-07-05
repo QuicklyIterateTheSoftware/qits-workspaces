@@ -21,6 +21,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,6 +51,13 @@ public class DaemonSupervisor {
   private static final Logger LOG = Logger.getLogger(DaemonSupervisor.class);
 
   private static final long MAX_RESTART_BACKOFF_MILLIS = 30_000;
+
+  /**
+   * Env var stamped on every daemon process (and inherited by its forks) so {@link #reapStragglers}
+   * can identify and kill leftovers from a previous run by marker, even ones that escaped the
+   * launched process group.
+   */
+  private static final String DAEMON_MARKER_ENV = "QITS_DAEMON_ID";
 
   /** One supervised daemon in one worktree. Mutated only under the supervisor monitor. */
   private static final class Instance {
@@ -214,13 +222,28 @@ public class DaemonSupervisor {
 
     String publicBase =
         daemon.httpPort() != null ? DaemonProxyPath.base(instance.worktreeId, daemon.id()) : null;
+
+    // Reap any straggler from a previous run before (re)launching. A stop group-kills the launched
+    // process group, but a child that escaped it stays alive — notably Quarkus dev mode's forked
+    // application JVM, which keeps binding httpPort and wedges the next start in STARTING forever
+    // ("Port 8080 seems to be in use"). Every daemon process is tagged QITS_DAEMON_ID=<id> (below),
+    // inherited by its forks, so we can find and kill leftovers by marker regardless of process
+    // group. Harmless on a clean first start (nothing matches). See
+    // docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
+    reapStragglers(instance);
+
+    // Inject the reap marker last-wins-safe: it rides in the environment overlay so the launched
+    // shell and everything it forks carry it in /proc/<pid>/environ.
+    Map<String, String> environment = new HashMap<>(daemon.environment());
+    environment.put(DAEMON_MARKER_ENV, daemon.id());
+
     CommandDto command =
         commandService.launchDaemon(
             instance.repoId,
             instance.worktreeId,
             daemon.name(),
             daemon.startScript(),
-            daemon.environment(),
+            environment,
             daemon.otel(),
             publicBase,
             (commandId, exitCode, terminatedManually) ->
@@ -329,6 +352,64 @@ public class DaemonSupervisor {
       }
     }
     return true;
+  }
+
+  /**
+   * Kill anything in the worktree's container left over from a previous run that would sabotage
+   * this launch — chiefly Quarkus dev mode's forked application JVM, which escapes the launched
+   * process group (so a stop's {@code kill -- -pgid} misses it), keeps binding the http port, and
+   * wedges the next start in STARTING forever ("Port 8080 seems to be in use"). Two selectors, both
+   * run before every (re)launch:
+   *
+   * <ul>
+   *   <li><b>By marker</b> — every daemon process is tagged {@link #DAEMON_MARKER_ENV}={@code <id>}
+   *       (inherited by its forks), so this daemon's own escaped children are found via {@code
+   *       /proc/<pid>/environ} regardless of process group. The per-daemon UUID keeps the scan off
+   *       any other process, and the scanning shell carries no marker so it can't kill itself.
+   *   <li><b>By port</b> — for a web-viewable daemon, whatever currently listens on {@code
+   *       httpPort} (resolved through {@code /proc/net/tcp}) is killed too. This catches a holder
+   *       the marker can't: one from before this mechanism existed, or a run the supervisor lost
+   *       track of (e.g. across a dev-mode hot reload). The container is per-worktree, so only this
+   *       daemon should ever bind that port.
+   * </ul>
+   *
+   * <p>Best-effort: a failure here just leaves the old start-collision behavior, so it never blocks
+   * a launch. See docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
+   */
+  private void reapStragglers(Instance instance) {
+    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    // The daemon id is a server-generated UUID (hex + hyphens); httpPort is a validated integer —
+    // both safe to interpolate into the shell line.
+    // -z: environ is NUL-separated, so each KEY=VALUE is one record; -F: fixed string, exact match.
+    String marker = DAEMON_MARKER_ENV + "=" + instance.daemon.id();
+    StringBuilder script = new StringBuilder();
+    script
+        .append("for p in /proc/[0-9]*; do grep -qzF '")
+        .append(marker)
+        .append("' \"$p/environ\" 2>/dev/null && kill -9 \"${p#/proc/}\" 2>/dev/null; done; ");
+    Integer httpPort = instance.daemon.httpPort();
+    if (httpPort != null) {
+      // Find the listener on httpPort: its local-address column in /proc/net/tcp{,6} ends in the
+      // uppercase-hex port and its state is 0A (LISTEN); take those socket inodes, then map each to
+      // the owning pid by scanning /proc/<pid>/fd for a matching socket:[inode] symlink, and kill.
+      String hex = String.format(":%04X", httpPort);
+      script
+          .append("inodes=$(awk -v h='")
+          .append(hex)
+          .append("' '$4==\"0A\" && $2 ~ h\"$\" {print $10}' /proc/net/tcp /proc/net/tcp6")
+          .append(" 2>/dev/null | sort -u); ")
+          .append("for p in /proc/[0-9]*; do for fd in \"$p\"/fd/*; do")
+          .append(" t=$(readlink \"$fd\" 2>/dev/null) || continue; case \"$t\" in socket:\\[*\\])")
+          .append(" ino=${t#socket:[}; ino=${ino%]};")
+          .append(" for w in $inodes; do [ \"$ino\" = \"$w\" ] &&")
+          .append(" kill -9 \"${p#/proc/}\" 2>/dev/null; done;; esac; done; done; ");
+    }
+    script.append("true");
+    try {
+      containers.exec(container, null, Map.of(), "bash", "-c", script.toString());
+    } catch (RuntimeException e) {
+      LOG.debugf(e, "Straggler reap failed for daemon %s", instance.daemon.id());
+    }
   }
 
   private static void closeTails(Instance instance) {
