@@ -259,7 +259,8 @@ public class WorkspaceService {
     if (wt != null) {
       // The working tree lives in the container; a dirty tree or unpushed commits (which the
       // origin-side ahead/behind above cannot see) both mean cleanup could destroy work.
-      if (!isWorkspaceClean(repoId, wt) || !isFullyPushed(repoId, originPath, wt)) {
+      if (!isWorkspaceClean(repoId, wt)
+          || !isFullyPushed(repoId, originPath, wt.workspaceId, wt.branch)) {
         return false;
       }
     }
@@ -272,12 +273,12 @@ public class WorkspaceService {
    * commits, so without this a "safe" cleanup could delete unpushed work. A missing container means
    * nothing is left to lose, so treat it as pushed.
    */
-  private boolean isFullyPushed(String repoId, Path originPath, Workspace wt) {
-    String container = containers.containerName(wt.workspaceId, repoId);
+  boolean isFullyPushed(String repoId, Path originPath, String workspaceId, String branch) {
+    String container = containers.containerName(workspaceId, repoId);
     if (!containers.exists(container)) {
       return true;
     }
-    if (wt.branch == null || wt.branch.isBlank()) {
+    if (branch == null || branch.isBlank()) {
       return true;
     }
     ContainerRuntime.ExecResult head =
@@ -287,7 +288,7 @@ public class WorkspaceService {
     }
     try {
       String originSha =
-          git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/" + wt.branch).trim();
+          git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/" + branch).trim();
       return head.output().trim().equals(originSha);
     } catch (Exception e) {
       return false;
@@ -694,7 +695,7 @@ public class WorkspaceService {
   /**
    * Best-effort push of a workspace's branch to origin from inside its container (no-op if absent).
    */
-  private void pushBranch(String repoId, String workspaceId, String branch) {
+  void pushBranch(String repoId, String workspaceId, String branch) {
     String container = containers.containerName(workspaceId, repoId);
     if (branch == null || branch.isBlank() || !containers.exists(container)) {
       return;
