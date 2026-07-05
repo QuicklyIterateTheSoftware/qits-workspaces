@@ -26,6 +26,7 @@ public final class WorkspaceContainer {
   private String user;
   private final Map<String, String> labels = new LinkedHashMap<>();
   private final List<String> addHosts = new ArrayList<>();
+  private final Map<String, String> env = new LinkedHashMap<>();
   private final List<String[]> volumes = new ArrayList<>(); // {volumeName, mountPath}
   private final List<Integer> publishPorts = new ArrayList<>();
   private String image;
@@ -49,6 +50,16 @@ public final class WorkspaceContainer {
   /** Add a {@code --add-host=<hostSpec>} entry (e.g. {@code host.docker.internal:host-gateway}). */
   public WorkspaceContainer addHost(String hostSpec) {
     this.addHosts.add(hostSpec);
+    return this;
+  }
+
+  /**
+   * Set a container environment variable ({@code -e key=value}). Applied to the container's main
+   * process <em>and</em> inherited by every {@code docker exec} session — so it is the seam for
+   * config that must be present on every command in the container, not just the entrypoint.
+   */
+  public WorkspaceContainer env(String key, String value) {
+    this.env.put(key, value == null ? "" : value);
     return this;
   }
 
@@ -111,6 +122,10 @@ public final class WorkspaceContainer {
     }
     for (String host : addHosts) {
       argv.add("--add-host=" + host);
+    }
+    for (Map.Entry<String, String> variable : env.entrySet()) {
+      argv.add("-e");
+      argv.add(variable.getKey() + "=" + variable.getValue());
     }
     for (String[] volume : volumes) {
       argv.add("-v");

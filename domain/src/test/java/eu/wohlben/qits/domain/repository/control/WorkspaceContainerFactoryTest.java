@@ -31,6 +31,9 @@ class WorkspaceContainerFactoryTest {
 
     // The guarantee: the shared credential volume is mounted on every container.
     assertSequence(argv, "-v", "qits_shared_dot_claude:/claude-home");
+    // ...and every in-container `claude` is pointed at it regardless of HOME, so a login persists
+    // across containers even for ad-hoc runs.
+    assertSequence(argv, "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude");
     // The qits.* reconciliation labels.
     assertSequence(argv, "--label", "qits.repository=repo12345678abc");
     assertSequence(argv, "--label", "qits.worktree=work");
@@ -56,6 +59,8 @@ class WorkspaceContainerFactoryTest {
         f.forWorktree("repo12345678abc", "work", "main", null, List.of()).toRunArgv();
 
     assertFalse(argv.contains("-v"), argv.toString());
+    // With no shared volume there is nothing to point CLAUDE_CONFIG_DIR at, so it is omitted too.
+    assertFalse(argv.contains("CLAUDE_CONFIG_DIR=/claude-home/.claude"), argv.toString());
     // Everything else still present, incl. an empty parent label for the null parent.
     assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
     assertSequence(argv, "--label", "qits.repository=repo12345678abc");

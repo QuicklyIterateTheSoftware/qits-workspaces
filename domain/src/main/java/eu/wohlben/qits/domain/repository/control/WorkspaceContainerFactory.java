@@ -71,6 +71,15 @@ public class WorkspaceContainerFactory {
     // shared-login model (docs/features/2026-07-04_container-agent-sessions.md).
     if (claudeVolume != null && !claudeVolume.isBlank()) {
       container.volume(claudeVolume, claudeMount);
+      // Point every in-container `claude` at the shared credential dir regardless of HOME. The
+      // image
+      // sets HOME=/workspace (container-local), so without this a `claude` that doesn't override
+      // HOME
+      // (an ad-hoc bash `claude`, or any missed code path) would store its login under
+      // /workspace/.claude — invisible to other containers. As a container env it is inherited by
+      // every `docker exec`, so cross-container persistence no longer relies on each launcher
+      // remembering the HOME overlay.
+      container.env("CLAUDE_CONFIG_DIR", claudeMount + "/.claude");
     }
     // Ephemeral localhost publishing for web-viewable daemon ports (see ContainerRuntime#run).
     return container.publishPorts(publishPorts).image(image).command("sleep", "infinity");

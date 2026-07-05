@@ -57,6 +57,15 @@ class WorkspaceContainerTest {
   }
 
   @Test
+  void envRendersAsDockerEnvFlagsInInsertionOrder() {
+    List<String> argv =
+        new WorkspaceContainer().image("img").env("A", "1").env("B", "2").toRunArgv();
+
+    // -e A=1 then -e B=2, before the image.
+    assertEquals(List.of("-d", "--init", "-e", "A=1", "-e", "B=2", "img"), argv);
+  }
+
+  @Test
   void publishPortsAddsOneEntryPerPort() {
     List<String> argv =
         new WorkspaceContainer().image("img").publishPorts(List.of(8080, 5173)).toRunArgv();
