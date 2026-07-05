@@ -198,6 +198,124 @@ public class DockerExecutor implements ContainerRuntime {
     return infos;
   }
 
+  // --- Daemon sessions (tmux) -----------------------------------------------------------------
+  //
+  // Each daemon runs in a detached tmux session on a dedicated socket (-L qits-<id>): a fresh
+  // server
+  // per daemon inherits this exec's -e env at first start with no shared-server staleness, and
+  // isolates daemons from one another. `pipe-pane` mirrors the pane to a logfile qits tails. Paths
+  // derive from the daemon id (a server-generated UUID — safe to interpolate); the startScript is
+  // never interpolated (it rides as the positional arg $1 to avoid quoting/injection issues).
+
+  /** Container-side run directory for daemon session state (logs, scripts, exit codes). */
+  private static final String DAEMON_DIR = "/tmp/qits-daemons";
+
+  private static String socket(String daemonId) {
+    return "qits-" + daemonId;
+  }
+
+  @Override
+  public String daemonLogPath(String daemonId) {
+    return DAEMON_DIR + "/" + daemonId + ".log";
+  }
+
+  @Override
+  public void startDaemon(
+      String container, String daemonId, String script, Map<String, String> env) {
+    String sock = socket(daemonId);
+    String base = DAEMON_DIR + "/" + daemonId;
+    // $1 is the untrusted startScript (written to a file, then run by the pane); everything else is
+    // built from the safe id. The pane records its exit code so daemonExitCode can tell a clean
+    // stop
+    // from a crash. `new-session … \; pipe-pane` is one atomic tmux call so the pane's very first
+    // line is mirrored (a separate pipe-pane races the pane's first output and would drop it).
+    String launcher =
+        "set -e; mkdir -p "
+            + DAEMON_DIR
+            + "; printf '%s\\n' \"$1\" > "
+            + base
+            + ".sh; tmux -L "
+            + sock
+            + " kill-server 2>/dev/null || true; : > "
+            + base
+            + ".log; rm -f "
+            + base
+            + ".exit; tmux -L "
+            + sock
+            + " new-session -d -s main -x 200 -y 50 -c /workspace \"bash "
+            + base
+            + ".sh; echo \\$? > "
+            + base
+            + ".exit\" \\; pipe-pane -t main -o \"cat >> "
+            + base
+            + ".log\"";
+    ExecResult result =
+        exec(container, "/workspace", env, "bash", "-lc", launcher, "qits-daemon", script);
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start daemon session " + daemonId + ": " + result.output());
+    }
+  }
+
+  @Override
+  public boolean daemonAlive(String container, String daemonId) {
+    return exec(
+                container,
+                null,
+                Map.of(),
+                "tmux",
+                "-L",
+                socket(daemonId),
+                "has-session",
+                "-t",
+                "main")
+            .exitCode()
+        == 0;
+  }
+
+  @Override
+  public Integer daemonExitCode(String container, String daemonId) {
+    ExecResult r = exec(container, null, Map.of(), "cat", DAEMON_DIR + "/" + daemonId + ".exit");
+    if (r.exitCode() != 0) {
+      return null;
+    }
+    try {
+      return Integer.valueOf(r.output().trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  @Override
+  public boolean signalDaemon(String container, String daemonId, String signal) {
+    String sock = socket(daemonId);
+    // The pane leader is the process-group leader (tmux #{pane_pid}); signal the whole group so a
+    // compound script's children get it too. The signal name is a controlled value.
+    String cmd =
+        "p=$(tmux -L "
+            + sock
+            + " list-panes -t main -F '#{pane_pid}' 2>/dev/null); [ -n \"$p\" ] || exit 1;"
+            + " kill -s "
+            + signal
+            + " -- -\"$p\"";
+    return exec(container, null, Map.of(), "sh", "-c", cmd).exitCode() == 0;
+  }
+
+  @Override
+  public void killDaemon(String container, String daemonId) {
+    String sock = socket(daemonId);
+    // SIGKILL the pane's process group, then tear the server down. Both best-effort.
+    String cmd =
+        "p=$(tmux -L "
+            + sock
+            + " list-panes -t main -F '#{pane_pid}' 2>/dev/null);"
+            + " [ -n \"$p\" ] && kill -s KILL -- -\"$p\" 2>/dev/null;"
+            + " tmux -L "
+            + sock
+            + " kill-server 2>/dev/null; true";
+    exec(container, null, Map.of(), "sh", "-c", cmd);
+  }
+
   private static String emptyToNull(String s) {
     return s == null || s.isBlank() ? null : s;
   }

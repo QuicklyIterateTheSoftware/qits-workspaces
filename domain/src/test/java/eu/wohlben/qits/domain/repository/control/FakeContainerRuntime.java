@@ -189,6 +189,127 @@ public class FakeContainerRuntime implements ContainerRuntime {
     return infos;
   }
 
+  // --- Daemon sessions: emulate the tmux model with a plain detached (setsid) host process
+  // --------
+  //
+  // No tmux on the test host: a daemon session is a setsid'd shell (new session => group-killable
+  // and
+  // detached, so it survives like the real tmux session) that runs the script with output
+  // redirected
+  // to a host logfile and its exit code recorded. State lives on disk (pidfile/exitfile), so a
+  // fresh
+  // supervisor can reconcile a still-alive daemon exactly like it reads back tmux has-session.
+
+  private Path daemonRunDir() {
+    return Path.of(dataDir, ".qits-daemons").toAbsolutePath();
+  }
+
+  @Override
+  public String daemonLogPath(String daemonId) {
+    return daemonRunDir().resolve(daemonId + ".log").toString();
+  }
+
+  @Override
+  public void startDaemon(
+      String container, String daemonId, String script, Map<String, String> env) {
+    Info info = byName.get(container);
+    Path wd = info == null ? null : info.dir();
+    try {
+      Path dir = daemonRunDir();
+      Files.createDirectories(dir);
+      Path sh = dir.resolve(daemonId + ".sh");
+      Files.writeString(sh, script);
+      String log = dir.resolve(daemonId + ".log").toString();
+      String pid = dir.resolve(daemonId + ".pid").toString();
+      String exit = dir.resolve(daemonId + ".exit").toString();
+      Files.deleteIfExists(Path.of(pid));
+      Files.deleteIfExists(Path.of(exit));
+      Files.writeString(Path.of(log), "");
+      // setsid => the shell is a session/group leader (kill -- -pgid reaches its children) and
+      // detaches from this JVM (survives like the tmux session). It records its own pid (the group
+      // leader) then runs the script, mirroring output to the logfile and recording the exit code.
+      String inner =
+          "echo $$ > '"
+              + pid
+              + "'; bash '"
+              + sh
+              + "' > '"
+              + log
+              + "' 2>&1; echo $? > '"
+              + exit
+              + "'";
+      ProcessBuilder pb = new ProcessBuilder("setsid", "bash", "-lc", inner);
+      if (wd != null) {
+        pb.directory(wd.toFile());
+      }
+      if (env != null) {
+        env.forEach((k, v) -> pb.environment().put(k, v == null ? "" : v));
+      }
+      pb.redirectOutput(java.lang.ProcessBuilder.Redirect.DISCARD);
+      pb.redirectError(java.lang.ProcessBuilder.Redirect.DISCARD);
+      pb.start();
+      // The pidfile is written by the detached shell; wait briefly so daemonAlive/stop see it.
+      long deadline = System.currentTimeMillis() + 2000;
+      while (System.currentTimeMillis() < deadline && !Files.exists(Path.of(pid))) {
+        Thread.sleep(20);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    } catch (Exception e) {
+      throw new RuntimeException("fake startDaemon failed for " + daemonId, e);
+    }
+  }
+
+  private Long daemonPid(String daemonId) {
+    Path pid = daemonRunDir().resolve(daemonId + ".pid");
+    try {
+      if (!Files.exists(pid)) {
+        return null;
+      }
+      String raw = Files.readString(pid).trim();
+      return raw.isEmpty() ? null : Long.parseLong(raw);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  @Override
+  public boolean daemonAlive(String container, String daemonId) {
+    Long pid = daemonPid(daemonId);
+    return pid != null && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+  }
+
+  @Override
+  public Integer daemonExitCode(String container, String daemonId) {
+    Path exit = daemonRunDir().resolve(daemonId + ".exit");
+    try {
+      if (!Files.exists(exit)) {
+        return null;
+      }
+      return Integer.valueOf(Files.readString(exit).trim());
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  @Override
+  public boolean signalDaemon(String container, String daemonId, String signal) {
+    Long pid = daemonPid(daemonId);
+    if (pid == null) {
+      return false;
+    }
+    return runCapturing(List.of("kill", "-s", signal, "--", "-" + pid)).exitCode() == 0;
+  }
+
+  @Override
+  public void killDaemon(String container, String daemonId) {
+    Long pid = daemonPid(daemonId);
+    if (pid != null) {
+      runCapturing(List.of("kill", "-s", "KILL", "--", "-" + pid));
+    }
+  }
+
   private String rewriteWorkdir(String workdir, Path dir) {
     if (workdir == null) {
       return null;

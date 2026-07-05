@@ -79,4 +79,48 @@ public interface ContainerRuntime {
 
   /** All workspace containers for a repository, read from their {@code qits.*} labels. */
   List<ContainerInfo> listWorktreeContainers(String repoId);
+
+  // --- Daemon sessions: long-runners decoupled from the qits JVM ------------------------------
+  //
+  // A daemon must outlive a qits restart and stay observable across one. These methods run it as a
+  // detached session inside the container (a tmux session for docker; a plain setsid process for
+  // the
+  // test fake) whose combined output is mirrored to {@link #daemonLogPath} — the durable line
+  // stream
+  // qits tails for the ready-pattern, observers, and per-line persistence. Liveness and stop go
+  // through the session, not a host-side client, so killing qits leaves the daemon running and a
+  // fresh qits reconciles it from {@link #daemonAlive}.
+
+  /**
+   * Launch {@code script} as a detached daemon session named by {@code daemonId} inside {@code
+   * container}, running on a PTY in {@code /workspace}. {@code env} is applied to the session and
+   * inherited by everything it forks. Combined stdout/stderr is mirrored to {@link #daemonLogPath};
+   * the session's exit code (when it ends on its own) is recorded for {@link #daemonExitCode}. A
+   * stale same-id session is cleared first. Best-effort — throws only on a runtime failure.
+   */
+  void startDaemon(String container, String daemonId, String script, Map<String, String> env);
+
+  /** Whether the daemon session named {@code daemonId} is currently running. */
+  boolean daemonAlive(String container, String daemonId);
+
+  /**
+   * The exit code recorded when the daemon session ended on its own, or null if it is still running
+   * or was killed before recording one (a kill is treated as a failure by the caller).
+   */
+  Integer daemonExitCode(String container, String daemonId);
+
+  /**
+   * Deliver {@code signal} (e.g. {@code TERM}) to the daemon session's process group — the graceful
+   * half of a stop. Returns false if no session is running.
+   */
+  boolean signalDaemon(String container, String daemonId, String signal);
+
+  /** Force-stop the daemon session: SIGKILL its process group and tear the session down. */
+  void killDaemon(String container, String daemonId);
+
+  /**
+   * The container-side path of the daemon's mirrored combined-output log — the {@code tail -F}
+   * target qits follows for the ready-pattern, observers, and persistence.
+   */
+  String daemonLogPath(String daemonId);
 }
