@@ -12,7 +12,7 @@ import org.jboss.logging.Logger;
 
 /**
  * The agent sink: turns a daemon event into a {@code [daemon:<name>]}-prefixed user message on the
- * stdin of the newest running stream-json chat in the same worktree (the server-side twin of the
+ * stdin of the newest running stream-json chat in the same workspace (the server-side twin of the
  * frontend's newest-running-chat rule). The message rides the chat's normal unified stream, so it
  * shows in the transcript and persists like any user turn. With no running chat it is spooled and
  * delivered when the next session starts. Runs on supervisor/reader threads, hence the explicit
@@ -35,7 +35,7 @@ public class DaemonAgentNotifier {
     String message = format(event);
     String chatId =
         commandRepository
-            .findRunningByKindAndWorktree(CommandKind.CHAT, event.repoId(), event.worktreeId())
+            .findRunningByKindAndWorkspace(CommandKind.CHAT, event.repoId(), event.workspaceId())
             .stream()
             .map(command -> command.id)
             // The DB row can outlive the process (or lag its start); the registry is the truth.
@@ -46,7 +46,7 @@ public class DaemonAgentNotifier {
       LOG.debugf("Daemon event delivered to chat %s: %s", chatId, event.summary());
       return;
     }
-    spool.add(event.repoId(), event.worktreeId(), message);
+    spool.add(event.repoId(), event.workspaceId(), message);
   }
 
   /** Visible for the spool path and tests: the exact message injected into the conversation. */

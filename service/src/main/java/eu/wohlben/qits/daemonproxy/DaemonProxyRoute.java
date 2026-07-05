@@ -14,7 +14,7 @@ import jakarta.inject.Inject;
 import java.util.Optional;
 
 /**
- * The daemon web-view reverse proxy: {@code /daemon/{worktreeId}/{daemonId}/*} on the qits origin
+ * The daemon web-view reverse proxy: {@code /daemon/{workspaceId}/{daemonId}/*} on the qits origin
  * forwards to the daemon's dev server on its published localhost port — verbatim passthrough, no
  * prefix stripping, no rewriting. The dev server itself serves under the prefix (it was launched
  * with {@code QITS_PUBLIC_BASE}, see {@link DaemonProxyPath}), so assets and the HMR websocket stay
@@ -52,7 +52,7 @@ public class DaemonProxyRoute {
       respond(rc, 404, "No daemon here.");
       return;
     }
-    String worktreeId = segments[0];
+    String workspaceId = segments[0];
     String daemonId = segments[1];
 
     if (segments.length == 2) {
@@ -70,7 +70,7 @@ public class DaemonProxyRoute {
     // can be held for the duration of a daemon launch); the proxy resumes it when forwarding.
     rc.request().pause();
     rc.vertx()
-        .executeBlocking(() -> supervisor.proxyTarget(worktreeId, daemonId))
+        .executeBlocking(() -> supervisor.proxyTarget(workspaceId, daemonId))
         .onFailure(e -> respond(rc, 502, "Daemon lookup failed."))
         .onSuccess(target -> route(rc, target));
   }
@@ -87,14 +87,14 @@ public class DaemonProxyRoute {
           respond(
               rc,
               502,
-              "The daemon is not running (" + status + ") — start it from the worktree page.");
+              "The daemon is not running (" + status + ") — start it from the workspace page.");
       case READY, DEGRADED -> {
         Integer hostPort = target.get().hostPort();
         if (hostPort == null) {
           respond(
               rc,
               502,
-              "The worktree container does not publish the daemon's port — recreate the"
+              "The workspace container does not publish the daemon's port — recreate the"
                   + " container to pick it up.");
           return;
         }

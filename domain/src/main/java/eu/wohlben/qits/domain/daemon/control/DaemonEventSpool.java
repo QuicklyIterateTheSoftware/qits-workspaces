@@ -8,7 +8,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Per-worktree buffer of agent-bound daemon messages that had no running chat session to land in.
+ * Per-workspace buffer of agent-bound daemon messages that had no running chat session to land in.
  * {@code AgentLaunchService} drains it when a chat starts, so events that happened while nobody was
  * listening still reach the next session as seed context. In-memory, bounded, best-effort — the
  * durable trail is the event feed and the daemon command logs.
@@ -16,23 +16,24 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class DaemonEventSpool {
 
-  private static final int MAX_PER_WORKTREE = 50;
+  private static final int MAX_PER_WORKSPACE = 50;
 
   private final Map<String, Deque<String>> spooled = new ConcurrentHashMap<>();
 
-  public void add(String repoId, String worktreeId, String message) {
-    Deque<String> queue = spooled.computeIfAbsent(key(repoId, worktreeId), k -> new ArrayDeque<>());
+  public void add(String repoId, String workspaceId, String message) {
+    Deque<String> queue =
+        spooled.computeIfAbsent(key(repoId, workspaceId), k -> new ArrayDeque<>());
     synchronized (queue) {
       queue.addLast(message);
-      while (queue.size() > MAX_PER_WORKTREE) {
+      while (queue.size() > MAX_PER_WORKSPACE) {
         queue.removeFirst();
       }
     }
   }
 
-  /** Removes and returns everything spooled for the worktree, oldest first. */
-  public List<String> drain(String repoId, String worktreeId) {
-    Deque<String> queue = spooled.remove(key(repoId, worktreeId));
+  /** Removes and returns everything spooled for the workspace, oldest first. */
+  public List<String> drain(String repoId, String workspaceId) {
+    Deque<String> queue = spooled.remove(key(repoId, workspaceId));
     if (queue == null) {
       return List.of();
     }
@@ -41,7 +42,7 @@ public class DaemonEventSpool {
     }
   }
 
-  private static String key(String repoId, String worktreeId) {
-    return repoId + "/" + worktreeId;
+  private static String key(String repoId, String workspaceId) {
+    return repoId + "/" + workspaceId;
   }
 }

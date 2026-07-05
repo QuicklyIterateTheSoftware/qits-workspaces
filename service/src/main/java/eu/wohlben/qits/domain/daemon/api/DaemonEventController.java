@@ -17,9 +17,9 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * The durable daemon-event feed (replacing the old in-memory per-worktree endpoint): paginated,
- * newest first, filterable by worktree, severity, time, and source. Events survive JVM restarts, so
- * last night's crash and what the classifier saw remain inspectable.
+ * The durable daemon-event feed (replacing the old in-memory per-workspace endpoint): paginated,
+ * newest first, filterable by workspace, severity, time, and source. Events survive JVM restarts,
+ * so last night's crash and what the classifier saw remain inspectable.
  */
 @Path("/daemon-events")
 @Produces(MediaType.APPLICATION_JSON)
@@ -35,13 +35,13 @@ public class DaemonEventController {
   @GET
   public ListDaemonEventsRequest.Response list(
       @QueryParam("repoId") String repoId,
-      @QueryParam("worktreeId") String worktreeId,
+      @QueryParam("workspaceId") String workspaceId,
       @QueryParam("severity") DaemonEventSeverity severity,
       @QueryParam("since") Instant since,
       @QueryParam("source") String source,
       @QueryParam("page") @DefaultValue("0") @Min(0) int page,
       @QueryParam("pageSize") @DefaultValue("50") @Min(1) @Max(500) int pageSize) {
     return new ListDaemonEventsRequest.Response(
-        daemonEventService.query(repoId, worktreeId, severity, since, source, page, pageSize));
+        daemonEventService.query(repoId, workspaceId, severity, since, source, page, pageSize));
   }
 }

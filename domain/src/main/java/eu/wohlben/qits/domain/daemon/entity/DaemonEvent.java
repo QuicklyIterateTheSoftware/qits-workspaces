@@ -29,8 +29,8 @@ public class DaemonEvent extends PanacheEntityBase {
   @Column(name = "repo_id", nullable = false)
   public String repoId;
 
-  @Column(name = "worktree_id", nullable = false)
-  public String worktreeId;
+  @Column(name = "workspace_id", nullable = false)
+  public String workspaceId;
 
   @Column(name = "daemon_id", nullable = false)
   public String daemonId;
@@ -58,7 +58,7 @@ public class DaemonEvent extends PanacheEntityBase {
   @Column(name = "command_id")
   public String commandId;
 
-  /** {@code "output"} or the tailed file's worktree-relative path; null on plain transitions. */
+  /** {@code "output"} or the tailed file's workspace-relative path; null on plain transitions. */
   @Column(length = 1024)
   public String source;
 

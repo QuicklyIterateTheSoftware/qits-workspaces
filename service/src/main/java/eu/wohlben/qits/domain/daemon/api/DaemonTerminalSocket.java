@@ -38,7 +38,7 @@ import org.jboss.logging.Logger;
  * size; the server sends raw PTY output as text frames. Cross-origin handshakes are rejected
  * globally by {@code SameOriginUpgradeCheck}.
  */
-@WebSocket(path = "/api/terminal/daemons/{repoId}/{worktreeId}/{daemonId}")
+@WebSocket(path = "/api/terminal/daemons/{repoId}/{workspaceId}/{daemonId}")
 public class DaemonTerminalSocket {
 
   private static final Logger LOG = Logger.getLogger(DaemonTerminalSocket.class);
@@ -56,10 +56,10 @@ public class DaemonTerminalSocket {
   @RunOnVirtualThread
   public void onOpen(
       @PathParam("repoId") String repoId,
-      @PathParam("worktreeId") String worktreeId,
+      @PathParam("workspaceId") String workspaceId,
       @PathParam("daemonId") String daemonId,
       WebSocketConnection connection) {
-    String container = containers.containerName(worktreeId, repoId);
+    String container = containers.containerName(workspaceId, repoId);
     if (!containers.exists(container) || !containers.daemonAlive(container, daemonId)) {
       connection.sendTextAndAwait("\r\n\u001b[33mThis daemon is not running.\u001b[0m\r\n");
       connection.closeAndAwait();

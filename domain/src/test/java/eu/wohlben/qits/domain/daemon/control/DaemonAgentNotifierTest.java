@@ -13,7 +13,7 @@ import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
-import eu.wohlben.qits.domain.repository.control.WorktreeService;
+import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -50,7 +50,7 @@ public class DaemonAgentNotifierTest {
 
   @Inject RepositoryService repositoryService;
 
-  @Inject WorktreeService worktreeService;
+  @Inject WorkspaceService workspaceService;
 
   @Inject CommandService commandService;
 
@@ -60,11 +60,11 @@ public class DaemonAgentNotifierTest {
 
   @Inject DaemonEventSpool spool;
 
-  private String repoWithWorktree() throws Exception {
+  private String repoWithWorkspace() throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Notify Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    worktreeService.createWorktree(repo.id, "work", "master", "work");
+    workspaceService.createWorkspace(repo.id, "work", "master", "work");
     return repo.id;
   }
 
@@ -89,7 +89,7 @@ public class DaemonAgentNotifierTest {
 
   @Test
   public void deliversToTheNewestRunningChatAsAPrefixedUserMessage() throws Exception {
-    String repoId = repoWithWorktree();
+    String repoId = repoWithWorkspace();
     // A stand-in chat process that stays alive with stdin open (no real claude in tests).
     CommandDto chat =
         commandService.launchChat(repoId, "work", "Claude chat", "sleep 10", Map.of());
@@ -113,7 +113,7 @@ public class DaemonAgentNotifierTest {
 
   @Test
   public void spoolsWhenNoChatIsRunning() throws Exception {
-    String repoId = repoWithWorktree();
+    String repoId = repoWithWorkspace();
 
     notifier.deliver(event(repoId, "crashed (exit 1)", "boom"));
 

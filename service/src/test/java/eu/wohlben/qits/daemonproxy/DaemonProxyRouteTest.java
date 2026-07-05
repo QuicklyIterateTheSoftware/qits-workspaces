@@ -11,7 +11,7 @@ import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
-import eu.wohlben.qits.domain.repository.control.WorktreeService;
+import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -68,7 +68,7 @@ public class DaemonProxyRouteTest {
 
   @Inject RepositoryService repositoryService;
 
-  @Inject WorktreeService worktreeService;
+  @Inject WorkspaceService workspaceService;
 
   @Inject RepositoryDaemonService repositoryDaemonService;
 
@@ -107,7 +107,7 @@ public class DaemonProxyRouteTest {
     }
   }
 
-  /** Definition before worktree, so the (fake) container "publishes" the port at creation. */
+  /** Definition before workspace, so the (fake) container "publishes" the port at creation. */
   private Setup setUpReadyDaemon(String script, String readyPattern) throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Proxy Project", null);
@@ -128,7 +128,7 @@ public class DaemonProxyRouteTest {
                 null,
                 null)
             .id;
-    worktreeService.createWorktree(repo.id, "work", "master", "work");
+    workspaceService.createWorkspace(repo.id, "work", "master", "work");
     supervisor.start(repo.id, "work", daemonId);
     return new Setup(repo.id, daemonId);
   }
@@ -221,7 +221,7 @@ public class DaemonProxyRouteTest {
   @Test
   public void unknownKeysAnswer404WithoutTouchingAnyOrigin() {
     int hitsBefore = echoHits.get();
-    given().get("/daemon/no-such-worktree/no-such-daemon/index.html").then().statusCode(404);
+    given().get("/daemon/no-such-workspace/no-such-daemon/index.html").then().statusCode(404);
     given().get("/daemon/onlyonesegment").then().statusCode(404);
     given().get("/daemon/").then().statusCode(404);
     assertEquals(hitsBefore, echoHits.get(), "unknown keys must never reach an origin");

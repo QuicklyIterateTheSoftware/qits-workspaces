@@ -13,31 +13,31 @@ import jakarta.ws.rs.core.MediaType;
 import java.util.List;
 
 /**
- * The runtime surface of daemons in one worktree: the effective daemons with their supervised
+ * The runtime surface of daemons in one workspace: the effective daemons with their supervised
  * status (all of them, running or not — the everything-visible convention) and start/stop. The
  * event feed moved to the durable {@code /daemon-events} endpoint.
  */
-@Path("/repositories/{repoId}/worktrees/{worktreeId}/daemons")
+@Path("/repositories/{repoId}/workspaces/{workspaceId}/daemons")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
-public class WorktreeDaemonController {
+public class WorkspaceDaemonController {
 
   @Inject DaemonSupervisor daemonSupervisor;
 
-  public static record ListWorktreeDaemonsRequest() {
+  public static record ListWorkspaceDaemonsRequest() {
     public record Response(List<Entry> entries) {
       public record Entry(DaemonInstanceDto instance) {}
     }
   }
 
   @GET
-  public ListWorktreeDaemonsRequest.Response list(
-      @PathParam("repoId") String repoId, @PathParam("worktreeId") String worktreeId) {
+  public ListWorkspaceDaemonsRequest.Response list(
+      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
     var entries =
-        daemonSupervisor.effectiveDaemons(repoId, worktreeId).stream()
-            .map(ListWorktreeDaemonsRequest.Response.Entry::new)
+        daemonSupervisor.effectiveDaemons(repoId, workspaceId).stream()
+            .map(ListWorkspaceDaemonsRequest.Response.Entry::new)
             .toList();
-    return new ListWorktreeDaemonsRequest.Response(entries);
+    return new ListWorkspaceDaemonsRequest.Response(entries);
   }
 
   public static record StartDaemonRequest() {
@@ -48,9 +48,9 @@ public class WorktreeDaemonController {
   @Path("/{daemonId}/start")
   public StartDaemonRequest.Response start(
       @PathParam("repoId") String repoId,
-      @PathParam("worktreeId") String worktreeId,
+      @PathParam("workspaceId") String workspaceId,
       @PathParam("daemonId") String daemonId) {
-    return new StartDaemonRequest.Response(daemonSupervisor.start(repoId, worktreeId, daemonId));
+    return new StartDaemonRequest.Response(daemonSupervisor.start(repoId, workspaceId, daemonId));
   }
 
   public static record StopDaemonRequest() {
@@ -61,8 +61,8 @@ public class WorktreeDaemonController {
   @Path("/{daemonId}/stop")
   public StopDaemonRequest.Response stop(
       @PathParam("repoId") String repoId,
-      @PathParam("worktreeId") String worktreeId,
+      @PathParam("workspaceId") String workspaceId,
       @PathParam("daemonId") String daemonId) {
-    return new StopDaemonRequest.Response(daemonSupervisor.stop(repoId, worktreeId, daemonId));
+    return new StopDaemonRequest.Response(daemonSupervisor.stop(repoId, workspaceId, daemonId));
   }
 }

@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The durable event feed: published events land as {@code daemon_event} rows (no in-memory ring
  * anywhere in the path) and come back from {@code GET /api/daemon-events} newest first, narrowed by
- * the severity/source/worktree filters.
+ * the severity/source/workspace filters.
  */
 @QuarkusTest
 public class DaemonEventControllerTest {
@@ -78,7 +78,7 @@ public class DaemonEventControllerTest {
             base));
 
     given()
-        .get("/api/daemon-events?repoId=" + repoId + "&worktreeId=work")
+        .get("/api/daemon-events?repoId=" + repoId + "&workspaceId=work")
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(2))
@@ -107,7 +107,7 @@ public class DaemonEventControllerTest {
                 + repoId
                 + "&since="
                 + base.minusSeconds(30)
-                + "&worktreeId=work")
+                + "&workspaceId=work")
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(1))

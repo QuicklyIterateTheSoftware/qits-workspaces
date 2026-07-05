@@ -1,7 +1,7 @@
 package eu.wohlben.qits.domain.daemon.entity;
 
 /**
- * The supervisor's in-memory state of one daemon instance in a worktree. Not persisted — the
+ * The supervisor's in-memory state of one daemon instance in a workspace. Not persisted — the
  * durable record of a run is its {@code Command} row; a JVM restart loses live state and the
  * instance reads as STOPPED (its commands are reconciled to INTERRUPTED like any other).
  */

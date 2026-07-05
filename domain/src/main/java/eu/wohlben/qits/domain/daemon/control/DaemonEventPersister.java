@@ -27,7 +27,7 @@ public class DaemonEventPersister {
     DaemonEvent entity = new DaemonEvent();
     entity.id = UUID.randomUUID().toString();
     entity.repoId = event.repoId();
-    entity.worktreeId = event.worktreeId();
+    entity.workspaceId = event.workspaceId();
     entity.daemonId = event.daemonId();
     entity.daemonName = event.daemonName();
     entity.kind = event.kind();

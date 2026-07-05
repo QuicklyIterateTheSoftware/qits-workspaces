@@ -50,14 +50,14 @@ public class DaemonEventService {
   @Transactional
   public List<DaemonEventDto> query(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       DaemonEventSeverity severity,
       Instant since,
       String source,
       int page,
       int pageSize) {
     return daemonEventRepository
-        .find(repoId, worktreeId, severity, since, source, page, pageSize)
+        .find(repoId, workspaceId, severity, since, source, page, pageSize)
         .stream()
         .map(daemonEventMapper::toDto)
         .toList();

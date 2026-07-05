@@ -19,7 +19,7 @@ public class DaemonEventRepository implements PanacheRepositoryBase<DaemonEvent,
    */
   public List<DaemonEvent> find(
       String repoId,
-      String worktreeId,
+      String workspaceId,
       DaemonEventSeverity severity,
       Instant since,
       String source,
@@ -31,9 +31,9 @@ public class DaemonEventRepository implements PanacheRepositoryBase<DaemonEvent,
       conditions.add("repoId = :repoId");
       parameters = parameters.and("repoId", repoId);
     }
-    if (worktreeId != null && !worktreeId.isBlank()) {
-      conditions.add("worktreeId = :worktreeId");
-      parameters = parameters.and("worktreeId", worktreeId);
+    if (workspaceId != null && !workspaceId.isBlank()) {
+      conditions.add("workspaceId = :workspaceId");
+      parameters = parameters.and("workspaceId", workspaceId);
     }
     if (severity != null) {
       conditions.add("severity = :severity");

@@ -34,7 +34,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * Supervises daemon instances: one per (worktree, daemon definition), enforced singleton. The
+ * Supervises daemon instances: one per (workspace, daemon definition), enforced singleton. The
  * daemon itself runs as a detached session inside the container ({@link
  * ContainerRuntime#startDaemon}) so it outlives a qits restart; qits streams its output by
  * following the session's mirror log with an ordinary registry command (the "follower", kind
@@ -48,7 +48,7 @@ import org.jboss.logging.Logger;
  * #adoptIfRunning} re-adopts a still-running session on first sighting (resuming the log follow +
  * liveness poll) instead of showing it STOPPED. Every transition and observer finding is published
  * as a {@link DaemonEventDto} through {@link DaemonEventService}, which fans out to the UI feed and
- * the worktree's agent session.
+ * the workspace's agent session.
  */
 @ApplicationScoped
 public class DaemonSupervisor {
@@ -64,10 +64,10 @@ public class DaemonSupervisor {
    */
   private static final String DAEMON_MARKER_ENV = "QITS_DAEMON_ID";
 
-  /** One supervised daemon in one worktree. Mutated only under the supervisor monitor. */
+  /** One supervised daemon in one workspace. Mutated only under the supervisor monitor. */
   private static final class Instance {
     final String repoId;
-    final String worktreeId;
+    final String workspaceId;
     RepositoryDaemonDto daemon;
     DaemonStatus status = DaemonStatus.STOPPED;
     int restartCount;
@@ -91,14 +91,14 @@ public class DaemonSupervisor {
      */
     List<ContainerTailSource> tails = List.of();
 
-    Instance(String repoId, String worktreeId, RepositoryDaemonDto daemon) {
+    Instance(String repoId, String workspaceId, RepositoryDaemonDto daemon) {
       this.repoId = repoId;
-      this.worktreeId = worktreeId;
+      this.workspaceId = workspaceId;
       this.daemon = daemon;
     }
   }
 
-  private record Key(String repoId, String worktreeId, String daemonId) {}
+  private record Key(String repoId, String workspaceId, String daemonId) {}
 
   private final Map<Key, Instance> instances = new ConcurrentHashMap<>();
 
@@ -145,7 +145,7 @@ public class DaemonSupervisor {
   @ConfigProperty(name = "qits.daemons.liveness-poll-ms", defaultValue = "2000")
   long livenessPollMillis;
 
-  /** (repo, worktree, daemon) keys already probed for adoption of a pre-restart session. */
+  /** (repo, workspace, daemon) keys already probed for adoption of a pre-restart session. */
   private final java.util.Set<Key> adoptionProbed =
       java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -155,28 +155,28 @@ public class DaemonSupervisor {
   }
 
   /**
-   * Start {@code daemonId} in the worktree. One running instance per (worktree, daemon) is enforced
-   * — "restart" beats two dev servers fighting over a port.
+   * Start {@code daemonId} in the workspace. One running instance per (workspace, daemon) is
+   * enforced — "restart" beats two dev servers fighting over a port.
    */
-  public synchronized DaemonInstanceDto start(String repoId, String worktreeId, String daemonId) {
+  public synchronized DaemonInstanceDto start(String repoId, String workspaceId, String daemonId) {
     RepositoryDaemonDto daemon = repositoryDaemonService.resolve(repoId, daemonId);
-    Key key = new Key(repoId, worktreeId, daemonId);
+    Key key = new Key(repoId, workspaceId, daemonId);
     Instance existing = instances.get(key);
     if (existing != null && isLive(existing.status)) {
       throw new BadRequestException(
-          "Daemon '" + daemon.name() + "' is already running in this worktree");
+          "Daemon '" + daemon.name() + "' is already running in this workspace");
     }
-    Instance instance = new Instance(repoId, worktreeId, daemon);
+    Instance instance = new Instance(repoId, workspaceId, daemon);
     instances.put(key, instance);
     launch(instance);
-    return toInstanceDto(instance, null, worktreeId);
+    return toInstanceDto(instance, null, workspaceId);
   }
 
   /** Gracefully stop a running instance: stop signal, grace period, then force-kill fallback. */
-  public synchronized DaemonInstanceDto stop(String repoId, String worktreeId, String daemonId) {
-    Instance instance = instances.get(new Key(repoId, worktreeId, daemonId));
+  public synchronized DaemonInstanceDto stop(String repoId, String workspaceId, String daemonId) {
+    Instance instance = instances.get(new Key(repoId, workspaceId, daemonId));
     if (instance == null || !isLive(instance.status)) {
-      throw new NotFoundException("Daemon is not running in this worktree");
+      throw new NotFoundException("Daemon is not running in this workspace");
     }
     instance.stopRequested = true;
     cancelPending(instance);
@@ -184,17 +184,17 @@ public class DaemonSupervisor {
     if (instance.status == DaemonStatus.RESTARTING) {
       // No live session — the pending relaunch was the only thing to cancel.
       transition(instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "stopped", null);
-      return toInstanceDto(instance, null, worktreeId);
+      return toInstanceDto(instance, null, workspaceId);
     }
     String commandId = instance.commandId;
-    String container = containers.containerName(worktreeId, repoId);
+    String container = containers.containerName(workspaceId, repoId);
     // Graceful stop signal to the detached session's process group, then settle (force-kill if it
     // ignored the signal) after the grace period — off the supervisor monitor, since terminate()
     // joins the follower's reader thread which may deliver a line into synchronized markReady.
     containers.signalDaemon(container, daemonId, instance.daemon.stopSignal());
     scheduler.schedule(
         () -> finishStop(instance, commandId, container), stopGraceMillis, TimeUnit.MILLISECONDS);
-    return toInstanceDto(instance, null, worktreeId);
+    return toInstanceDto(instance, null, workspaceId);
   }
 
   /**
@@ -216,21 +216,21 @@ public class DaemonSupervisor {
     }
   }
 
-  /** Every daemon of the repository with its runtime state in this worktree. */
-  public List<DaemonInstanceDto> effectiveDaemons(String repoId, String worktreeId) {
+  /** Every daemon of the repository with its runtime state in this workspace. */
+  public List<DaemonInstanceDto> effectiveDaemons(String repoId, String workspaceId) {
     List<RepositoryDaemonDto> definitions = repositoryDaemonService.resolveAll(repoId);
     // Lazily reconcile a daemon still running from before a qits restart: its supervisor state was
     // lost, but its detached session lives on. Probe each untracked daemon once — if its session is
     // alive, re-adopt it (resume the log follow + liveness poll) so it reads RUNNING again with
     // logs, instead of the blanket "STOPPED, command INTERRUPTED" the old in-memory model produced.
     for (RepositoryDaemonDto definition : definitions) {
-      adoptIfRunning(repoId, worktreeId, definition);
+      adoptIfRunning(repoId, workspaceId, definition);
     }
     synchronized (this) {
       List<DaemonInstanceDto> result = new ArrayList<>(definitions.size());
       for (RepositoryDaemonDto definition : definitions) {
-        Instance instance = instances.get(new Key(repoId, worktreeId, definition.id()));
-        result.add(toInstanceDto(instance, definition, worktreeId));
+        Instance instance = instances.get(new Key(repoId, workspaceId, definition.id()));
+        result.add(toInstanceDto(instance, definition, workspaceId));
       }
       return result;
     }
@@ -242,8 +242,8 @@ public class DaemonSupervisor {
    * most once per key so a UI poll doesn't hammer the container runtime; a session that isn't
    * running when first probed is simply left settled.
    */
-  private void adoptIfRunning(String repoId, String worktreeId, RepositoryDaemonDto definition) {
-    Key key = new Key(repoId, worktreeId, definition.id());
+  private void adoptIfRunning(String repoId, String workspaceId, RepositoryDaemonDto definition) {
+    Key key = new Key(repoId, workspaceId, definition.id());
     synchronized (this) {
       Instance existing = instances.get(key);
       if (existing != null && isLive(existing.status)) {
@@ -253,7 +253,7 @@ public class DaemonSupervisor {
         return; // already probed once — don't re-probe on every poll
       }
     }
-    String container = containers.containerName(worktreeId, repoId);
+    String container = containers.containerName(workspaceId, repoId);
     boolean alive;
     try {
       alive = containers.exists(container) && containers.daemonAlive(container, definition.id());
@@ -269,7 +269,7 @@ public class DaemonSupervisor {
       if (existing != null && isLive(existing.status)) {
         return;
       }
-      Instance instance = new Instance(repoId, worktreeId, definition);
+      Instance instance = new Instance(repoId, workspaceId, definition);
       instances.put(key, instance);
       try {
         launch(instance, true);
@@ -300,7 +300,7 @@ public class DaemonSupervisor {
    */
   private void launch(Instance instance, boolean adopt) {
     RepositoryDaemonDto daemon = instance.daemon;
-    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    String container = containers.containerName(instance.workspaceId, instance.repoId);
 
     List<CommandOutputSink> sinks = new ArrayList<>();
     instance.tail = new TailSink();
@@ -319,7 +319,7 @@ public class DaemonSupervisor {
         outputObservers.isEmpty() ? null : new ProcessOutputTap(outputObservers);
 
     String publicBase =
-        daemon.httpPort() != null ? DaemonProxyPath.base(instance.worktreeId, daemon.id()) : null;
+        daemon.httpPort() != null ? DaemonProxyPath.base(instance.workspaceId, daemon.id()) : null;
 
     // Tag every daemon process with the reap marker (inherited by its forks via
     // /proc/<pid>/environ)
@@ -336,7 +336,7 @@ public class DaemonSupervisor {
     CommandService.DaemonRun run =
         commandService.beginDaemonRun(
             instance.repoId,
-            instance.worktreeId,
+            instance.workspaceId,
             daemon.name(),
             daemon.startScript(),
             environment,
@@ -415,7 +415,7 @@ public class DaemonSupervisor {
         return;
       }
     }
-    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    String container = containers.containerName(instance.workspaceId, instance.repoId);
     if (containers.daemonAlive(container, instance.daemon.id())) {
       return;
     }
@@ -461,7 +461,7 @@ public class DaemonSupervisor {
   }
 
   /**
-   * One {@code tail -F} per FILE source, run <em>inside the worktree's container</em> (the working
+   * One {@code tail -F} per FILE source, run <em>inside the workspace's container</em> (the working
    * tree lives at {@code /workspace} there, not on the host), each feeding its own set of
    * observers. Source paths are relative to {@code /workspace} and re-guarded here against
    * traversal (they were validated lexically at definition time too). Tails outlive restarts and
@@ -472,11 +472,11 @@ public class DaemonSupervisor {
     if (sources == null || sources.isEmpty() || instance.daemon.observers().isEmpty()) {
       return List.of();
     }
-    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    String container = containers.containerName(instance.workspaceId, instance.repoId);
     List<ContainerTailSource> tails = new ArrayList<>();
     for (LogSourceDto source : sources) {
       if (!isSafeRelativePath(source.path())) {
-        LOG.warnf("Skipping log source outside the worktree: %s", source.path());
+        LOG.warnf("Skipping log source outside the workspace: %s", source.path());
         continue;
       }
       List<ObservedLineListener> observers = new ArrayList<>();
@@ -524,7 +524,7 @@ public class DaemonSupervisor {
   }
 
   /**
-   * Kill any process in the worktree's container left over from a previous run of this daemon —
+   * Kill any process in the workspace's container left over from a previous run of this daemon —
    * chiefly Quarkus dev mode's forked application JVM, which escapes the launched process group (so
    * a stop's {@code kill -- -pgid} misses it), keeps binding the http port, and would wedge this
    * start ("Port 8080 seems to be in use"). Every daemon process is tagged {@link
@@ -541,7 +541,7 @@ public class DaemonSupervisor {
    * docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
    */
   private void reapStragglers(Instance instance) {
-    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    String container = containers.containerName(instance.workspaceId, instance.repoId);
     // The daemon id is a server-generated UUID (hex + hyphens) — safe to interpolate. -z: environ
     // is
     // NUL-separated, so each KEY=VALUE is one record; -F: fixed string, exact match.
@@ -590,7 +590,7 @@ public class DaemonSupervisor {
     events.publish(
         new DaemonEventDto(
             instance.repoId,
-            instance.worktreeId,
+            instance.workspaceId,
             instance.daemon.id(),
             instance.daemon.name(),
             DaemonEventKind.ERROR_DETECTED,
@@ -719,7 +719,7 @@ public class DaemonSupervisor {
     events.publish(
         new DaemonEventDto(
             instance.repoId,
-            instance.worktreeId,
+            instance.workspaceId,
             instance.daemon.id(),
             instance.daemon.name(),
             DaemonEventKind.STATUS_CHANGED,
@@ -748,19 +748,19 @@ public class DaemonSupervisor {
       instance.hostPort = null;
       return;
     }
-    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    String container = containers.containerName(instance.workspaceId, instance.repoId);
     instance.hostPort = containers.hostPort(container, httpPort);
     if (instance.hostPort == null) {
       events.publish(
           new DaemonEventDto(
               instance.repoId,
-              instance.worktreeId,
+              instance.workspaceId,
               instance.daemon.id(),
               instance.daemon.name(),
               DaemonEventKind.STATUS_CHANGED,
               DaemonEventSeverity.WARNING,
               instance.status,
-              "web view unavailable: the worktree container does not publish port "
+              "web view unavailable: the workspace container does not publish port "
                   + httpPort
                   + " — recreate the container to pick it up",
               null,
@@ -774,17 +774,17 @@ public class DaemonSupervisor {
   }
 
   /**
-   * The live proxy target for a (worktreeId, daemonId) pair — the daemon web-view proxy's only
-   * lookup. The pair is unambiguous even though worktree slugs repeat across repositories, because
+   * The live proxy target for a (workspaceId, daemonId) pair — the daemon web-view proxy's only
+   * lookup. The pair is unambiguous even though workspace slugs repeat across repositories, because
    * a daemon id is a UUID owned by exactly one repository. The port comes exclusively from
    * supervisor state (never from any request component) and targets localhost — the SSRF
    * constraint. A present target with a null {@code hostPort} means the container must be recreated
    * to publish the port.
    */
-  public synchronized Optional<ProxyTarget> proxyTarget(String worktreeId, String daemonId) {
+  public synchronized Optional<ProxyTarget> proxyTarget(String workspaceId, String daemonId) {
     for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
       Key key = entry.getKey();
-      if (key.worktreeId().equals(worktreeId) && key.daemonId().equals(daemonId)) {
+      if (key.workspaceId().equals(workspaceId) && key.daemonId().equals(daemonId)) {
         Instance instance = entry.getValue();
         if (instance.daemon.httpPort() == null) {
           return Optional.empty();
@@ -813,10 +813,10 @@ public class DaemonSupervisor {
   }
 
   private DaemonInstanceDto toInstanceDto(
-      Instance instance, RepositoryDaemonDto definition, String worktreeId) {
+      Instance instance, RepositoryDaemonDto definition, String workspaceId) {
     RepositoryDaemonDto daemon = definition != null ? definition : instance.daemon;
     String proxyPath =
-        daemon.httpPort() != null ? DaemonProxyPath.base(worktreeId, daemon.id()) : null;
+        daemon.httpPort() != null ? DaemonProxyPath.base(workspaceId, daemon.id()) : null;
     if (instance == null) {
       return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath);
     }

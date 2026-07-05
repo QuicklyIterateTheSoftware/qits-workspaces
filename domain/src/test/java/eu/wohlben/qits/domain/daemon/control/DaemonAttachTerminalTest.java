@@ -8,7 +8,7 @@ import eu.wohlben.qits.domain.command.control.CommandRegistry;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
-import eu.wohlben.qits.domain.repository.control.WorktreeService;
+import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -47,7 +47,7 @@ public class DaemonAttachTerminalTest {
 
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
-  @Inject WorktreeService worktreeService;
+  @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject CommandRegistry registry;
 
@@ -76,7 +76,7 @@ public class DaemonAttachTerminalTest {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Attach Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    worktreeService.createWorktree(repo.id, "work", "master", "work");
+    workspaceService.createWorkspace(repo.id, "work", "master", "work");
     String container = containers.containerName("work", repo.id);
 
     // Start a daemon session directly (the supervisor's follower isn't needed to prove the attach):
