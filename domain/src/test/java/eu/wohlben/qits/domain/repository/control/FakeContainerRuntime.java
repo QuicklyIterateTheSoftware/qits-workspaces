@@ -7,8 +7,10 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -36,7 +38,13 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
-  private record Info(String repoId, String worktreeId, String branch, String parent, Path dir) {}
+  private record Info(
+      String repoId,
+      String worktreeId,
+      String branch,
+      String parent,
+      Path dir,
+      Set<Integer> publishedPorts) {}
 
   private final Map<String, Info> byName = new ConcurrentHashMap<>();
 
@@ -47,7 +55,12 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public String run(String repoId, String worktreeId, String branch, String parent) {
+  public String run(
+      String repoId,
+      String worktreeId,
+      String branch,
+      String parent,
+      Collection<Integer> publishPorts) {
     String name = containerName(worktreeId, repoId);
     Path dir = Path.of(dataDir, repoId, "worktrees", worktreeId).toAbsolutePath();
     try {
@@ -55,8 +68,30 @@ public class FakeContainerRuntime implements ContainerRuntime {
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    byName.put(name, new Info(repoId, worktreeId, branch, parent, dir));
+    byName.put(
+        name,
+        new Info(
+            repoId,
+            worktreeId,
+            branch,
+            parent,
+            dir,
+            publishPorts == null ? Set.of() : Set.copyOf(publishPorts)));
     return name;
+  }
+
+  /**
+   * Fake containers are host processes, so a "published" container port is reachable on the host
+   * as-is — identity mapping, but only for ports declared at {@link #run} time, mirroring docker's
+   * create-time-only publishing (a container predating the port returns null, like the real one).
+   */
+  @Override
+  public Integer hostPort(String container, int containerPort) {
+    Info info = byName.get(container);
+    if (info == null || !info.publishedPorts().contains(containerPort)) {
+      return null;
+    }
+    return containerPort;
   }
 
   @Override

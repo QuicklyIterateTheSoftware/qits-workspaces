@@ -1,5 +1,6 @@
 package eu.wohlben.qits.domain.repository.control;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -29,8 +30,26 @@ public interface ContainerRuntime {
    * Creates and starts the worktree's container ({@code docker run -d … sleep infinity}) with the
    * {@code qits.repository}/{@code qits.worktree}/{@code qits.branch}/{@code qits.parent} labels
    * that startup reconciliation reads back. Returns the container name. Throws on failure.
+   *
+   * <p>{@code publishPorts} are container ports published to an ephemeral localhost port on the
+   * host ({@code -p 127.0.0.1:0:<port>}) — the host→container channel the daemon web-view proxy
+   * targets. Publishing must happen at creation (docker cannot add ports to a live container), so
+   * the caller passes every port the repository's daemon definitions currently declare; localhost
+   * binding keeps them off the LAN (the browser reaches daemons through qits, never directly).
    */
-  String run(String repoId, String worktreeId, String branch, String parent);
+  String run(
+      String repoId,
+      String worktreeId,
+      String branch,
+      String parent,
+      Collection<Integer> publishPorts);
+
+  /**
+   * The ephemeral host port a published container port landed on ({@code docker port}), or null
+   * when the container doesn't publish it — e.g. it predates the daemon definition declaring the
+   * port, in which case it must be recreated to pick the mapping up.
+   */
+  Integer hostPort(String container, int containerPort);
 
   /**
    * Runs a one-shot command inside the container and captures its output (mirrors {@link

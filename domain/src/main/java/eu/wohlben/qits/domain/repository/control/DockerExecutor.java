@@ -9,6 +9,7 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -75,7 +76,12 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public String run(String repoId, String worktreeId, String branch, String parent) {
+  public String run(
+      String repoId,
+      String worktreeId,
+      String branch,
+      String parent,
+      Collection<Integer> publishPorts) {
     String name = containerName(worktreeId, repoId);
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
@@ -104,6 +110,13 @@ public class DockerExecutor implements ContainerRuntime {
     if (claudeVolume != null && !claudeVolume.isBlank()) {
       argv.add("-v");
       argv.add(claudeVolume + ":" + claudeMount);
+    }
+    // Ephemeral localhost publishing for web-viewable daemon ports (see ContainerRuntime#run).
+    if (publishPorts != null) {
+      for (Integer port : publishPorts) {
+        argv.add("-p");
+        argv.add("127.0.0.1:0:" + port);
+      }
     }
     argv.add(image);
     argv.add("sleep");
@@ -146,6 +159,28 @@ public class DockerExecutor implements ContainerRuntime {
     }
     argv.add(container);
     return argv;
+  }
+
+  @Override
+  public Integer hostPort(String container, int containerPort) {
+    ExecResult result =
+        runCapturing(null, List.of(runtime, "port", container, containerPort + "/tcp"));
+    if (result.exitCode() != 0) {
+      return null;
+    }
+    // One line per bound address, e.g. "127.0.0.1:32768" (IPv6 lines look like "[::1]:32768").
+    for (String line : result.output().split("\n")) {
+      int colon = line.lastIndexOf(':');
+      if (colon < 0) {
+        continue;
+      }
+      try {
+        return Integer.parseInt(line.substring(colon + 1).trim());
+      } catch (NumberFormatException ignored) {
+        // fall through to the next line
+      }
+    }
+    return null;
   }
 
   @Override
