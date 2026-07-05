@@ -3,7 +3,6 @@ package eu.wohlben.qits.domain.daemon.control;
 import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 import eu.wohlben.qits.domain.command.control.CommandRegistry;
 import eu.wohlben.qits.domain.command.control.CommandService;
-import eu.wohlben.qits.domain.command.dto.CommandDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
 import eu.wohlben.qits.domain.daemon.dto.LogObserverDto;
@@ -35,15 +34,21 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * Supervises daemon instances: one per (worktree, daemon definition), enforced singleton. Each run
- * is an ordinary registry command (kind DAEMON) — the supervisor adds the state machine around it
- * ({@code STARTING → READY → DEGRADED/CRASHED/RESTARTING → STOPPED}), the restart policy with
- * exponential backoff, readiness detection, and graceful stop. All supervisor state is in-memory
- * next to the registry's sessions (same singleton rule); a JVM restart loses it and the instances'
- * commands are reconciled to INTERRUPTED like any other command.
+ * Supervises daemon instances: one per (worktree, daemon definition), enforced singleton. The
+ * daemon itself runs as a detached session inside the container ({@link
+ * ContainerRuntime#startDaemon}) so it outlives a qits restart; qits streams its output by
+ * following the session's mirror log with an ordinary registry command (the "follower", kind
+ * DAEMON), which keeps the ready-pattern, observers, per-line persistence, and terminal re-attach
+ * working. The supervisor adds the state machine ({@code STARTING → READY →
+ * DEGRADED/CRASHED/RESTARTING → STOPPED}), the restart policy with exponential backoff, readiness
+ * detection, graceful stop, and a liveness poll (the detached session has no host-side exit
+ * callback).
  *
- * <p>Every transition and observer finding is published as a {@link DaemonEventDto} through {@link
- * DaemonEventService}, which fans out to the UI feed and the worktree's agent session.
+ * <p>In-memory supervisor state is lost on a JVM restart, but the sessions are not: {@link
+ * #adoptIfRunning} re-adopts a still-running session on first sighting (resuming the log follow +
+ * liveness poll) instead of showing it STOPPED. Every transition and observer finding is published
+ * as a {@link DaemonEventDto} through {@link DaemonEventService}, which fans out to the UI feed and
+ * the worktree's agent session.
  */
 @ApplicationScoped
 public class DaemonSupervisor {
@@ -70,6 +75,9 @@ public class DaemonSupervisor {
     boolean stopRequested;
     TailSink tail;
     ScheduledFuture<?> pending;
+
+    /** Polls the detached daemon session's liveness (it has no host-side exit callback). */
+    ScheduledFuture<?> liveness;
 
     /**
      * The ephemeral localhost port the container published for the daemon's {@code httpPort} — the
@@ -131,6 +139,16 @@ public class DaemonSupervisor {
   @ConfigProperty(name = "qits.daemons.file-tail-poll-ms", defaultValue = "500")
   long fileTailPollMillis;
 
+  /**
+   * How often a running daemon's detached session is polled for liveness (crash/exit detection).
+   */
+  @ConfigProperty(name = "qits.daemons.liveness-poll-ms", defaultValue = "2000")
+  long livenessPollMillis;
+
+  /** (repo, worktree, daemon) keys already probed for adoption of a pre-restart session. */
+  private final java.util.Set<Key> adoptionProbed =
+      java.util.concurrent.ConcurrentHashMap.newKeySet();
+
   @PreDestroy
   void shutdown() {
     scheduler.shutdownNow();
@@ -162,36 +180,52 @@ public class DaemonSupervisor {
     }
     instance.stopRequested = true;
     cancelPending(instance);
+    cancelLiveness(instance);
     if (instance.status == DaemonStatus.RESTARTING) {
-      // No live process — the pending relaunch was the only thing to cancel.
+      // No live session — the pending relaunch was the only thing to cancel.
       transition(instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "stopped", null);
       return toInstanceDto(instance, null, worktreeId);
     }
     String commandId = instance.commandId;
-    if (!registry.signal(commandId, instance.daemon.stopSignal())) {
-      // Signal delivery failed (process already gone or kill errored) — force immediately.
-      registry.terminate(commandId);
-    } else {
-      // The kill fallback must not run under the supervisor monitor: terminate() joins the
-      // reader thread, which may itself be blocked on a synchronized callback here.
-      scheduler.schedule(
-          () -> {
-            if (registry.isRunning(commandId)) {
-              LOG.infof(
-                  "Daemon '%s' ignored SIG%s for %d ms; force-killing",
-                  instance.daemon.name(), instance.daemon.stopSignal(), stopGraceMillis);
-              registry.terminate(commandId);
-            }
-          },
-          stopGraceMillis,
-          TimeUnit.MILLISECONDS);
-    }
+    String container = containers.containerName(worktreeId, repoId);
+    // Graceful stop signal to the detached session's process group, then settle (force-kill if it
+    // ignored the signal) after the grace period — off the supervisor monitor, since terminate()
+    // joins the follower's reader thread which may deliver a line into synchronized markReady.
+    containers.signalDaemon(container, daemonId, instance.daemon.stopSignal());
+    scheduler.schedule(
+        () -> finishStop(instance, commandId, container), stopGraceMillis, TimeUnit.MILLISECONDS);
     return toInstanceDto(instance, null, worktreeId);
+  }
+
+  /**
+   * Grace period elapsed after a stop signal: force-kill a session that ignored it, stop the
+   * follower, and settle STOPPED.
+   */
+  private void finishStop(Instance instance, String commandId, String container) {
+    if (containers.daemonAlive(container, instance.daemon.id())) {
+      LOG.infof(
+          "Daemon '%s' ignored SIG%s for %d ms; force-killing",
+          instance.daemon.name(), instance.daemon.stopSignal(), stopGraceMillis);
+      containers.killDaemon(container, instance.daemon.id());
+    }
+    registry.terminate(commandId); // stop the follower tail
+    synchronized (this) {
+      if (commandId.equals(instance.commandId) && instance.status != DaemonStatus.STOPPED) {
+        transition(instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "stopped", null);
+      }
+    }
   }
 
   /** Every daemon of the repository with its runtime state in this worktree. */
   public List<DaemonInstanceDto> effectiveDaemons(String repoId, String worktreeId) {
     List<RepositoryDaemonDto> definitions = repositoryDaemonService.resolveAll(repoId);
+    // Lazily reconcile a daemon still running from before a qits restart: its supervisor state was
+    // lost, but its detached session lives on. Probe each untracked daemon once — if its session is
+    // alive, re-adopt it (resume the log follow + liveness poll) so it reads RUNNING again with
+    // logs, instead of the blanket "STOPPED, command INTERRUPTED" the old in-memory model produced.
+    for (RepositoryDaemonDto definition : definitions) {
+      adoptIfRunning(repoId, worktreeId, definition);
+    }
     synchronized (this) {
       List<DaemonInstanceDto> result = new ArrayList<>(definitions.size());
       for (RepositoryDaemonDto definition : definitions) {
@@ -202,14 +236,78 @@ public class DaemonSupervisor {
     }
   }
 
+  /**
+   * If a daemon's detached session is alive but no live instance is tracked (the classic
+   * post-restart case, but also a session qits otherwise lost track of), re-adopt it. Probed at
+   * most once per key so a UI poll doesn't hammer the container runtime; a session that isn't
+   * running when first probed is simply left settled.
+   */
+  private void adoptIfRunning(String repoId, String worktreeId, RepositoryDaemonDto definition) {
+    Key key = new Key(repoId, worktreeId, definition.id());
+    synchronized (this) {
+      Instance existing = instances.get(key);
+      if (existing != null && isLive(existing.status)) {
+        return; // already tracked and running
+      }
+      if (!adoptionProbed.add(key)) {
+        return; // already probed once — don't re-probe on every poll
+      }
+    }
+    String container = containers.containerName(worktreeId, repoId);
+    boolean alive;
+    try {
+      alive = containers.exists(container) && containers.daemonAlive(container, definition.id());
+    } catch (RuntimeException e) {
+      LOG.debugf(e, "Adoption probe failed for daemon %s", definition.id());
+      return;
+    }
+    if (!alive) {
+      return;
+    }
+    synchronized (this) {
+      Instance existing = instances.get(key);
+      if (existing != null && isLive(existing.status)) {
+        return;
+      }
+      Instance instance = new Instance(repoId, worktreeId, definition);
+      instances.put(key, instance);
+      try {
+        launch(instance, true);
+      } catch (RuntimeException e) {
+        LOG.errorf(e, "Failed to adopt running daemon '%s'", definition.name());
+        instances.remove(key);
+      }
+    }
+  }
+
   // --- Lifecycle internals (all under the supervisor monitor) ---------------------------------
 
   private void launch(Instance instance) {
+    launch(instance, false);
+  }
+
+  /**
+   * (Re)launch or adopt a daemon. The daemon itself runs as a detached session inside the container
+   * ({@link ContainerRuntime#startDaemon} — a tmux session for docker) so it outlives a qits
+   * restart; qits streams its output by following the session's mirror log with an ordinary
+   * registry command (the "follower"), which keeps the ready-pattern, observers, per-line
+   * persistence, and terminal re-attach working unchanged. Liveness is polled from the session, not
+   * a host exit callback.
+   *
+   * @param adopt true when reconciling an already-running session found on boot: skip the reap and
+   *     the session start, follow the mirror log from its end (history is already persisted, not
+   *     re-emitted), and consider the live daemon READY.
+   */
+  private void launch(Instance instance, boolean adopt) {
     RepositoryDaemonDto daemon = instance.daemon;
+    String container = containers.containerName(instance.worktreeId, instance.repoId);
+
     List<CommandOutputSink> sinks = new ArrayList<>();
     instance.tail = new TailSink();
     sinks.add(instance.tail);
-    if (daemon.readyPattern() != null) {
+    // A fresh start reads the log from the top, so the ready line is seen and flips STARTING→READY.
+    // An adopted session is already READY and tails from the end, so no old line re-triggers it.
+    if (!adopt && daemon.readyPattern() != null) {
       sinks.add(
           new ReadyPatternSink(Pattern.compile(daemon.readyPattern()), () -> markReady(instance)));
     }
@@ -223,53 +321,124 @@ public class DaemonSupervisor {
     String publicBase =
         daemon.httpPort() != null ? DaemonProxyPath.base(instance.worktreeId, daemon.id()) : null;
 
-    // Reap any straggler from a previous run before (re)launching. A stop group-kills the launched
-    // process group, but a child that escaped it stays alive — notably Quarkus dev mode's forked
-    // application JVM, which keeps binding httpPort and wedges the next start in STARTING forever
-    // ("Port 8080 seems to be in use"). Every daemon process is tagged QITS_DAEMON_ID=<id> (below),
-    // inherited by its forks, so we can find and kill leftovers by marker regardless of process
-    // group. Harmless on a clean first start (nothing matches). See
+    // Tag every daemon process with the reap marker (inherited by its forks via
+    // /proc/<pid>/environ)
+    // and, on a fresh start, reap any straggler from a previous run first — a child (e.g. Quarkus
+    // dev's forked JVM) that escaped the session and still binds httpPort would wedge this start.
+    // See
     // docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
-    reapStragglers(instance);
-
-    // Inject the reap marker last-wins-safe: it rides in the environment overlay so the launched
-    // shell and everything it forks carry it in /proc/<pid>/environ.
     Map<String, String> environment = new HashMap<>(daemon.environment());
     environment.put(DAEMON_MARKER_ENV, daemon.id());
+    if (!adopt) {
+      reapStragglers(instance);
+    }
 
-    CommandDto command =
-        commandService.launchDaemon(
+    CommandService.DaemonRun run =
+        commandService.beginDaemonRun(
             instance.repoId,
             instance.worktreeId,
             daemon.name(),
             daemon.startScript(),
             environment,
             daemon.otel(),
-            publicBase,
-            (commandId, exitCode, terminatedManually) ->
-                handleExit(instance, commandId, exitCode, terminatedManually),
-            outputTap,
-            sinks.toArray(CommandOutputSink[]::new));
-    instance.commandId = command.id();
+            publicBase);
+    instance.commandId = run.command().id();
+
+    if (!adopt) {
+      containers.startDaemon(container, daemon.id(), daemon.startScript(), run.environment());
+    }
+
+    String followScript =
+        "tail -n " + (adopt ? "0" : "+1") + " -F " + containers.daemonLogPath(daemon.id());
+    commandService.followDaemon(
+        instance.commandId,
+        container,
+        followScript,
+        (commandId, exitCode, terminatedManually) -> {}, // follower exit doesn't drive lifecycle
+        outputTap,
+        sinks.toArray(CommandOutputSink[]::new));
+
     resolveHostPort(instance);
     if (instance.tails.isEmpty()) {
       instance.tails = startFileTails(instance);
     }
-    transition(
-        instance,
-        DaemonStatus.STARTING,
-        DaemonEventSeverity.INFO,
-        instance.restartCount == 0
-            ? "starting"
-            : "starting (restart " + instance.restartCount + "/" + daemon.maxRestarts() + ")",
-        null);
-    if (daemon.readyPattern() == null) {
-      String launchedCommandId = command.id();
-      instance.pending =
-          scheduler.schedule(
-              () -> graceReady(instance, launchedCommandId),
-              readyGraceMillis,
-              TimeUnit.MILLISECONDS);
+
+    if (adopt) {
+      transition(
+          instance,
+          DaemonStatus.READY,
+          DaemonEventSeverity.INFO,
+          "adopted (already running after a qits restart)",
+          null);
+    } else {
+      transition(
+          instance,
+          DaemonStatus.STARTING,
+          DaemonEventSeverity.INFO,
+          instance.restartCount == 0
+              ? "starting"
+              : "starting (restart " + instance.restartCount + "/" + daemon.maxRestarts() + ")",
+          null);
+      if (daemon.readyPattern() == null) {
+        String launchedCommandId = instance.commandId;
+        instance.pending =
+            scheduler.schedule(
+                () -> graceReady(instance, launchedCommandId),
+                readyGraceMillis,
+                TimeUnit.MILLISECONDS);
+      }
+    }
+    startLivenessPoll(instance, instance.commandId);
+  }
+
+  /** Begin polling the detached session's liveness for the current run of {@code instance}. */
+  private void startLivenessPoll(Instance instance, String commandId) {
+    cancelLiveness(instance);
+    instance.liveness =
+        scheduler.scheduleWithFixedDelay(
+            () -> checkLiveness(instance, commandId),
+            livenessPollMillis,
+            livenessPollMillis,
+            TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * One liveness tick: if the detached daemon session has ended, stop the follower and drive the
+   * restart policy through {@link #handleExit}. The container probes and {@code registry.terminate}
+   * run <em>outside</em> the supervisor monitor — terminate joins the follower's reader thread,
+   * which may itself deliver a ready-pattern line into the (synchronized) {@link #markReady}.
+   */
+  private void checkLiveness(Instance instance, String commandId) {
+    synchronized (this) {
+      if (!commandId.equals(instance.commandId) || !isLive(instance.status)) {
+        cancelLiveness(instance);
+        return;
+      }
+    }
+    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    if (containers.daemonAlive(container, instance.daemon.id())) {
+      return;
+    }
+    Integer code = containers.daemonExitCode(container, instance.daemon.id());
+    int exitCode =
+        code != null ? code : 1; // no recorded code => killed/crashed => treat as failure
+    synchronized (this) {
+      if (!commandId.equals(instance.commandId) || !isLive(instance.status)) {
+        cancelLiveness(instance);
+        return;
+      }
+      cancelLiveness(instance);
+    }
+    registry.terminate(commandId); // stop the follower tail (it would follow a dead log forever)
+    synchronized (this) {
+      handleExit(instance, commandId, exitCode, false);
+    }
+  }
+
+  private static void cancelLiveness(Instance instance) {
+    if (instance.liveness != null) {
+      instance.liveness.cancel(false);
+      instance.liveness = null;
     }
   }
 
@@ -355,58 +524,34 @@ public class DaemonSupervisor {
   }
 
   /**
-   * Kill anything in the worktree's container left over from a previous run that would sabotage
-   * this launch — chiefly Quarkus dev mode's forked application JVM, which escapes the launched
-   * process group (so a stop's {@code kill -- -pgid} misses it), keeps binding the http port, and
-   * wedges the next start in STARTING forever ("Port 8080 seems to be in use"). Two selectors, both
-   * run before every (re)launch:
+   * Kill any process in the worktree's container left over from a previous run of this daemon —
+   * chiefly Quarkus dev mode's forked application JVM, which escapes the launched process group (so
+   * a stop's {@code kill -- -pgid} misses it), keeps binding the http port, and would wedge this
+   * start ("Port 8080 seems to be in use"). Every daemon process is tagged {@link
+   * #DAEMON_MARKER_ENV}={@code <id>} (inherited by its forks), so the escaped child is found via
+   * {@code /proc/<pid>/environ} regardless of process group. The per-daemon UUID keeps the scan off
+   * any other process (crucial: with the test fake this runs on the host, so a broader match could
+   * kill unrelated host processes), and the scanning shell carries no marker so it can't kill
+   * itself.
    *
-   * <ul>
-   *   <li><b>By marker</b> — every daemon process is tagged {@link #DAEMON_MARKER_ENV}={@code <id>}
-   *       (inherited by its forks), so this daemon's own escaped children are found via {@code
-   *       /proc/<pid>/environ} regardless of process group. The per-daemon UUID keeps the scan off
-   *       any other process, and the scanning shell carries no marker so it can't kill itself.
-   *   <li><b>By port</b> — for a web-viewable daemon, whatever currently listens on {@code
-   *       httpPort} (resolved through {@code /proc/net/tcp}) is killed too. This catches a holder
-   *       the marker can't: one from before this mechanism existed, or a run the supervisor lost
-   *       track of (e.g. across a dev-mode hot reload). The container is per-worktree, so only this
-   *       daemon should ever bind that port.
-   * </ul>
-   *
-   * <p>Best-effort: a failure here just leaves the old start-collision behavior, so it never blocks
-   * a launch. See docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
+   * <p>A holder the marker can't reach — one predating this mechanism, or a session qits otherwise
+   * lost track of — is handled instead by {@link #adoptIfRunning} re-adopting it, not by killing
+   * whatever binds the port. Best-effort: a failure here just leaves the old start-collision
+   * behavior, so it never blocks a launch. See
+   * docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
    */
   private void reapStragglers(Instance instance) {
     String container = containers.containerName(instance.worktreeId, instance.repoId);
-    // The daemon id is a server-generated UUID (hex + hyphens); httpPort is a validated integer —
-    // both safe to interpolate into the shell line.
-    // -z: environ is NUL-separated, so each KEY=VALUE is one record; -F: fixed string, exact match.
+    // The daemon id is a server-generated UUID (hex + hyphens) — safe to interpolate. -z: environ
+    // is
+    // NUL-separated, so each KEY=VALUE is one record; -F: fixed string, exact match.
     String marker = DAEMON_MARKER_ENV + "=" + instance.daemon.id();
-    StringBuilder script = new StringBuilder();
-    script
-        .append("for p in /proc/[0-9]*; do grep -qzF '")
-        .append(marker)
-        .append("' \"$p/environ\" 2>/dev/null && kill -9 \"${p#/proc/}\" 2>/dev/null; done; ");
-    Integer httpPort = instance.daemon.httpPort();
-    if (httpPort != null) {
-      // Find the listener on httpPort: its local-address column in /proc/net/tcp{,6} ends in the
-      // uppercase-hex port and its state is 0A (LISTEN); take those socket inodes, then map each to
-      // the owning pid by scanning /proc/<pid>/fd for a matching socket:[inode] symlink, and kill.
-      String hex = String.format(":%04X", httpPort);
-      script
-          .append("inodes=$(awk -v h='")
-          .append(hex)
-          .append("' '$4==\"0A\" && $2 ~ h\"$\" {print $10}' /proc/net/tcp /proc/net/tcp6")
-          .append(" 2>/dev/null | sort -u); ")
-          .append("for p in /proc/[0-9]*; do for fd in \"$p\"/fd/*; do")
-          .append(" t=$(readlink \"$fd\" 2>/dev/null) || continue; case \"$t\" in socket:\\[*\\])")
-          .append(" ino=${t#socket:[}; ino=${ino%]};")
-          .append(" for w in $inodes; do [ \"$ino\" = \"$w\" ] &&")
-          .append(" kill -9 \"${p#/proc/}\" 2>/dev/null; done;; esac; done; done; ");
-    }
-    script.append("true");
+    String script =
+        "for p in /proc/[0-9]*; do grep -qzF '"
+            + marker
+            + "' \"$p/environ\" 2>/dev/null && kill -9 \"${p#/proc/}\" 2>/dev/null; done; true";
     try {
-      containers.exec(container, null, Map.of(), "bash", "-c", script.toString());
+      containers.exec(container, null, Map.of(), "bash", "-c", script);
     } catch (RuntimeException e) {
       LOG.debugf(e, "Straggler reap failed for daemon %s", instance.daemon.id());
     }
@@ -592,7 +737,7 @@ public class DaemonSupervisor {
 
   /**
    * Resolve the published localhost port for a web-viewable daemon — the container is guaranteed
-   * provisioned here ({@code prepare}'s ensureContainer ran inside launchDaemon). A null result
+   * provisioned here ({@code prepare}'s ensureContainer ran inside beginDaemonRun). A null result
    * means the container predates the definition's {@code httpPort} (publishing is create-time
    * only): the daemon still runs, but the web view stays unavailable until the container is
    * recreated — surfaced as a WARNING event rather than failing the launch.
