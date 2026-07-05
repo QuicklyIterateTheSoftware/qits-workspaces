@@ -34,6 +34,18 @@ public class LogLevelClassifier implements LogClassifier {
               // class-name shape explicitly.
               + "|\\b[A-Z][A-Za-z0-9]*Warning\\b");
 
+  /**
+   * An explicit, standalone UPPERCASE log-level token — the severity field a structured log line
+   * already carries (Quarkus/JBoss {@code INFO/WARNING/ERROR}, JUL {@code SEVERE/FINE}, syslog
+   * {@code CRITICAL/NOTICE}…). Case-sensitive on purpose: only a real level field counts, never a
+   * lowercase "error"/"warn" appearing incidentally in a message.
+   */
+  private static final Pattern LEVEL_TOKEN =
+      Pattern.compile(
+          "\\b(ERROR|SEVERE|FATAL|CRITICAL|PANIC"
+              + "|WARN|WARNING|NOTICE"
+              + "|INFO|CONFIG|DEBUG|TRACE|FINE|FINER|FINEST)\\b");
+
   /** Exception/error class name (e.g. NullPointerException, TypeError) for the errorType. */
   private static final Pattern EXCEPTION_NAME =
       Pattern.compile("\\b([A-Z][A-Za-z0-9]*(?:Exception|Error))\\b");
@@ -45,10 +57,11 @@ public class LogLevelClassifier implements LogClassifier {
     String[] lines = logBatch.split("\n", -1);
     int firstWarning = -1;
     for (int i = 0; i < lines.length; i++) {
-      if (ERROR_SIGNAL.matcher(lines[i]).find()) {
+      DaemonEventSeverity severity = classifyLine(lines[i]);
+      if (severity == DaemonEventSeverity.ERROR) {
         return Optional.of(classification(DaemonEventSeverity.ERROR, lines[i], i));
       }
-      if (firstWarning < 0 && WARNING_SIGNAL.matcher(lines[i]).find()) {
+      if (severity == DaemonEventSeverity.WARNING && firstWarning < 0) {
         firstWarning = i;
       }
     }
@@ -57,6 +70,38 @@ public class LogLevelClassifier implements LogClassifier {
           classification(DaemonEventSeverity.WARNING, lines[firstWarning], firstWarning));
     }
     return Optional.empty();
+  }
+
+  /**
+   * A single line's severity, or {@code null} when it is unremarkable. A line that carries an
+   * explicit level token is classified by <em>that</em> level and nothing else — the log framework
+   * already declared how severe the line is, so an incidental "error"/exception keyword in the
+   * message must not upgrade a WARNING (or INFO) line to ERROR. This is exactly the case that used
+   * to flip a healthy daemon to DEGRADED, e.g. Quarkus' {@code … WARNING [io.…VertxHttpSender]
+   * Failed to export … Full error message: …}. Only lines with no explicit level fall back to the
+   * keyword / exception-name / traceback heuristics that catch unstructured output.
+   */
+  private static DaemonEventSeverity classifyLine(String line) {
+    Matcher level = LEVEL_TOKEN.matcher(line);
+    if (level.find()) {
+      return levelSeverity(level.group(1));
+    }
+    if (ERROR_SIGNAL.matcher(line).find()) {
+      return DaemonEventSeverity.ERROR;
+    }
+    if (WARNING_SIGNAL.matcher(line).find()) {
+      return DaemonEventSeverity.WARNING;
+    }
+    return null;
+  }
+
+  /** Maps a declared level token to a finding severity; INFO and below are not findings. */
+  private static DaemonEventSeverity levelSeverity(String token) {
+    return switch (token) {
+      case "ERROR", "SEVERE", "FATAL", "CRITICAL", "PANIC" -> DaemonEventSeverity.ERROR;
+      case "WARN", "WARNING", "NOTICE" -> DaemonEventSeverity.WARNING;
+      default -> null;
+    };
   }
 
   private static Classification classification(

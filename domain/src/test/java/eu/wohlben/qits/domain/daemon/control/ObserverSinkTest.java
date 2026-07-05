@@ -160,5 +160,22 @@ public class ObserverSinkTest {
 
     var warning = classifier.classify("DeprecationWarning: DEP0123 something old").orElseThrow();
     assertEquals(DaemonEventSeverity.WARNING, warning.severity());
+
+    // A line's explicit level wins over an incidental "error" keyword in its message: Quarkus'
+    // telemetry-export line is WARNING-level and mentions "Full error message", but it must NOT be
+    // escalated to ERROR (which would flip a healthy dev-server daemon to DEGRADED).
+    var telemetry =
+        classifier
+            .classify(
+                "2026-07-05 12:51:29,399 WARNING [io.quarkus.opentelemetry.runtime.exporter.otlp"
+                    + ".sender.VertxHttpSender] (vert.x-eventloop-thread-8) Failed to export."
+                    + " Full error message: Connection refused: localhost/127.0.0.1:4317")
+            .orElseThrow();
+    assertEquals(DaemonEventSeverity.WARNING, telemetry.severity(), "declared WARNING wins");
+
+    // An explicit INFO level keeps routine output quiet even when it name-drops an exception.
+    assertTrue(
+        classifier.classify("INFO [app] retry succeeded after a TimeoutException").isEmpty(),
+        "an explicit sub-warning level is not a finding");
   }
 }
