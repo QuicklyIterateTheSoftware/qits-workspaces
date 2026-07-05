@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -61,6 +62,13 @@ public class DaemonSupervisor {
     boolean stopRequested;
     TailSink tail;
     ScheduledFuture<?> pending;
+
+    /**
+     * The ephemeral localhost port the container published for the daemon's {@code httpPort} — the
+     * proxy target. Null when the daemon isn't web-viewable, or when the container predates the
+     * port declaration (needs recreation); re-resolved on every (re)launch.
+     */
+    Integer hostPort;
 
     /**
      * File-source tails (run inside the container); started once per instance, closed on settle.
@@ -135,7 +143,7 @@ public class DaemonSupervisor {
     Instance instance = new Instance(repoId, worktreeId, daemon);
     instances.put(key, instance);
     launch(instance);
-    return toInstanceDto(instance, null);
+    return toInstanceDto(instance, null, worktreeId);
   }
 
   /** Gracefully stop a running instance: stop signal, grace period, then force-kill fallback. */
@@ -149,7 +157,7 @@ public class DaemonSupervisor {
     if (instance.status == DaemonStatus.RESTARTING) {
       // No live process — the pending relaunch was the only thing to cancel.
       transition(instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "stopped", null);
-      return toInstanceDto(instance, null);
+      return toInstanceDto(instance, null, worktreeId);
     }
     String commandId = instance.commandId;
     if (!registry.signal(commandId, instance.daemon.stopSignal())) {
@@ -170,7 +178,7 @@ public class DaemonSupervisor {
           stopGraceMillis,
           TimeUnit.MILLISECONDS);
     }
-    return toInstanceDto(instance, null);
+    return toInstanceDto(instance, null, worktreeId);
   }
 
   /** Every daemon of the repository with its runtime state in this worktree. */
@@ -180,7 +188,7 @@ public class DaemonSupervisor {
       List<DaemonInstanceDto> result = new ArrayList<>(definitions.size());
       for (RepositoryDaemonDto definition : definitions) {
         Instance instance = instances.get(new Key(repoId, worktreeId, definition.id()));
-        result.add(toInstanceDto(instance, definition));
+        result.add(toInstanceDto(instance, definition, worktreeId));
       }
       return result;
     }
@@ -204,6 +212,8 @@ public class DaemonSupervisor {
     ProcessOutputTap outputTap =
         outputObservers.isEmpty() ? null : new ProcessOutputTap(outputObservers);
 
+    String publicBase =
+        daemon.httpPort() != null ? DaemonProxyPath.base(instance.worktreeId, daemon.id()) : null;
     CommandDto command =
         commandService.launchDaemon(
             instance.repoId,
@@ -212,11 +222,13 @@ public class DaemonSupervisor {
             daemon.startScript(),
             daemon.environment(),
             daemon.otel(),
+            publicBase,
             (commandId, exitCode, terminatedManually) ->
                 handleExit(instance, commandId, exitCode, terminatedManually),
             outputTap,
             sinks.toArray(CommandOutputSink[]::new));
     instance.commandId = command.id();
+    resolveHostPort(instance);
     if (instance.tails.isEmpty()) {
       instance.tails = startFileTails(instance);
     }
@@ -497,6 +509,69 @@ public class DaemonSupervisor {
             Instant.now()));
   }
 
+  /**
+   * Resolve the published localhost port for a web-viewable daemon — the container is guaranteed
+   * provisioned here ({@code prepare}'s ensureContainer ran inside launchDaemon). A null result
+   * means the container predates the definition's {@code httpPort} (publishing is create-time
+   * only): the daemon still runs, but the web view stays unavailable until the container is
+   * recreated — surfaced as a WARNING event rather than failing the launch.
+   */
+  private void resolveHostPort(Instance instance) {
+    Integer httpPort = instance.daemon.httpPort();
+    if (httpPort == null) {
+      instance.hostPort = null;
+      return;
+    }
+    String container = containers.containerName(instance.worktreeId, instance.repoId);
+    instance.hostPort = containers.hostPort(container, httpPort);
+    if (instance.hostPort == null) {
+      events.publish(
+          new DaemonEventDto(
+              instance.repoId,
+              instance.worktreeId,
+              instance.daemon.id(),
+              instance.daemon.name(),
+              DaemonEventKind.STATUS_CHANGED,
+              DaemonEventSeverity.WARNING,
+              instance.status,
+              "web view unavailable: the worktree container does not publish port "
+                  + httpPort
+                  + " — recreate the container to pick it up",
+              null,
+              instance.commandId,
+              null,
+              null,
+              null,
+              null,
+              Instant.now()));
+    }
+  }
+
+  /**
+   * The live proxy target for a (worktreeId, daemonId) pair — the daemon web-view proxy's only
+   * lookup. The pair is unambiguous even though worktree slugs repeat across repositories, because
+   * a daemon id is a UUID owned by exactly one repository. The port comes exclusively from
+   * supervisor state (never from any request component) and targets localhost — the SSRF
+   * constraint. A present target with a null {@code hostPort} means the container must be recreated
+   * to publish the port.
+   */
+  public synchronized Optional<ProxyTarget> proxyTarget(String worktreeId, String daemonId) {
+    for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
+      Key key = entry.getKey();
+      if (key.worktreeId().equals(worktreeId) && key.daemonId().equals(daemonId)) {
+        Instance instance = entry.getValue();
+        if (instance.daemon.httpPort() == null) {
+          return Optional.empty();
+        }
+        return Optional.of(new ProxyTarget(instance.status, instance.hostPort));
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** A web-viewable daemon instance as the proxy sees it: status + published localhost port. */
+  public record ProxyTarget(DaemonStatus status, Integer hostPort) {}
+
   private static void cancelPending(Instance instance) {
     if (instance.pending != null) {
       instance.pending.cancel(false);
@@ -511,12 +586,15 @@ public class DaemonSupervisor {
         || status == DaemonStatus.RESTARTING;
   }
 
-  private DaemonInstanceDto toInstanceDto(Instance instance, RepositoryDaemonDto definition) {
+  private DaemonInstanceDto toInstanceDto(
+      Instance instance, RepositoryDaemonDto definition, String worktreeId) {
     RepositoryDaemonDto daemon = definition != null ? definition : instance.daemon;
+    String proxyPath =
+        daemon.httpPort() != null ? DaemonProxyPath.base(worktreeId, daemon.id()) : null;
     if (instance == null) {
-      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null);
+      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath);
     }
     return new DaemonInstanceDto(
-        daemon, instance.status, instance.restartCount, instance.commandId);
+        daemon, instance.status, instance.restartCount, instance.commandId, proxyPath);
   }
 }
