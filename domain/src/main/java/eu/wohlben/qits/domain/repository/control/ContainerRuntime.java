@@ -123,4 +123,15 @@ public interface ContainerRuntime {
    * target qits follows for the ready-pattern, observers, and persistence.
    */
   String daemonLogPath(String daemonId);
+
+  /**
+   * The container-side shell command that opens an <em>interactive</em> PTY onto the running daemon
+   * session — {@code tmux attach} for docker. Run inside a {@code docker exec -it} client (the
+   * command registry's PTY path) so the browser can drive full-screen apps (e.g. Quarkus dev's
+   * {@code [r]}/{@code [e]} keys). This is the terminal half of the split introduced by Increment 2
+   * of tmux-backed daemons: the background {@link #daemonLogPath} tail keeps feeding the durable
+   * pipeline (observers/ready/persistence), while this attach client is ephemeral — killing it only
+   * detaches the client, leaving the detached daemon session running.
+   */
+  String attachDaemonCommand(String daemonId);
 }

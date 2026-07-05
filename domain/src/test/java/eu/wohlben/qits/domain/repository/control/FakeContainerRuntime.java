@@ -210,6 +210,14 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
+  public String attachDaemonCommand(String daemonId) {
+    // No tmux on the test host: an "attach" replays and follows the daemon's logfile, so the fake
+    // yields a real streaming PTY (the follower's live view) without a terminal multiplexer. `exec`
+    // keeps the recorded pgid valid for the on-close group-kill.
+    return "exec tail -n +1 -f " + daemonLogPath(daemonId);
+  }
+
+  @Override
   public void startDaemon(
       String container, String daemonId, String script, Map<String, String> env) {
     Info info = byName.get(container);

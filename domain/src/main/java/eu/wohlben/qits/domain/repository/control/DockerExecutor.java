@@ -316,6 +316,14 @@ public class DockerExecutor implements ContainerRuntime {
     exec(container, null, Map.of(), "sh", "-c", cmd);
   }
 
+  @Override
+  public String attachDaemonCommand(String daemonId) {
+    // `exec` so the docker-exec shell becomes the tmux client, keeping the pgid the registry
+    // recorded valid; a group-kill on close then only detaches this client, never the detached
+    // daemon server on the -L socket.
+    return "exec tmux -L " + socket(daemonId) + " attach -t main";
+  }
+
   private static String emptyToNull(String s) {
     return s == null || s.isBlank() ? null : s;
   }
