@@ -141,7 +141,7 @@ public class WorkspaceService {
    */
   private List<Integer> daemonPorts(String repoId) {
     return repositoryDaemonRepository.findByRepositoryId(repoId).stream()
-        .map(d -> d.httpPort)
+        .map(d -> d.webView != null ? d.webView.port : null)
         .filter(java.util.Objects::nonNull)
         .distinct()
         .toList();
