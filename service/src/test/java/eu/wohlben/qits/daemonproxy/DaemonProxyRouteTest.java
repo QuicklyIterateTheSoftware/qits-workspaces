@@ -109,6 +109,11 @@ public class DaemonProxyRouteTest {
 
   /** Definition before workspace, so the (fake) container "publishes" the port at creation. */
   private Setup setUpReadyDaemon(String script, String readyPattern) throws Exception {
+    return setUpReadyDaemon(script, readyPattern, null);
+  }
+
+  private Setup setUpReadyDaemon(String script, String readyPattern, String basePath)
+      throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Proxy Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
@@ -124,6 +129,8 @@ public class DaemonProxyRouteTest {
                 0,
                 null,
                 echoServer.actualPort(),
+                null,
+                basePath,
                 null,
                 null,
                 null)
@@ -216,6 +223,24 @@ public class DaemonProxyRouteTest {
         .statusCode(502)
         .body(containsString("not running"));
     assertEquals(hitsBefore, echoHits.get(), "a stopped daemon must not be forwarded to");
+  }
+
+  @Test
+  public void basePathPrefixedRequestsForwardVerbatim() throws Exception {
+    // A daemon with a webView.basePath serves under /daemon/{w}/{d}/app/ — the proxy stays a dumb
+    // passthrough; the extra sub-path is part of the verbatim-forwarded path, never stripped.
+    Setup setup = setUpReadyDaemon("sleep 300", null, "app");
+    try {
+      awaitStatus(setup, DaemonStatus.READY);
+      String servedBase = "/daemon/work/" + setup.daemonId() + "/app";
+      given()
+          .get(servedBase + "/main.js")
+          .then()
+          .statusCode(200)
+          .body(containsString("echo:" + servedBase + "/main.js"));
+    } finally {
+      stopQuietly(setup);
+    }
   }
 
   @Test

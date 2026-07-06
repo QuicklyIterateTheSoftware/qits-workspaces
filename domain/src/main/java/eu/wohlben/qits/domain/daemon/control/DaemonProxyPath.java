@@ -22,4 +22,15 @@ public final class DaemonProxyPath {
   public static String base(String workspaceId, String daemonId) {
     return PREFIX + workspaceId + "/" + daemonId + "/";
   }
+
+  /**
+   * The base the daemon's app is actually served under: the proxy prefix plus the definition's
+   * {@code webView.basePath} when set (stored slash-less), with trailing slash. This is both {@code
+   * QITS_PUBLIC_BASE} and {@code DaemonInstanceDto.proxyPath} — the invariant that the dev server
+   * serves under exactly the path the proxy exposes it at.
+   */
+  public static String servedBase(String workspaceId, String daemonId, String basePath) {
+    String base = base(workspaceId, daemonId);
+    return basePath == null || basePath.isEmpty() ? base : base + basePath + "/";
+  }
 }

@@ -80,8 +80,8 @@ public class DaemonSupervisor {
     ScheduledFuture<?> liveness;
 
     /**
-     * The ephemeral localhost port the container published for the daemon's {@code httpPort} — the
-     * proxy target. Null when the daemon isn't web-viewable, or when the container predates the
+     * The ephemeral localhost port the container published for the daemon's {@code webView.port} —
+     * the proxy target. Null when the daemon isn't web-viewable, or when the container predates the
      * port declaration (needs recreation); re-resolved on every (re)launch.
      */
     Integer hostPort;
@@ -319,12 +319,16 @@ public class DaemonSupervisor {
         outputObservers.isEmpty() ? null : new ProcessOutputTap(outputObservers);
 
     String publicBase =
-        daemon.httpPort() != null ? DaemonProxyPath.base(instance.workspaceId, daemon.id()) : null;
+        daemon.webView() != null
+            ? DaemonProxyPath.servedBase(
+                instance.workspaceId, daemon.id(), daemon.webView().basePath())
+            : null;
 
     // Tag every daemon process with the reap marker (inherited by its forks via
     // /proc/<pid>/environ)
     // and, on a fresh start, reap any straggler from a previous run first — a child (e.g. Quarkus
-    // dev's forked JVM) that escaped the session and still binds httpPort would wedge this start.
+    // dev's forked JVM) that escaped the session and still binds the web-view port would wedge
+    // this start.
     // See
     // docs/issues/resolved/2026-07-05_daemon-stop-orphans-forked-quarkus-jvm.md.
     Map<String, String> environment = new HashMap<>(daemon.environment());
@@ -738,12 +742,12 @@ public class DaemonSupervisor {
   /**
    * Resolve the published localhost port for a web-viewable daemon — the container is guaranteed
    * provisioned here ({@code prepare}'s ensureContainer ran inside beginDaemonRun). A null result
-   * means the container predates the definition's {@code httpPort} (publishing is create-time
+   * means the container predates the definition's {@code webView.port} (publishing is create-time
    * only): the daemon still runs, but the web view stays unavailable until the container is
    * recreated — surfaced as a WARNING event rather than failing the launch.
    */
   private void resolveHostPort(Instance instance) {
-    Integer httpPort = instance.daemon.httpPort();
+    Integer httpPort = instance.daemon.webView() != null ? instance.daemon.webView().port() : null;
     if (httpPort == null) {
       instance.hostPort = null;
       return;
@@ -786,7 +790,7 @@ public class DaemonSupervisor {
       Key key = entry.getKey();
       if (key.workspaceId().equals(workspaceId) && key.daemonId().equals(daemonId)) {
         Instance instance = entry.getValue();
-        if (instance.daemon.httpPort() == null) {
+        if (instance.daemon.webView() == null) {
           return Optional.empty();
         }
         return Optional.of(new ProxyTarget(instance.status, instance.hostPort));
@@ -816,11 +820,22 @@ public class DaemonSupervisor {
       Instance instance, RepositoryDaemonDto definition, String workspaceId) {
     RepositoryDaemonDto daemon = definition != null ? definition : instance.daemon;
     String proxyPath =
-        daemon.httpPort() != null ? DaemonProxyPath.base(workspaceId, daemon.id()) : null;
+        daemon.webView() != null
+            ? DaemonProxyPath.servedBase(workspaceId, daemon.id(), daemon.webView().basePath())
+            : null;
     if (instance == null) {
-      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath);
+      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath, false);
     }
+    // A live web-viewable daemon whose container doesn't publish the configured port needs the
+    // container recreated (publishing is create-time only) before the web view can work.
+    boolean needsContainerRecreate =
+        proxyPath != null && isLive(instance.status) && instance.hostPort == null;
     return new DaemonInstanceDto(
-        daemon, instance.status, instance.restartCount, instance.commandId, proxyPath);
+        daemon,
+        instance.status,
+        instance.restartCount,
+        instance.commandId,
+        proxyPath,
+        needsContainerRecreate);
   }
 }
