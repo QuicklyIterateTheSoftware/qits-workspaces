@@ -15,6 +15,8 @@ import eu.wohlben.qits.domain.daemon.entity.LogObserverKind;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -122,6 +124,8 @@ public class DaemonSupervisor {
   @Inject LogClassifier classifier;
 
   @Inject ContainerRuntime containers;
+
+  @Inject WorkspaceChangePublisher changePublisher;
 
   /** Without a ready pattern, STARTING flips to READY after this long (if still alive). */
   @ConfigProperty(name = "qits.daemons.ready-grace-ms", defaultValue = "10000")
@@ -738,6 +742,7 @@ public class DaemonSupervisor {
       String summary,
       String logExcerpt) {
     instance.status = status;
+    changePublisher.fire(instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.DAEMONS);
     if (!isLive(status)) {
       closeTails(instance);
     }

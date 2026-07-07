@@ -4,6 +4,8 @@ import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
 import eu.wohlben.qits.domain.daemon.mapper.DaemonEventMapper;
 import eu.wohlben.qits.domain.daemon.persistence.DaemonEventRepository;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -31,12 +33,16 @@ public class DaemonEventService {
 
   @Inject DaemonAgentNotifier agentNotifier;
 
+  @Inject WorkspaceChangePublisher changePublisher;
+
   public void publish(DaemonEventDto event) {
     try {
       persister.persist(event);
     } catch (RuntimeException e) {
       LOG.warnf(e, "Failed to persist daemon event: %s", event.summary());
     }
+    changePublisher.fire(
+        event.repoId(), event.workspaceId(), WorkspaceChangeHint.Topic.DAEMON_EVENTS);
     if (event.severity() != null && event.severity() != DaemonEventSeverity.INFO) {
       try {
         agentNotifier.deliver(event);
