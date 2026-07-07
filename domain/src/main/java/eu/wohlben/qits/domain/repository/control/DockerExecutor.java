@@ -154,6 +154,24 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
+  public boolean isRunning(String container) {
+    ExecResult result =
+        runCapturing(
+            null, List.of(runtime, "container", "inspect", "-f", "{{.State.Running}}", container));
+    // A missing container inspects non-zero; a present one prints "true"/"false" for its run state.
+    return result.exitCode() == 0 && "true".equals(result.output().trim());
+  }
+
+  @Override
+  public void start(String container) {
+    ExecResult result = runCapturing(null, List.of(runtime, "start", container));
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start container " + container + ": " + result.output());
+    }
+  }
+
+  @Override
   public void rm(String container) {
     ExecResult result = runCapturing(null, List.of(runtime, "rm", "-f", container));
     if (result.exitCode() != 0) {

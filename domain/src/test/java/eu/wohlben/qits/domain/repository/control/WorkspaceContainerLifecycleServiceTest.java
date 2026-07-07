@@ -98,6 +98,28 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
+  public void ensureContainerRestartsAnExitedContainerInPlaceKeepingUnpushedWork()
+      throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    String container = containers.containerName("feat", repoId);
+    String head = commitInContainer(container, "unpushed.txt");
+
+    // A host/docker restart leaves the container present but Exited (its /workspace clone intact) —
+    // the exact state DockerExecutor.exists() couldn't distinguish from "running".
+    ((FakeContainerRuntime) containers).markExited(container);
+    assertFalse(containers.isRunning(container));
+    assertTrue(containers.exists(container), "the exited container is still present");
+
+    // ensureContainer must start it back up in place — NOT no-op on mere presence, NOT re-clone —
+    // so the unpushed commit survives and the runtime status reflects the live container.
+    workspaceService.ensureContainer(repoId, "feat");
+    assertTrue(containers.isRunning(container), "the exited container is started back up");
+    assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
+    assertEquals(head, containerHead(container), "restart-in-place keeps the unpushed commit");
+  }
+
+  @Test
   public void ensureContainerAbandonsWhenTheBranchIsGone() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);

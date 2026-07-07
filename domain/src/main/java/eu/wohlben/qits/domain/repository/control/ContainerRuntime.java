@@ -69,6 +69,21 @@ public interface ContainerRuntime {
   /** Whether a container with this name exists (running or stopped). */
   boolean exists(String container);
 
+  /**
+   * Whether a container with this name exists <em>and</em> is currently running — the
+   * live-container guard {@link #exists} can't give, since {@code docker container inspect}
+   * succeeds for exited containers too. A host/docker restart leaves qits containers present but
+   * {@code Exited}, so the "already provisioned?" check must key off run state, not mere presence.
+   */
+  boolean isRunning(String container);
+
+  /**
+   * Starts a present-but-stopped container ({@code docker start}) — the lossless recovery for a
+   * container that died out-of-band (e.g. a host restart): it keeps the {@code /workspace} clone
+   * and any unpushed commits, unlike a re-provision that re-clones from origin. Throws on failure.
+   */
+  void start(String container);
+
   /** Force-removes the container ({@code docker rm -f}); best-effort, never throws. */
   void rm(String container);
 

@@ -48,6 +48,10 @@ public class FakeContainerRuntime implements ContainerRuntime {
       Set<Integer> publishedPorts) {}
 
   private final Map<String, Info> byName = new ConcurrentHashMap<>();
+  // Containers present but not running — the fake's stand-in for a host/docker restart's `Exited`
+  // state. `run`/`start` clear membership, `rm` drops it, and the `markExited` test hook adds to
+  // it.
+  private final Set<String> stopped = ConcurrentHashMap.newKeySet();
 
   @Override
   public String containerName(String workspaceId, String repoId) {
@@ -78,6 +82,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
             parent,
             dir,
             publishPorts == null ? Set.of() : Set.copyOf(publishPorts)));
+    stopped.remove(name);
     return name;
   }
 
@@ -149,7 +154,31 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
+  public boolean isRunning(String container) {
+    return byName.containsKey(container) && !stopped.contains(container);
+  }
+
+  @Override
+  public void start(String container) {
+    if (!byName.containsKey(container)) {
+      throw new IllegalStateException("No such container: " + container);
+    }
+    stopped.remove(container);
+  }
+
+  /**
+   * Test hook: mark a present container {@code Exited} (a host/docker-restart stand-in) without
+   * touching its {@code /workspace} clone, so a subsequent {@link #start} is verifiably lossless.
+   */
+  public void markExited(String container) {
+    if (byName.containsKey(container)) {
+      stopped.add(container);
+    }
+  }
+
+  @Override
   public void rm(String container) {
+    stopped.remove(container);
     Info info = byName.remove(container);
     if (info != null && Files.exists(info.dir())) {
       try (var paths = Files.walk(info.dir())) {

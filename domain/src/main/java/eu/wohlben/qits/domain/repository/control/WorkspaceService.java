@@ -570,6 +570,10 @@ public class WorkspaceService {
    * <ul>
    *   <li>container already running → stamp {@code RUNNING}, no-op. A live container is
    *       <em>never</em> re-cloned over, so unpushed {@code /workspace} commits are safe.
+   *   <li>container present but stopped (e.g. a host/docker restart left it {@code Exited}) →
+   *       {@code docker start} it in place. This keeps the {@code /workspace} clone and any
+   *       unpushed commits — the lossless recovery a re-clone can't give — so it wins over
+   *       re-provisioning.
    *   <li>container absent but the branch ref survives in origin → re-materialize a fresh container
    *       from that branch ({@code createBranchRef=false}, the {@link #createMainWorkspace} path).
    *   <li>branch ref gone from origin → the work no longer exists anywhere: the workspace is
@@ -596,7 +600,7 @@ public class WorkspaceService {
                           .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
                           .orElseThrow(
                               () -> new NotFoundException("Workspace not found: " + workspaceId));
-                  if (containers.exists(container)) {
+                  if (containers.isRunning(container)) {
                     wt.runtimeStatus = WorkspaceRuntimeStatus.RUNNING;
                     wt.runtimeError = null;
                     return null; // already running — nothing to provision
@@ -605,6 +609,35 @@ public class WorkspaceService {
                 });
     if (snapshot == null) {
       return;
+    }
+
+    // Present but not running — a container that died out-of-band (classically a host/docker
+    // restart leaving it Exited). `isRunning` is false but the container (and its /workspace clone)
+    // still exist, so start it back up in place rather than re-cloning: this keeps unpushed
+    // commits,
+    // the lossless recovery the graceful-stop path can't offer once the container died
+    // unexpectedly.
+    // The branch-gone abandonment below deliberately doesn't apply here — the work lives in the
+    // container, not just origin.
+    if (containers.exists(container)) {
+      QuarkusTransaction.requiringNew()
+          .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.PROVISIONING, null));
+      try {
+        containers.start(container);
+        QuarkusTransaction.requiringNew()
+            .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
+        return;
+      } catch (RuntimeException e) {
+        QuarkusTransaction.requiringNew()
+            .run(
+                () ->
+                    markRuntime(
+                        repoId,
+                        workspaceId,
+                        WorkspaceRuntimeStatus.FAILED,
+                        truncate(e.getMessage())));
+        throw e;
+      }
     }
 
     Path originPath = Path.of(dataDir, repoId, "origin");
