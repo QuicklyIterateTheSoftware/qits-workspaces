@@ -697,6 +697,7 @@ public class DaemonSupervisor {
       return;
     }
     instance.restartCount++;
+    refreshDefinition(instance);
     try {
       launch(instance);
     } catch (RuntimeException e) {
@@ -707,6 +708,26 @@ public class DaemonSupervisor {
           DaemonEventSeverity.ERROR,
           "relaunch failed: " + e.getMessage(),
           null);
+    }
+  }
+
+  /**
+   * Re-read the daemon definition from the repository before an automatic relaunch, so a mid-run
+   * edit (webView added, startScript changed, observers/env updated) takes effect on the fresh
+   * process instead of the supervisor resurrecting the launch-time snapshot. Falls back to the
+   * pinned copy if the definition was deleted mid-flight — {@link #launch} still needs something to
+   * start, and the next liveness/settle cycle will clean it up. Without this, the proxy's {@link
+   * #proxyTarget} (which reads {@code instance.daemon.webView()}) and the REST list (which prefers
+   * the database definition) answer from two different snapshots after an {@code ON_FAILURE}
+   * restart — see docs/issues
+   * resolved/2026-07-06_daemon-relaunch-uses-stale-definition-after-webview-update.
+   */
+  private void refreshDefinition(Instance instance) {
+    try {
+      instance.daemon = repositoryDaemonService.resolve(instance.repoId, instance.daemon.id());
+    } catch (NotFoundException e) {
+      LOG.debugf(
+          "Daemon '%s' definition gone at relaunch; keeping the pinned copy", instance.daemon.id());
     }
   }
 
