@@ -20,6 +20,8 @@ class WorkspaceContainerFactoryTest {
     f.network = "qits-net";
     f.claudeVolume = "qits_shared_dot_claude";
     f.claudeMount = "/claude-home";
+    f.mavenVolume = "qits_shared_m2";
+    f.pnpmVolume = "qits_shared_pnpm";
     return f;
   }
 
@@ -33,6 +35,11 @@ class WorkspaceContainerFactoryTest {
     // ...and every in-container `claude` is pointed at it regardless of HOME, so a login persists
     // across containers even for ad-hoc runs.
     assertSequence(argv, "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude");
+    // Shared build caches mounted + tools pointed at them, so downloads are reused across builds.
+    assertSequence(argv, "-v", "qits_shared_m2:/caches/m2");
+    assertSequence(argv, "-e", "MAVEN_OPTS=-Dmaven.repo.local=/caches/m2");
+    assertSequence(argv, "-v", "qits_shared_pnpm:/caches/pnpm");
+    assertSequence(argv, "-e", "npm_config_store_dir=/caches/pnpm/store");
     // The qits.* reconciliation labels.
     assertSequence(argv, "--label", "qits.repository=repo12345678abc");
     assertSequence(argv, "--label", "qits.workspace=work");
@@ -50,15 +57,19 @@ class WorkspaceContainerFactoryTest {
   }
 
   @Test
-  void blankCredentialVolumeOmitsOnlyTheMount() {
+  void blankingAVolumeOmitsOnlyThatMount() {
     WorkspaceContainerFactory f = factory();
     f.claudeVolume = "";
+    f.pnpmVolume = "";
 
     List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
 
-    assertFalse(argv.contains("-v"), argv.toString());
-    // With no shared volume there is nothing to point CLAUDE_CONFIG_DIR at, so it is omitted too.
+    // The blanked caches drop their mount (and, for claude, CLAUDE_CONFIG_DIR too)...
+    assertFalse(argv.contains("qits_shared_dot_claude:/claude-home"), argv.toString());
     assertFalse(argv.contains("CLAUDE_CONFIG_DIR=/claude-home/.claude"), argv.toString());
+    assertFalse(argv.contains("qits_shared_pnpm:/caches/pnpm"), argv.toString());
+    // ...while the still-configured Maven cache stays.
+    assertSequence(argv, "-v", "qits_shared_m2:/caches/m2");
     // Everything else still present, incl. an empty parent label for the null parent.
     assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
     assertSequence(argv, "--label", "qits.repository=repo12345678abc");

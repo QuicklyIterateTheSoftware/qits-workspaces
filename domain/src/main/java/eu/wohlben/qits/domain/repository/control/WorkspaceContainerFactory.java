@@ -40,11 +40,37 @@ public class WorkspaceContainerFactory {
   String claudeMount;
 
   /**
+   * Shared build caches mounted into every workspace container (and qits' own devcontainer), so a
+   * dependency downloaded by one build is reused by all — the Maven local repo and the pnpm store.
+   * Blank disables the mount. Mount points are fixed ({@code /caches/m2}, {@code /caches/pnpm},
+   * both {@code chmod 0777} in the image) and Maven/pnpm are pointed at them via {@code MAVEN_OPTS}
+   * / {@code npm_config_store_dir}.
+   */
+  @ConfigProperty(name = "qits.workspace.maven-volume", defaultValue = "qits_shared_m2")
+  String mavenVolume;
+
+  @ConfigProperty(name = "qits.workspace.pnpm-volume", defaultValue = "qits_shared_pnpm")
+  String pnpmVolume;
+
+  static final String MAVEN_MOUNT = "/caches/m2";
+  static final String PNPM_MOUNT = "/caches/pnpm";
+
+  /**
    * The shared credential volume name (blank when the mount is disabled) — the single source of
    * truth {@link DockerExecutor} reuses for its startup {@code docker volume create}.
    */
   public String claudeVolume() {
     return claudeVolume;
+  }
+
+  /** The shared Maven-repo volume name (blank when disabled) — ensured at startup by executor. */
+  public String mavenVolume() {
+    return mavenVolume;
+  }
+
+  /** The shared pnpm-store volume name (blank when disabled) — ensured at startup by executor. */
+  public String pnpmVolume() {
+    return pnpmVolume;
   }
 
   /** The shared network name — the single source of truth {@link DockerExecutor} ensures exists. */
@@ -56,9 +82,9 @@ public class WorkspaceContainerFactory {
    * A {@link WorkspaceContainer} seeded for {@code workspaceId} of {@code repoId}: its
    * deterministic name, the host uid, the four {@code qits.*} labels startup reconciliation reads
    * back, the {@code host.docker.internal} alias Linux needs, the shared {@code qits-net} network,
-   * the shared credential volume (whenever configured), the image, and {@code sleep infinity} as
-   * the command. Everything safety-critical is already in place; the caller may keep chaining but
-   * need not.
+   * the shared credential + build-cache volumes (whenever configured), the image, and {@code sleep
+   * infinity} as the command. Everything safety-critical is already in place; the caller may keep
+   * chaining but need not.
    */
   public WorkspaceContainer forWorkspace(
       String repoId, String workspaceId, String branch, String parent) {
@@ -92,6 +118,19 @@ public class WorkspaceContainerFactory {
       // every `docker exec`, so cross-container persistence no longer relies on each launcher
       // remembering the HOME overlay.
       container.env("CLAUDE_CONFIG_DIR", claudeMount + "/.claude");
+    }
+    // Shared build caches (Maven repo + pnpm store), the same named volumes qits' devcontainer
+    // mounts — so a dependency fetched by one build (a fixture `./mvnw`, an action, the agent, or
+    // qits itself) is reused by every other container. Point the tools at the fixed mount paths via
+    // env, inherited by every `docker exec` (HOME is /workspace, so the defaults would otherwise
+    // land in the clone and never be shared).
+    if (mavenVolume != null && !mavenVolume.isBlank()) {
+      container.volume(mavenVolume, MAVEN_MOUNT);
+      container.env("MAVEN_OPTS", "-Dmaven.repo.local=" + MAVEN_MOUNT);
+    }
+    if (pnpmVolume != null && !pnpmVolume.isBlank()) {
+      container.volume(pnpmVolume, PNPM_MOUNT);
+      container.env("npm_config_store_dir", PNPM_MOUNT + "/store");
     }
     return container.image(image).command("sleep", "infinity");
   }

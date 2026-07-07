@@ -52,21 +52,24 @@ public class DockerExecutor implements ContainerRuntime {
    * executor.
    */
   void onStart(@Observes StartupEvent event) {
-    ensureClaudeVolume();
+    // The shared volumes every workspace container mounts: the coding-agent credential store and
+    // the
+    // Maven repo / pnpm store build caches. Created here so they exist before the first container.
+    ensureVolume(
+        containerFactory.claudeVolume(), "agent credential (agent auth may be unavailable)");
+    ensureVolume(containerFactory.mavenVolume(), "Maven repo cache");
+    ensureVolume(containerFactory.pnpmVolume(), "pnpm store cache");
     ensureNetwork();
   }
 
   /** Idempotent {@code docker volume create}; no-op when the volume name is blank. */
-  void ensureClaudeVolume() {
-    String claudeVolume = containerFactory.claudeVolume();
-    if (claudeVolume == null || claudeVolume.isBlank()) {
+  void ensureVolume(String volume, String purpose) {
+    if (volume == null || volume.isBlank()) {
       return;
     }
-    ExecResult result = runCapturing(null, List.of(runtime, "volume", "create", claudeVolume));
+    ExecResult result = runCapturing(null, List.of(runtime, "volume", "create", volume));
     if (result.exitCode() != 0) {
-      LOG.warnf(
-          "Could not ensure shared agent credential volume '%s' (agent auth may be unavailable): %s",
-          claudeVolume, result.output());
+      LOG.warnf("Could not ensure shared %s volume '%s': %s", purpose, volume, result.output());
     }
   }
 
