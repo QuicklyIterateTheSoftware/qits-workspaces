@@ -77,6 +77,8 @@ public class DaemonProxyRouteTest {
   private Vertx echoVertx;
   private HttpServer echoServer;
   private final AtomicInteger echoHits = new AtomicInteger();
+  private final java.util.concurrent.atomic.AtomicReference<String> lastHostHeader =
+      new java.util.concurrent.atomic.AtomicReference<>();
 
   @BeforeEach
   void startEchoServer() throws Exception {
@@ -87,6 +89,7 @@ public class DaemonProxyRouteTest {
             .requestHandler(
                 req -> {
                   echoHits.incrementAndGet();
+                  lastHostHeader.set(req.getHeader("Host"));
                   req.response().end("echo:" + req.uri());
                 })
             .webSocketHandler(
@@ -223,6 +226,29 @@ public class DaemonProxyRouteTest {
         .statusCode(502)
         .body(containsString("not running"));
     assertEquals(hitsBefore, echoHits.get(), "a stopped daemon must not be forwarded to");
+  }
+
+  @Test
+  public void rewritesHostHeaderToLocalhostSoTheDevServerAllowsIt() throws Exception {
+    // Regression for the devcontainer move: qits now reaches containers by DNS name, so the proxy
+    // must present the origin's Host as `localhost` (always allow-listed by Angular's dev server)
+    // instead of the container's DNS name (rejected with "This host is not allowed"). TCP still
+    // targets the fixed origin; only the Host/:authority header is rewritten.
+    Setup setup = setUpReadyDaemon("sleep 300", null);
+    try {
+      awaitStatus(setup, DaemonStatus.READY);
+      given()
+          .get("/daemon/work/" + setup.daemonId() + "/index.html")
+          .then()
+          .statusCode(200)
+          .body(containsString("echo:"));
+      assertEquals(
+          "localhost:" + echoServer.actualPort(),
+          lastHostHeader.get(),
+          "the origin must see a localhost Host, not qits' own or the container's DNS name");
+    } finally {
+      stopQuietly(setup);
+    }
   }
 
   @Test

@@ -4,11 +4,16 @@ import eu.wohlben.qits.domain.daemon.control.DaemonProxyPath;
 import eu.wohlben.qits.domain.daemon.control.DaemonSupervisor;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
+import io.vertx.core.net.HostAndPort;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.httpproxy.HttpProxy;
+import io.vertx.httpproxy.ProxyContext;
+import io.vertx.httpproxy.ProxyInterceptor;
+import io.vertx.httpproxy.ProxyResponse;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -17,11 +22,12 @@ import java.util.Optional;
 /**
  * The daemon web-view reverse proxy: {@code /daemon/{workspaceId}/{daemonId}/*} on the qits origin
  * forwards to the daemon's dev server, reached by the workspace container's DNS name on the shared
- * {@code qits-net} network — verbatim passthrough, no prefix stripping, no rewriting. The dev
- * server itself serves under the prefix (it was launched with {@code QITS_PUBLIC_BASE}, see {@link
- * DaemonProxyPath}), so assets and the HMR websocket stay inside it; vertx-http-proxy forwards
- * WebSocket upgrades by default. Because the frame shares the qits origin, the UI's DOM picker
- * reads {@code iframe.contentDocument} directly — no injection.
+ * {@code qits-net} network — verbatim passthrough, no prefix stripping (the one rewrite is the
+ * {@code Host} header, see {@link #hostRewrite}). The dev server itself serves under the prefix (it
+ * was launched with {@code QITS_PUBLIC_BASE}, see {@link DaemonProxyPath}), so assets and the HMR
+ * websocket stay inside it; vertx-http-proxy forwards WebSocket upgrades by default. Because the
+ * frame shares the qits origin, the UI's DOM picker reads {@code iframe.contentDocument} directly —
+ * no injection.
  *
  * <p>Security posture: the origin is resolved exclusively from supervisor state — the container
  * name and port come from the daemon definition recorded at launch, never from any request
@@ -103,9 +109,31 @@ public class DaemonProxyRoute {
         // request.
         HttpProxy.reverseProxy(proxyClient)
             .origin(origin.port(), origin.host())
+            .addInterceptor(hostRewrite(origin.port()))
             .handle(rc.request());
       }
     }
+  }
+
+  /**
+   * Present qits to the framed dev server as {@code localhost} rather than the workspace
+   * container's DNS name. Angular's (Vite/webpack) dev server rejects any {@code Host} that isn't
+   * localhost/an IP/allow-listed ("This host is not allowed"); {@code localhost} is always allowed.
+   * This restores the Host the dev server saw before qits moved onto {@code qits-net}: back then
+   * qits reached containers through a published {@code 127.0.0.1:port}, so the check passed;
+   * reaching them by DNS name is what started sending the rejected Host. TCP still targets the
+   * fixed origin ({@code .origin(...)}); only the Host/:authority header changes, so no per-app
+   * {@code allowedHosts} config is needed. ({@code ProxyInterceptor} has no abstract method — it is
+   * not a functional interface — so this must be an explicit implementation, not a lambda.)
+   */
+  private static ProxyInterceptor hostRewrite(int port) {
+    return new ProxyInterceptor() {
+      @Override
+      public Future<ProxyResponse> handleProxyRequest(ProxyContext context) {
+        context.request().setAuthority(HostAndPort.create("localhost", port));
+        return context.sendRequest();
+      }
+    };
   }
 
   /** A qits-branded splash that refreshes itself until the dev server is up. */
