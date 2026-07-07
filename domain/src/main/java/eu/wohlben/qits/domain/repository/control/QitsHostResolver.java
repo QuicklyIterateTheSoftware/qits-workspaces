@@ -18,20 +18,26 @@ import org.jboss.logging.Logger;
  * differs by environment and getting it wrong is the silent failure mode of the whole feature:
  *
  * <ul>
- *   <li><strong>Plain Linux docker</strong>: {@code host.docker.internal} works — {@code
- *       DockerExecutor} adds {@code --add-host=host.docker.internal:host-gateway}, so it maps to
- *       the host and the app (bound on {@code 0.0.0.0}) is reachable.
- *   <li><strong>WSL2 + Docker Desktop</strong>: {@code host.docker.internal} resolves to an address
- *       that does <em>not</em> reach the WSL2 distro's app (commonly an unreachable IPv6), so a
- *       container clone fails. The distro's primary LAN IPv4 (its {@code eth0} address) <em>is</em>
- *       reachable.
+ *   <li><strong>Shared-network deployment (the devcontainer)</strong>: when qits itself runs in a
+ *       container on the same {@code qits-net} as the workspace containers, a container reaches
+ *       qits by its <em>network alias</em> — the devcontainer sets {@code
+ *       qits.workspace.git-host=qits} explicitly, so container→qits (git/OTLP/MCP) is plain
+ *       container→container DNS with no host hop at all. This is the preferred setup and sidesteps
+ *       the WSL2 problem below entirely.
+ *   <li><strong>Plain Linux docker (qits on the host)</strong>: {@code host.docker.internal} works
+ *       — {@code DockerExecutor} adds {@code --add-host=host.docker.internal:host-gateway}, so it
+ *       maps to the host and the app (bound on {@code 0.0.0.0}) is reachable.
+ *   <li><strong>WSL2 + Docker Desktop (qits on the host)</strong>: {@code host.docker.internal}
+ *       resolves to an address that does <em>not</em> reach the WSL2 distro's app (commonly an
+ *       unreachable IPv6), so a container clone fails. The distro's primary LAN IPv4 (its {@code
+ *       eth0} address) <em>is</em> reachable.
  * </ul>
  *
  * <p>The config {@code qits.workspace.git-host} (historical name, kept for compatibility) defaults
- * to the sentinel {@code auto}: auto-detect per environment so it "just works" on both without a
- * machine-local override. Any explicit value (an IP, a hostname, or literally {@code
- * host.docker.internal}) is respected as-is — set one only if the auto-detection picks the wrong
- * interface (e.g. a multi-homed host or a VPN).
+ * to the sentinel {@code auto}: auto-detect per environment (the two host-run cases above) so it
+ * "just works" without a machine-local override. Any explicit value (a container alias like {@code
+ * qits}, an IP, a hostname, or literally {@code host.docker.internal}) is respected as-is — the
+ * shared-network deployment relies on this to pin the alias.
  */
 @ApplicationScoped
 public class QitsHostResolver {

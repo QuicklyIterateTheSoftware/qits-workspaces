@@ -1,6 +1,5 @@
 package eu.wohlben.qits.domain.repository.control;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -27,29 +26,26 @@ public interface ContainerRuntime {
   String containerName(String workspaceId, String repoId);
 
   /**
-   * Creates and starts the workspace's container ({@code docker run -d … sleep infinity}) with the
-   * {@code qits.repository}/{@code qits.workspace}/{@code qits.branch}/{@code qits.parent} labels
-   * that startup reconciliation reads back. Returns the container name. Throws on failure.
+   * Creates and starts the workspace's container ({@code docker run -d … sleep infinity}) on the
+   * shared {@code qits-net} with the {@code qits.repository}/{@code qits.workspace}/{@code
+   * qits.branch}/{@code qits.parent} labels that startup reconciliation reads back. Returns the
+   * container name. Throws on failure.
    *
-   * <p>{@code publishPorts} are container ports published to an ephemeral localhost port on the
-   * host ({@code -p 127.0.0.1:0:<port>}) — the host→container channel the daemon web-view proxy
-   * targets. Publishing must happen at creation (docker cannot add ports to a live container), so
-   * the caller passes every port the repository's daemon definitions currently declare; localhost
-   * binding keeps them off the LAN (the browser reaches daemons through qits, never directly).
+   * <p>The container publishes <em>no</em> host ports: qits and every workspace container share one
+   * Docker network, so the daemon web-view proxy reaches a container port by its container name
+   * over that network (see {@link #resolveTarget}). That removes the create-time port-publishing
+   * constraint entirely — a daemon can gain a web-view port after its container exists and still be
+   * reachable without a recreation.
    */
-  String run(
-      String repoId,
-      String workspaceId,
-      String branch,
-      String parent,
-      Collection<Integer> publishPorts);
+  String run(String repoId, String workspaceId, String branch, String parent);
 
   /**
-   * The ephemeral host port a published container port landed on ({@code docker port}), or null
-   * when the container doesn't publish it — e.g. it predates the daemon definition declaring the
-   * port, in which case it must be recreated to pick the mapping up.
+   * Where the qits process connects to reach {@code containerPort} inside {@code container} — the
+   * daemon web-view proxy's origin. On the shared network this is the container's DNS name and the
+   * real container port; the test fake maps it to {@code 127.0.0.1}. Null only when the target
+   * cannot be resolved at all (e.g. the container is gone), in which case the proxy 502s.
    */
-  Integer hostPort(String container, int containerPort);
+  ProxyOrigin resolveTarget(String container, int containerPort);
 
   /**
    * Runs a one-shot command inside the container and captures its output (mirrors {@link

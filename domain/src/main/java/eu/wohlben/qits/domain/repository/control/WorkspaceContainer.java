@@ -1,7 +1,6 @@
 package eu.wohlben.qits.domain.repository.control;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -9,9 +8,8 @@ import java.util.Map;
 /**
  * A framework-free fluent builder for a workspace container's {@code docker run} argv — the
  * container-creation sibling of {@link eu.wohlben.qits.domain.agent.control.CodingAgent}. It
- * accumulates the run parameters (name, user, labels, host aliases, volumes, published ports,
- * image, command) and renders them, in a fixed order, into the argv that follows {@code docker
- * run}.
+ * accumulates the run parameters (name, user, labels, host aliases, network, volumes, image,
+ * command) and renders them, in a fixed order, into the argv that follows {@code docker run}.
  *
  * <p>Callers do not construct this directly with the cross-cutting config; they obtain a pre-seeded
  * instance from {@link WorkspaceContainerFactory} (which guarantees the shared credential volume,
@@ -28,7 +26,7 @@ public final class WorkspaceContainer {
   private final List<String> addHosts = new ArrayList<>();
   private final Map<String, String> env = new LinkedHashMap<>();
   private final List<String[]> volumes = new ArrayList<>(); // {volumeName, mountPath}
-  private final List<Integer> publishPorts = new ArrayList<>();
+  private String network;
   private String image;
   private final List<String> command = new ArrayList<>();
 
@@ -70,19 +68,12 @@ public final class WorkspaceContainer {
   }
 
   /**
-   * Publish {@code containerPort} to an ephemeral localhost host port ({@code -p
-   * 127.0.0.1:0:port}).
+   * Attach the container to a user-defined Docker network ({@code --network <name>}) so qits (also
+   * on it) can reach the container's ports by its DNS name — no host-port publishing. A blank name
+   * adds nothing (the default bridge).
    */
-  public WorkspaceContainer publishPort(int containerPort) {
-    this.publishPorts.add(containerPort);
-    return this;
-  }
-
-  /** Publish each of {@code containerPorts}; a null collection adds nothing. */
-  public WorkspaceContainer publishPorts(Collection<Integer> containerPorts) {
-    if (containerPorts != null) {
-      this.publishPorts.addAll(containerPorts);
-    }
+  public WorkspaceContainer network(String network) {
+    this.network = network;
     return this;
   }
 
@@ -101,7 +92,7 @@ public final class WorkspaceContainer {
 
   /**
    * The {@code docker run} argv <em>after</em> the runtime binary and the {@code run} verb: {@code
-   * -d --init --name … --user … --label … --add-host=… -v … -p 127.0.0.1:0:… <image> <command…>},
+   * -d --init --name … --user … --label … --add-host=… --network … -e … -v … <image> <command…>},
    * in that fixed order regardless of the order setters were called in.
    */
   public List<String> toRunArgv() {
@@ -123,6 +114,10 @@ public final class WorkspaceContainer {
     for (String host : addHosts) {
       argv.add("--add-host=" + host);
     }
+    if (network != null && !network.isBlank()) {
+      argv.add("--network");
+      argv.add(network);
+    }
     for (Map.Entry<String, String> variable : env.entrySet()) {
       argv.add("-e");
       argv.add(variable.getKey() + "=" + variable.getValue());
@@ -130,10 +125,6 @@ public final class WorkspaceContainer {
     for (String[] volume : volumes) {
       argv.add("-v");
       argv.add(volume[0] + ":" + volume[1]);
-    }
-    for (int port : publishPorts) {
-      argv.add("-p");
-      argv.add("127.0.0.1:0:" + port);
     }
     if (image != null) {
       argv.add(image);

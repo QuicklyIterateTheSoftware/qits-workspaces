@@ -3,7 +3,6 @@ package eu.wohlben.qits.domain.repository.control;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collection;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -19,6 +18,14 @@ public class WorkspaceContainerFactory {
 
   @ConfigProperty(name = "qits.workspace.image", defaultValue = "qits/workspace:latest")
   String image;
+
+  /**
+   * The shared Docker network every workspace container joins (and qits is on), so qits reaches a
+   * container's ports by its DNS name with no host-port publishing. Created if absent at startup by
+   * {@link DockerExecutor}.
+   */
+  @ConfigProperty(name = "qits.workspace.network", defaultValue = "qits-net")
+  String network;
 
   /**
    * The shared named volume holding the coding agent's home ({@code ~/.claude} — the one-time OAuth
@@ -40,20 +47,21 @@ public class WorkspaceContainerFactory {
     return claudeVolume;
   }
 
+  /** The shared network name — the single source of truth {@link DockerExecutor} ensures exists. */
+  public String network() {
+    return network;
+  }
+
   /**
    * A {@link WorkspaceContainer} seeded for {@code workspaceId} of {@code repoId}: its
    * deterministic name, the host uid, the four {@code qits.*} labels startup reconciliation reads
-   * back, the {@code host.docker.internal} alias Linux needs, the shared credential volume
-   * (whenever configured), every declared publish port, the image, and {@code sleep infinity} as
+   * back, the {@code host.docker.internal} alias Linux needs, the shared {@code qits-net} network,
+   * the shared credential volume (whenever configured), the image, and {@code sleep infinity} as
    * the command. Everything safety-critical is already in place; the caller may keep chaining but
    * need not.
    */
   public WorkspaceContainer forWorkspace(
-      String repoId,
-      String workspaceId,
-      String branch,
-      String parent,
-      Collection<Integer> publishPorts) {
+      String repoId, String workspaceId, String branch, String parent) {
     WorkspaceContainer container =
         new WorkspaceContainer()
             .name(containerName(workspaceId, repoId))
@@ -65,7 +73,9 @@ public class WorkspaceContainerFactory {
             // Linux needs this for host.docker.internal to resolve to the docker bridge gateway;
             // qits
             // controls container creation, so it is always set.
-            .addHost("host.docker.internal:host-gateway");
+            .addHost("host.docker.internal:host-gateway")
+            // Join the shared network so qits reaches the container's ports by DNS name (no -p).
+            .network(network);
     // The shared credential volume so an in-container `claude` can read the one-time OAuth login.
     // Mounted read/write on every workspace container (agent and daemon share the container), so
     // any
@@ -83,8 +93,7 @@ public class WorkspaceContainerFactory {
       // remembering the HOME overlay.
       container.env("CLAUDE_CONFIG_DIR", claudeMount + "/.claude");
     }
-    // Ephemeral localhost publishing for web-viewable daemon ports (see ContainerRuntime#run).
-    return container.publishPorts(publishPorts).image(image).command("sleep", "infinity");
+    return container.image(image).command("sleep", "infinity");
   }
 
   /**

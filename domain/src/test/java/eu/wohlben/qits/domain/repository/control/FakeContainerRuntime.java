@@ -7,7 +7,6 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,13 +38,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
-  private record Info(
-      String repoId,
-      String workspaceId,
-      String branch,
-      String parent,
-      Path dir,
-      Set<Integer> publishedPorts) {}
+  private record Info(String repoId, String workspaceId, String branch, String parent, Path dir) {}
 
   private final Map<String, Info> byName = new ConcurrentHashMap<>();
   // Containers present but not running — the fake's stand-in for a host/docker restart's `Exited`
@@ -60,12 +53,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public String run(
-      String repoId,
-      String workspaceId,
-      String branch,
-      String parent,
-      Collection<Integer> publishPorts) {
+  public String run(String repoId, String workspaceId, String branch, String parent) {
     String name = containerName(workspaceId, repoId);
     Path dir = Path.of(dataDir, repoId, "workspaces", workspaceId).toAbsolutePath();
     try {
@@ -73,31 +61,22 @@ public class FakeContainerRuntime implements ContainerRuntime {
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    byName.put(
-        name,
-        new Info(
-            repoId,
-            workspaceId,
-            branch,
-            parent,
-            dir,
-            publishPorts == null ? Set.of() : Set.copyOf(publishPorts)));
+    byName.put(name, new Info(repoId, workspaceId, branch, parent, dir));
     stopped.remove(name);
     return name;
   }
 
   /**
-   * Fake containers are host processes, so a "published" container port is reachable on the host
-   * as-is — identity mapping, but only for ports declared at {@link #run} time, mirroring docker's
-   * create-time-only publishing (a container predating the port returns null, like the real one).
+   * Fake containers run as host processes binding real host ports, so the proxy target is simply
+   * {@code 127.0.0.1} + the port the daemon bound — the host-clone analogue of reaching a container
+   * by its DNS name on the shared network. Any known container resolves (no create-time port set).
    */
   @Override
-  public Integer hostPort(String container, int containerPort) {
-    Info info = byName.get(container);
-    if (info == null || !info.publishedPorts().contains(containerPort)) {
+  public ProxyOrigin resolveTarget(String container, int containerPort) {
+    if (!byName.containsKey(container)) {
       return null;
     }
-    return containerPort;
+    return new ProxyOrigin("127.0.0.1", containerPort);
   }
 
   @Override

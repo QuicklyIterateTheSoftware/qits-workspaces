@@ -17,6 +17,7 @@ class WorkspaceContainerFactoryTest {
   private WorkspaceContainerFactory factory() {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.image = "qits/workspace:latest";
+    f.network = "qits-net";
     f.claudeVolume = "qits_shared_dot_claude";
     f.claudeMount = "/claude-home";
     return f;
@@ -25,9 +26,7 @@ class WorkspaceContainerFactoryTest {
   @Test
   void alwaysSeedsTheCredentialVolumeLabelsHostUserImageAndCommand() {
     List<String> argv =
-        factory()
-            .forWorkspace("repo12345678abc", "work", "main", "0parent", List.of(8080, 5173))
-            .toRunArgv();
+        factory().forWorkspace("repo12345678abc", "work", "main", "0parent").toRunArgv();
 
     // The guarantee: the shared credential volume is mounted on every container.
     assertSequence(argv, "-v", "qits_shared_dot_claude:/claude-home");
@@ -45,9 +44,9 @@ class WorkspaceContainerFactoryTest {
     assertSequence(argv, "--name", "qits-ws-work-repo1234");
     assertTrue(argv.contains("qits/workspace:latest"), argv.toString());
     assertSequence(argv, "sleep", "infinity");
-    // Declared daemon ports, published to localhost.
-    assertTrue(argv.contains("127.0.0.1:0:8080"), argv.toString());
-    assertTrue(argv.contains("127.0.0.1:0:5173"), argv.toString());
+    // The shared network, so qits reaches the container's ports by DNS name with no host publish.
+    assertSequence(argv, "--network", "qits-net");
+    assertFalse(argv.contains("-p"), argv.toString());
   }
 
   @Test
@@ -55,8 +54,7 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.claudeVolume = "";
 
-    List<String> argv =
-        f.forWorkspace("repo12345678abc", "work", "main", null, List.of()).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
 
     assertFalse(argv.contains("-v"), argv.toString());
     // With no shared volume there is nothing to point CLAUDE_CONFIG_DIR at, so it is omitted too.

@@ -16,7 +16,7 @@ class WorkspaceContainerTest {
         new WorkspaceContainer()
             .command("sleep", "infinity")
             .image("img:latest")
-            .publishPort(8080)
+            .network("qits-net")
             .volume("vol", "/mnt")
             .addHost("host.docker.internal:host-gateway")
             .label("qits.repository", "r")
@@ -35,10 +35,10 @@ class WorkspaceContainerTest {
             "--label",
             "qits.repository=r",
             "--add-host=host.docker.internal:host-gateway",
+            "--network",
+            "qits-net",
             "-v",
             "vol:/mnt",
-            "-p",
-            "127.0.0.1:0:8080",
             "img:latest",
             "sleep",
             "infinity"),
@@ -46,11 +46,12 @@ class WorkspaceContainerTest {
   }
 
   @Test
-  void omitsVolumeUserAndPortsWhenNoneSet() {
+  void omitsVolumeUserAndNetworkWhenNoneSet() {
     List<String> argv =
         new WorkspaceContainer().name("c").image("img").command("sleep", "infinity").toRunArgv();
 
     assertFalse(argv.contains("-v"), argv.toString());
+    assertFalse(argv.contains("--network"), argv.toString());
     assertFalse(argv.contains("-p"), argv.toString());
     assertFalse(argv.contains("--user"), argv.toString());
     assertEquals(List.of("-d", "--init", "--name", "c", "img", "sleep", "infinity"), argv);
@@ -66,16 +67,9 @@ class WorkspaceContainerTest {
   }
 
   @Test
-  void publishPortsAddsOneEntryPerPort() {
-    List<String> argv =
-        new WorkspaceContainer().image("img").publishPorts(List.of(8080, 5173)).toRunArgv();
+  void networkRendersAsSingleFlag() {
+    List<String> argv = new WorkspaceContainer().image("img").network("qits-net").toRunArgv();
 
-    assertEquals(1, count(argv, "127.0.0.1:0:8080"));
-    assertEquals(1, count(argv, "127.0.0.1:0:5173"));
-    assertEquals(2, count(argv, "-p"));
-  }
-
-  private static long count(List<String> argv, String value) {
-    return argv.stream().filter(value::equals).count();
+    assertEquals(List.of("-d", "--init", "--network", "qits-net", "img"), argv);
   }
 }

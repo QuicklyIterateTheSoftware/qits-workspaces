@@ -9,7 +9,6 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -31,6 +30,15 @@ public class DockerExecutor implements ContainerRuntime {
   String runtime;
 
   /**
+   * How the qits process reaches a workspace container's ports. {@code network} (default): qits and
+   * the container share {@code qits-net}, so the target is the container's DNS name + real port —
+   * no host publish. {@code bridge-ip}: read the container's IP off the network via {@code inspect}
+   * (plain-Linux hosts where the bridge is host-routable); still no publish.
+   */
+  @ConfigProperty(name = "qits.workspace.container-network", defaultValue = "network")
+  String containerNetwork;
+
+  /**
    * Assembles the {@code docker run} argv (with the always-on cross-cutting config — credential
    * volume, {@code qits.*} labels, host alias, host uid). This executor only prepends the runtime
    * binary + {@code run} and shells it out.
@@ -45,6 +53,7 @@ public class DockerExecutor implements ContainerRuntime {
    */
   void onStart(@Observes StartupEvent event) {
     ensureClaudeVolume();
+    ensureNetwork();
   }
 
   /** Idempotent {@code docker volume create}; no-op when the volume name is blank. */
@@ -61,6 +70,27 @@ public class DockerExecutor implements ContainerRuntime {
     }
   }
 
+  /**
+   * Ensure the shared workspace network exists before any container joins it. Inspect-then-create
+   * so a network already provisioned by the devcontainer compose (its usual owner) is left
+   * untouched; this only covers qits run outside compose. Best-effort — a broken runtime just logs.
+   */
+  void ensureNetwork() {
+    String net = containerFactory.network();
+    if (net == null || net.isBlank()) {
+      return;
+    }
+    if (runCapturing(null, List.of(runtime, "network", "inspect", net)).exitCode() == 0) {
+      return;
+    }
+    ExecResult result = runCapturing(null, List.of(runtime, "network", "create", net));
+    if (result.exitCode() != 0) {
+      LOG.warnf(
+          "Could not ensure shared workspace network '%s' (web view may be unreachable): %s",
+          net, result.output());
+    }
+  }
+
   @Override
   public String containerName(String workspaceId, String repoId) {
     // repoId is a UUID; the short prefix keeps the name readable and well under docker's length
@@ -70,22 +100,15 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public String run(
-      String repoId,
-      String workspaceId,
-      String branch,
-      String parent,
-      Collection<Integer> publishPorts) {
+  public String run(String repoId, String workspaceId, String branch, String parent) {
     String name = containerName(workspaceId, repoId);
     // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
-    // qits.* labels, host alias, host uid); this executor only prepends the runtime + `run` verb.
+    // qits.* labels, host alias, host uid, shared network); this executor only prepends the runtime
+    // + `run` verb.
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
-    argv.addAll(
-        containerFactory
-            .forWorkspace(repoId, workspaceId, branch, parent, publishPorts)
-            .toRunArgv());
+    argv.addAll(containerFactory.forWorkspace(repoId, workspaceId, branch, parent).toRunArgv());
 
     ExecResult result = runCapturing(null, argv);
     if (result.exitCode() != 0) {
@@ -127,25 +150,33 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public Integer hostPort(String container, int containerPort) {
+  public ProxyOrigin resolveTarget(String container, int containerPort) {
+    // bridge-ip: the container's IP on the shared network, host-routable on plain-Linux docker.
+    if ("bridge-ip".equals(containerNetwork)) {
+      String ip = bridgeIp(container);
+      return ip == null ? null : new ProxyOrigin(ip, containerPort);
+    }
+    // network (default): qits shares qits-net with the container, so its DNS name resolves and the
+    // real container port is reachable directly — no host publish, no create-time port constraint.
+    return new ProxyOrigin(container, containerPort);
+  }
+
+  /** The container's IPv4 on its first attached network ({@code docker inspect}), or null. */
+  private String bridgeIp(String container) {
     ExecResult result =
-        runCapturing(null, List.of(runtime, "port", container, containerPort + "/tcp"));
+        runCapturing(
+            null,
+            List.of(
+                runtime,
+                "inspect",
+                "-f",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                container));
     if (result.exitCode() != 0) {
       return null;
     }
-    // One line per bound address, e.g. "127.0.0.1:32768" (IPv6 lines look like "[::1]:32768").
-    for (String line : result.output().split("\n")) {
-      int colon = line.lastIndexOf(':');
-      if (colon < 0) {
-        continue;
-      }
-      try {
-        return Integer.parseInt(line.substring(colon + 1).trim());
-      } catch (NumberFormatException ignored) {
-        // fall through to the next line
-      }
-    }
-    return null;
+    String ip = result.output().trim();
+    return ip.isEmpty() ? null : ip;
   }
 
   @Override
