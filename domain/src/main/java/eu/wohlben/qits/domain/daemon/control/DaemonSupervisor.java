@@ -15,6 +15,7 @@ import eu.wohlben.qits.domain.daemon.entity.LogObserverKind;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
+import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.annotation.PreDestroy;
@@ -82,11 +83,11 @@ public class DaemonSupervisor {
     ScheduledFuture<?> liveness;
 
     /**
-     * The ephemeral localhost port the container published for the daemon's {@code webView.port} —
-     * the proxy target. Null when the daemon isn't web-viewable, or when the container predates the
-     * port declaration (needs recreation); re-resolved on every (re)launch.
+     * Where the daemon web-view proxy connects to reach the daemon's {@code webView.port} inside
+     * the container — its DNS name + port on the shared network. Null when the daemon isn't
+     * web-viewable; re-resolved on every (re)launch.
      */
-    Integer hostPort;
+    ProxyOrigin origin;
 
     /**
      * File-source tails (run inside the container); started once per instance, closed on settle.
@@ -366,7 +367,7 @@ public class DaemonSupervisor {
         outputTap,
         sinks.toArray(CommandOutputSink[]::new));
 
-    resolveHostPort(instance);
+    resolveOrigin(instance);
     if (instance.tails.isEmpty()) {
       instance.tails = startFileTails(instance);
     }
@@ -766,41 +767,20 @@ public class DaemonSupervisor {
   }
 
   /**
-   * Resolve the published localhost port for a web-viewable daemon — the container is guaranteed
-   * provisioned here ({@code prepare}'s ensureContainer ran inside beginDaemonRun). A null result
-   * means the container predates the definition's {@code webView.port} (publishing is create-time
-   * only): the daemon still runs, but the web view stays unavailable until the container is
-   * recreated — surfaced as a WARNING event rather than failing the launch.
+   * Resolve where the web-view proxy reaches a web-viewable daemon's port — the container's DNS
+   * name on the shared network + the real container port (the container is guaranteed provisioned
+   * here, {@code prepare}'s ensureContainer ran inside beginDaemonRun). There is no create-time
+   * port constraint, so this always resolves for a web-viewable daemon; null only when the daemon
+   * isn't web-viewable.
    */
-  private void resolveHostPort(Instance instance) {
+  private void resolveOrigin(Instance instance) {
     Integer httpPort = instance.daemon.webView() != null ? instance.daemon.webView().port() : null;
     if (httpPort == null) {
-      instance.hostPort = null;
+      instance.origin = null;
       return;
     }
     String container = containers.containerName(instance.workspaceId, instance.repoId);
-    instance.hostPort = containers.hostPort(container, httpPort);
-    if (instance.hostPort == null) {
-      events.publish(
-          new DaemonEventDto(
-              instance.repoId,
-              instance.workspaceId,
-              instance.daemon.id(),
-              instance.daemon.name(),
-              DaemonEventKind.STATUS_CHANGED,
-              DaemonEventSeverity.WARNING,
-              instance.status,
-              "web view unavailable: the workspace container does not publish port "
-                  + httpPort
-                  + " — recreate the container to pick it up",
-              null,
-              instance.commandId,
-              null,
-              null,
-              null,
-              null,
-              Instant.now()));
-    }
+    instance.origin = containers.resolveTarget(container, httpPort);
   }
 
   /**
@@ -808,8 +788,8 @@ public class DaemonSupervisor {
    * lookup. The pair is unambiguous even though workspace slugs repeat across repositories, because
    * a daemon id is a UUID owned by exactly one repository. The port comes exclusively from
    * supervisor state (never from any request component) and targets localhost — the SSRF
-   * constraint. A present target with a null {@code hostPort} means the container must be recreated
-   * to publish the port.
+   * constraint. A present target with a null {@code origin} means the daemon isn't reachable (e.g.
+   * the container is gone) — the proxy 502s.
    */
   public synchronized Optional<ProxyTarget> proxyTarget(String workspaceId, String daemonId) {
     for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
@@ -819,14 +799,14 @@ public class DaemonSupervisor {
         if (instance.daemon.webView() == null) {
           return Optional.empty();
         }
-        return Optional.of(new ProxyTarget(instance.status, instance.hostPort));
+        return Optional.of(new ProxyTarget(instance.status, instance.origin));
       }
     }
     return Optional.empty();
   }
 
-  /** A web-viewable daemon instance as the proxy sees it: status + published localhost port. */
-  public record ProxyTarget(DaemonStatus status, Integer hostPort) {}
+  /** A web-viewable daemon instance as the proxy sees it: status + the container-port origin. */
+  public record ProxyTarget(DaemonStatus status, ProxyOrigin origin) {}
 
   private static void cancelPending(Instance instance) {
     if (instance.pending != null) {
@@ -850,18 +830,9 @@ public class DaemonSupervisor {
             ? DaemonProxyPath.servedBase(workspaceId, daemon.id(), daemon.webView().basePath())
             : null;
     if (instance == null) {
-      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath, false);
+      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath);
     }
-    // A live web-viewable daemon whose container doesn't publish the configured port needs the
-    // container recreated (publishing is create-time only) before the web view can work.
-    boolean needsContainerRecreate =
-        proxyPath != null && isLive(instance.status) && instance.hostPort == null;
     return new DaemonInstanceDto(
-        daemon,
-        instance.status,
-        instance.restartCount,
-        instance.commandId,
-        proxyPath,
-        needsContainerRecreate);
+        daemon, instance.status, instance.restartCount, instance.commandId, proxyPath);
   }
 }

@@ -9,15 +9,13 @@ import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
  * is the qits-origin base path the daemon's app is served under ({@code
  * /daemon/{workspaceId}/{daemonId}/} plus the definition's {@code webView.basePath} when set); its
  * presence is the web-viewable flag (set iff the definition declares a {@code webView}) — combine
- * with a live {@code status} before framing it. {@code needsContainerRecreate} is true when the
- * daemon is web-viewable and running but its workspace container doesn't publish the configured
- * port (publishing is container-create-time only) — the web view stays a 502 until the container is
- * recreated.
+ * with a live {@code status} before framing it. The proxy reaches the daemon's port over the shared
+ * Docker network by container name, so a web-viewable daemon is reachable as soon as it is running
+ * — no container recreation, regardless of when the port was configured.
  */
 public record DaemonInstanceDto(
     RepositoryDaemonDto daemon,
     DaemonStatus status,
     int restartCount,
     String commandId,
-    String proxyPath,
-    boolean needsContainerRecreate) {}
+    String proxyPath) {}

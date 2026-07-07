@@ -3,6 +3,7 @@ package eu.wohlben.qits.daemonproxy;
 import eu.wohlben.qits.domain.daemon.control.DaemonProxyPath;
 import eu.wohlben.qits.domain.daemon.control.DaemonSupervisor;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
+import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.ext.web.Router;
@@ -15,21 +16,21 @@ import java.util.Optional;
 
 /**
  * The daemon web-view reverse proxy: {@code /daemon/{workspaceId}/{daemonId}/*} on the qits origin
- * forwards to the daemon's dev server on its published localhost port — verbatim passthrough, no
- * prefix stripping, no rewriting. The dev server itself serves under the prefix (it was launched
- * with {@code QITS_PUBLIC_BASE}, see {@link DaemonProxyPath}), so assets and the HMR websocket stay
- * inside it; vertx-http-proxy forwards WebSocket upgrades by default. Because the frame shares the
- * qits origin, the UI's DOM picker reads {@code iframe.contentDocument} directly — no injection.
+ * forwards to the daemon's dev server, reached by the workspace container's DNS name on the shared
+ * {@code qits-net} network — verbatim passthrough, no prefix stripping, no rewriting. The dev
+ * server itself serves under the prefix (it was launched with {@code QITS_PUBLIC_BASE}, see {@link
+ * DaemonProxyPath}), so assets and the HMR websocket stay inside it; vertx-http-proxy forwards
+ * WebSocket upgrades by default. Because the frame shares the qits origin, the UI's DOM picker
+ * reads {@code iframe.contentDocument} directly — no injection.
  *
- * <p>Security posture: the origin is resolved exclusively from supervisor state — the port comes
- * from the container's published-port mapping recorded at daemon launch, never from any request
- * component, and targets are pinned to {@code 127.0.0.1}; unknown keys 404 without connecting
- * anywhere (the SSRF constraints from the feature doc). Two accepted consequences, both bounded by
- * the existing trust model ("qits runs these apps as processes with the user's privileges"): the
- * framed app's JS runs same-origin with qits, and every web-viewable daemon is reachable by anyone
- * who can reach qits itself. Note {@code /daemon/*} is a raw router route, so websockets-next's
- * {@code SameOriginUpgradeCheck} does not guard it — if qits ever grows auth, this route needs the
- * same guard.
+ * <p>Security posture: the origin is resolved exclusively from supervisor state — the container
+ * name and port come from the daemon definition recorded at launch, never from any request
+ * component; unknown keys 404 without connecting anywhere (the SSRF constraints from the feature
+ * doc). Two accepted consequences, both bounded by the existing trust model ("qits runs these apps
+ * as processes with the user's privileges"): the framed app's JS runs same-origin with qits, and
+ * every web-viewable daemon is reachable by anyone who can reach qits itself. Note {@code
+ * /daemon/*} is a raw router route, so websockets-next's {@code SameOriginUpgradeCheck} does not
+ * guard it — if qits ever grows auth, this route needs the same guard.
  */
 @ApplicationScoped
 public class DaemonProxyRoute {
@@ -89,18 +90,20 @@ public class DaemonProxyRoute {
               502,
               "The daemon is not running (" + status + ") — start it from the workspace page.");
       case READY, DEGRADED -> {
-        Integer hostPort = target.get().hostPort();
-        if (hostPort == null) {
+        ProxyOrigin origin = target.get().origin();
+        if (origin == null) {
           respond(
               rc,
               502,
-              "The workspace container does not publish the daemon's port — recreate the"
-                  + " container to pick it up.");
+              "The workspace container is not reachable — try restarting the workspace container.");
           return;
         }
         // Per-request proxy over the shared client: the origin is fixed here, from supervisor
-        // state only — never derived from the request.
-        HttpProxy.reverseProxy(proxyClient).origin(hostPort, "127.0.0.1").handle(rc.request());
+        // state only (the container's name + port on the shared network) — never derived from the
+        // request.
+        HttpProxy.reverseProxy(proxyClient)
+            .origin(origin.port(), origin.host())
+            .handle(rc.request());
       }
     }
   }
