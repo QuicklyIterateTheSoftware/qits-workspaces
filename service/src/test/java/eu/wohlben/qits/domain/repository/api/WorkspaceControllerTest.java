@@ -440,9 +440,24 @@ public class WorkspaceControllerTest {
    * The workspace is a container-style clone, so a commit stays local until pushed; the origin-side
    * ahead/behind, conflict and incoming-commits probes only see pushed commits.
    */
+  /**
+   * Provisions the workspace's container (creation is lazy — nothing exists to write into until
+   * first use) and returns the fake runtime's host-clone path for it, for tests that touch the
+   * working tree directly.
+   */
+  private Path ensuredWorkspacePath(String repoId, String workspaceId) {
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces/" + workspaceId + "/ensure-container")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+    return Path.of(dataDir, repoId, "workspaces", workspaceId);
+  }
+
   private void commitFile(
       String repoId, String workspaceId, String file, String content, String msg) throws Exception {
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", workspaceId);
+    Path workspacePath = ensuredWorkspacePath(repoId, workspaceId);
     Files.writeString(workspacePath.resolve(file), content);
     runGit(workspacePath, "git", "add", file);
     runGit(
@@ -492,7 +507,7 @@ public class WorkspaceControllerTest {
   public void testListFilesIncludesTrackedAndNewUntrackedFiles() throws Exception {
     String repoId = createProjectAndRepository();
     // The default main workspace is checked out at "master".
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     Files.writeString(workspacePath.resolve("browse-me.txt"), "hello\n");
 
     given()
@@ -508,7 +523,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testFileContentReturnsText() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     Files.writeString(workspacePath.resolve("readme.md"), "# Title\n\nbody\n");
 
     given()
@@ -525,7 +540,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testFileContentDetectsBinary() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     // A NUL byte marks the file as binary; the viewer gets no content.
     Files.write(workspacePath.resolve("blob.bin"), new byte[] {1, 2, 0, 3, 4});
 
@@ -557,7 +572,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testFileContentRejectsSymlinkEscape() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     // A cloned repo is untrusted: a symlink committed inside the workspace that points outside it
     // must not be followed when reading (path traversal via symlink).
     Path secret = Files.createTempFile("qits-secret", ".txt");
@@ -575,7 +590,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testFileContentRejectsIntermediateSymlinkEscape() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     // A symlinked *directory* committed inside the workspace is transparently followed during path
     // resolution, so a request whose intermediate segment is that link escapes the workspace even
     // though the final segment is an ordinary file. The read must be rejected (path traversal via
@@ -599,7 +614,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testListFilesRejectsIntermediateSymlinkEscape() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     // Same escape via an intermediate symlinked directory, but for a listing: the final segment
     // resolves to a real directory outside the workspace, which must not be walked.
     Path outside = Files.createTempDirectory("qits-outside");
@@ -631,7 +646,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testListFilesReturnsGitignoredDirectoryAsLazyStub() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     Files.writeString(workspacePath.resolve(".gitignore"), "node_modules/\n");
     Files.createDirectories(workspacePath.resolve("node_modules/pkg"));
     Files.writeString(workspacePath.resolve("node_modules/top.js"), "x\n");
@@ -657,7 +672,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testListLazyDirectoryContentsOneLevelDeep() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     Files.writeString(workspacePath.resolve(".gitignore"), "node_modules/\n");
     Files.createDirectories(workspacePath.resolve("node_modules/pkg"));
     Files.writeString(workspacePath.resolve("node_modules/top.js"), "x\n");
@@ -690,7 +705,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testListFilesRejectsSymlinkDirectoryEscape() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     // A symlinked directory committed inside the workspace must not redirect the listing outside
     // it.
     Path outside = Files.createTempDirectory("qits-outside");
@@ -707,7 +722,7 @@ public class WorkspaceControllerTest {
   @Test
   public void testListFilesRejectsNonDirectory() throws Exception {
     String repoId = createProjectAndRepository();
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
     Files.writeString(workspacePath.resolve("a-file.txt"), "hi\n");
 
     given()
@@ -748,6 +763,7 @@ public class WorkspaceControllerTest {
   public void stopThenEnsureContainerRoundTripsTheRuntimeStatus() {
     String repoId = createProjectAndRepository();
 
+    // Creation is lazy: the fresh workspace has no container yet, so it reports STOPPED.
     given()
         .contentType(ContentType.JSON)
         .body(
@@ -756,7 +772,16 @@ public class WorkspaceControllerTest {
         .post("/api/repositories/" + repoId + "/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("workspace.runtimeStatus", equalTo("RUNNING"));
+        .body("workspace.runtimeStatus", equalTo("STOPPED"));
+
+    // First use provisions the container from the durable branch.
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces/wt-run/ensure-container")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("runtimeStatus", equalTo("RUNNING"));
 
     // Graceful stop removes the container but keeps the workspace active (STOPPED).
     given()

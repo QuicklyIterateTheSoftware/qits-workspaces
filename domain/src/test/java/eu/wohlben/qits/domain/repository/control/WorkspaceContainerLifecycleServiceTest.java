@@ -22,9 +22,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
- * Verifies the disposable-container lifecycle against a real cloned-fixture repo (Fake runtime): a
- * lost container is re-provisioned from the durable branch, its runtime status is surfaced, and a
- * workspace is abandoned only when the branch itself is gone.
+ * Verifies the disposable-container lifecycle against a real cloned-fixture repo (Fake runtime):
+ * creation is lazy (durable state only — the container materializes on first use), a lost container
+ * is re-provisioned from the durable branch, its runtime status is surfaced, and a workspace is
+ * abandoned only when the branch itself is gone.
  */
 @QuarkusTest
 @TestProfile(WorkspaceContainerLifecycleServiceTest.TestProfile.class)
@@ -66,9 +67,93 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
+  public void createWorkspaceDoesNotProvisionAContainerUntilFirstUse() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    String container = containers.containerName("feat", repoId);
+
+    // Creation writes only durable state: the branch ref in origin and the STOPPED row.
+    assertFalse(containers.exists(container), "creation does not run a container");
+    assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
+    Path originPath = Path.of(dataDir, repoId, "origin");
+    assertEquals(
+        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
+        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
+        "the branch ref exists in origin at the parent's commit");
+    // The runtime mirrors docker: touching the not-yet-provisioned container fails, it doesn't
+    // silently run elsewhere — a use-site that forgot ensureContainer becomes a test failure.
+    assertNotEquals(
+        0,
+        containers.exec(container, "/workspace", Map.of(), "git", "status").exitCode(),
+        "exec against the never-provisioned container fails cleanly");
+
+    // First use provisions: container up, branch checked out, status live.
+    workspaceService.ensureContainer(repoId, "feat");
+    assertTrue(containers.exists(container), "first use provisions the container");
+    assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
+    assertEquals(
+        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
+        containerHead(container),
+        "the provisioned container has the branch checked out");
+  }
+
+  @Test
+  public void mainWorkspaceIsCreatedLazilyToo() throws Exception {
+    String repoId = clonedRepo();
+    // cloneRepository created the main workspace ("master") — a row only, no container.
+    String container = containers.containerName("master", repoId);
+    assertFalse(containers.exists(container), "the main workspace starts without a container");
+    assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "master").runtimeStatus());
+
+    // First use checks out the existing main branch (no branch ref to create).
+    workspaceService.ensureContainer(repoId, "master");
+    assertTrue(containers.exists(container));
+    Path originPath = Path.of(dataDir, repoId, "origin");
+    assertEquals(
+        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
+        containerHead(container));
+  }
+
+  @Test
+  public void mergeWorkspaceSucceedsWithoutASourceContainer() throws Exception {
+    String repoId = clonedRepo();
+    // The seed path: fork off the fixture's 'feature' branch (which carries a commit master
+    // lacks) and merge it into master — all host-side, the workspace never provisioned.
+    workspaceService.createWorkspace(repoId, "feeder", "feature", "feeder", null);
+    Path originPath = Path.of(dataDir, repoId, "origin");
+    String masterBefore =
+        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim();
+
+    var result = workspaceService.mergeWorkspace(repoId, "feeder", "master");
+
+    assertFalse(result.hasConflicts(), "the host-side merge succeeds without a container");
+    assertNotEquals(
+        masterBefore,
+        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
+        "origin's target ref advanced");
+    assertFalse(
+        containers.exists(containers.containerName("feeder", repoId)),
+        "merging never provisioned a container");
+  }
+
+  @Test
+  public void aNeverProvisionedWorkspaceIsCleanable() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+
+    // A fresh fork has nothing to lose: no container means no dirty tree and no unpushed commits,
+    // so cleanup must be offered exactly as for a provisioned-but-level workspace.
+    Path originPath = Path.of(dataDir, repoId, "origin");
+    assertTrue(
+        workspaceService.canCleanupBranch(repoId, originPath, "feat", "master"),
+        "a never-provisioned fresh fork is cleanable");
+  }
+
+  @Test
   public void ensureContainerRecreatesALostContainerFromTheBranch() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
     assertTrue(containers.exists(container));
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
@@ -90,6 +175,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerIsANoOpWhenAlreadyRunning() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
 
     // Should not throw and should leave the (same) container running.
     workspaceService.ensureContainer(repoId, "feat");
@@ -102,6 +188,7 @@ public class WorkspaceContainerLifecycleServiceTest {
       throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
     String head = commitInContainer(container, "unpushed.txt");
 
@@ -123,6 +210,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerAbandonsWhenTheBranchIsGone() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
 
     // Both the container AND the durable branch disappear: the work no longer exists anywhere.
@@ -143,6 +231,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void reconcileMarksAContainerlessButLiveBranchStoppedNotAbandoned() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     containers.rm(containers.containerName("feat", repoId));
 
     // Reconciliation keys off the branch, not the container: the branch survives, so the workspace
@@ -158,6 +247,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void stopContainerRemovesTheContainerButKeepsTheWorkspaceActive() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
 
     workspaceService.stopContainer(repoId, "feat");
@@ -176,6 +266,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void gracefulStopPushesUnpushedWorkSoRecreationIsLossless() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
     String head = commitInContainer(container, "graceful.txt");
 
@@ -196,6 +287,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void unpushedWorkDiesWithAnUnexpectedlyRemovedContainer() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
     String head = commitInContainer(container, "doomed.txt");
 

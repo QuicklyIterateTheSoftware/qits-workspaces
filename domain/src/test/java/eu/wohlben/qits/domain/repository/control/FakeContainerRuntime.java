@@ -26,6 +26,12 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * processes, the {@code setsid}-based process-group termination the registry relies on works
  * end-to-end too.
  *
+ * <p>Like real docker, operations against an <em>unknown</em> container (never {@code run}, or
+ * already {@code rm}'d) fail instead of falling through to the host: {@code exec} returns a
+ * non-zero {@code ExecResult}, {@code execArgv} yields an argv that fails when spawned, and {@code
+ * startDaemon} throws. This is what catches a use-site that forgot {@code ensureContainer} now that
+ * workspace creation no longer provisions eagerly.
+ *
  * <p>Replaces {@link DockerExecutor} globally in this module's {@code @QuarkusTest}s via {@link
  * Mock}. Real-docker behavior is covered separately by integration tests behind {@code skipITs}.
  */
@@ -82,6 +88,13 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @Override
   public ExecResult exec(
       String container, String workdir, Map<String, String> env, String... argv) {
+    Info info = byName.get(container);
+    if (info == null) {
+      // Mirror docker: exec against an unknown container fails, it doesn't run on the host. This
+      // is what turns a use-site that forgot ensureContainer into a test failure instead of a
+      // silent bad rewrite (literal /workspace on the host).
+      return new ExecResult(1, "Error response from daemon: No such container: " + container);
+    }
     // The agent auth check (AgentAuthStatus) must be deterministic here, not depend on the host's
     // real `claude` login: report signed in so chat launches take the chat path. Tests that
     // exercise the not-signed-in login redirect override AgentAuthStatus itself.
@@ -91,8 +104,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
         && "status".equals(argv[2])) {
       return new ExecResult(0, "{\"loggedIn\": true, \"authMethod\": \"claudeai\"}");
     }
-    Info info = byName.get(container);
-    Path dir = info == null ? null : info.dir();
+    Path dir = info.dir();
     List<String> cmd = new ArrayList<>();
     cmd.add("env");
     String wd = rewriteWorkdir(workdir, dir);
@@ -113,7 +125,12 @@ public class FakeContainerRuntime implements ContainerRuntime {
   public List<String> execArgv(
       String container, boolean tty, String workdir, Map<String, String> env) {
     Info info = byName.get(container);
-    Path dir = info == null ? null : info.dir();
+    if (info == null) {
+      // Mirror docker: the real argv is spawned later and fails then, so hand back an argv that
+      // fails loudly at spawn time rather than one running on the host with a literal /workspace.
+      return List.of("sh", "-c", "echo 'No such container: " + container + "' >&2; exit 1");
+    }
+    Path dir = info.dir();
     List<String> argv = new ArrayList<>();
     argv.add("env");
     String wd = rewriteWorkdir(workdir, dir);
@@ -230,7 +247,12 @@ public class FakeContainerRuntime implements ContainerRuntime {
   public void startDaemon(
       String container, String daemonId, String script, Map<String, String> env) {
     Info info = byName.get(container);
-    Path wd = info == null ? null : info.dir();
+    if (info == null) {
+      // Mirror docker: DockerExecutor.startDaemon throws when its inner exec fails on an unknown
+      // container.
+      throw new IllegalStateException("No such container: " + container);
+    }
+    Path wd = info.dir();
     try {
       Path dir = daemonRunDir();
       Files.createDirectories(dir);
@@ -294,7 +316,32 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @Override
   public boolean daemonAlive(String container, String daemonId) {
     Long pid = daemonPid(daemonId);
-    return pid != null && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+    return pid != null && processRunning(pid);
+  }
+
+  /**
+   * Whether {@code pid} is genuinely running — alive per {@link ProcessHandle} and not a zombie.
+   * {@code ProcessHandle.isAlive} counts zombies as alive, but a zombie is dead for everything the
+   * fake models (it produces no output and holds no port; real docker's {@code tmux has-session}
+   * would report the session gone). The distinction matters in sandboxes whose PID 1 never reaps
+   * (e.g. {@code sleep infinity}): a killed detached daemon reparents there and stays a zombie
+   * forever, which without this check reads as alive forever. See
+   * docs/issues/resolved/2026-07-08_daemon-straggler-reap-test-fails-in-sandboxed-env.md.
+   */
+  public static boolean processRunning(long pid) {
+    if (!ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+      return false;
+    }
+    try {
+      // /proc/<pid>/stat is "pid (comm) S ..." — comm may contain anything, so the state field is
+      // the char after the LAST ')'.
+      String stat = Files.readString(Path.of("/proc/" + pid + "/stat"));
+      int close = stat.lastIndexOf(')');
+      boolean zombie = close >= 0 && close + 2 < stat.length() && stat.charAt(close + 2) == 'Z';
+      return !zombie;
+    } catch (Exception e) {
+      return true; // no /proc (non-Linux) — fall back to ProcessHandle's answer
+    }
   }
 
   @Override

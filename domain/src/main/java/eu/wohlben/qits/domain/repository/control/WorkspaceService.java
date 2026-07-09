@@ -78,35 +78,25 @@ public class WorkspaceService {
     return result.output();
   }
 
-  /**
-   * Materializes a workspace as a branch + container: optionally creates {@code branch} in the bare
-   * origin (from {@code parentBranch}), runs the container, then clones {@code branch} into its
-   * {@code /workspace} and sets the {@code qits@local} commit identity. Rolls back a freshly
-   * created branch ref and the container if a later step fails, so a retry with the same id can
-   * succeed.
-   */
-  private void createContainerWorkspace(
-      String repoId,
-      String workspaceId,
-      String branch,
-      String parentBranch,
-      Path originPath,
-      boolean createBranchRef) {
-    if (createBranchRef) {
-      try {
-        git.exec(originPath.toFile(), "git", "branch", "--end-of-options", branch, parentBranch);
-      } catch (Exception e) {
-        throw new InternalServerErrorException("Failed to create branch: " + e.getMessage());
-      }
-    }
-
-    String container;
+  /** Creates {@code branch} from {@code parentBranch} host-side in the bare origin. */
+  private void createBranchRefOnOrigin(Path originPath, String branch, String parentBranch) {
     try {
-      container = containers.run(repoId, workspaceId, branch, parentBranch);
-    } catch (RuntimeException e) {
-      rollbackBranch(createBranchRef, originPath, branch);
-      throw e;
+      git.exec(originPath.toFile(), "git", "branch", "--end-of-options", branch, parentBranch);
+    } catch (Exception e) {
+      throw new InternalServerErrorException("Failed to create branch: " + e.getMessage());
     }
+  }
+
+  /**
+   * Materializes a workspace's container from its durable branch ref: runs the container, clones
+   * {@code branch} into its {@code /workspace} and sets the {@code qits@local} commit identity.
+   * Removes the container again if the clone fails, so a retry can succeed. The branch ref must
+   * already exist in the origin — this is the on-demand half of workspace creation, invoked lazily
+   * by {@link #ensureContainer} for never-provisioned and pruned workspaces alike.
+   */
+  private void provisionContainer(
+      String repoId, String workspaceId, String branch, String parentBranch) {
+    String container = containers.run(repoId, workspaceId, branch, parentBranch);
 
     ContainerRuntime.ExecResult clone =
         containers.exec(
@@ -121,7 +111,6 @@ public class WorkspaceService {
             "/workspace");
     if (clone.exitCode() != 0) {
       containers.rm(container);
-      rollbackBranch(createBranchRef, originPath, branch);
       throw new InternalServerErrorException("Clone into container failed: " + clone.output());
     }
     // Commit identity matches the one mergeIntoTarget/updateWorkspaceFromParent use host-side.
@@ -129,17 +118,6 @@ public class WorkspaceService {
         container, "/workspace", java.util.Map.of(), "git", "config", "user.email", "qits@local");
     containers.exec(
         container, "/workspace", java.util.Map.of(), "git", "config", "user.name", "qits");
-  }
-
-  private void rollbackBranch(boolean created, Path originPath, String branch) {
-    if (!created) {
-      return;
-    }
-    try {
-      git.exec(originPath.toFile(), "git", "branch", "-D", "--", branch);
-    } catch (Exception ignored) {
-      // best effort — the branch may not have been created
-    }
   }
 
   /** Appends a history event to a workspace's timeline. */
@@ -303,11 +281,16 @@ public class WorkspaceService {
     return new BranchSummary(parent, ab.ahead(), ab.behind());
   }
 
-  /** True when the workspace container's working tree has no staged or unstaged changes. */
+  /**
+   * True when the workspace container's working tree has no staged or unstaged changes. The
+   * container <em>is</em> the working tree, so no container means there is nothing uncommitted to
+   * destroy — clean, symmetric with {@link #isFullyPushed}'s absent-means-pushed. A failed status
+   * probe on a live container stays dirty: that state is genuinely unknown, never delete blindly.
+   */
   private boolean isWorkspaceClean(String repoId, Workspace wt) {
     String container = containers.containerName(wt.workspaceId, repoId);
     if (!containers.exists(container)) {
-      return false; // no container — treat as not clean so we never delete blindly
+      return true;
     }
     ContainerRuntime.ExecResult status =
         containers.exec(
@@ -455,11 +438,12 @@ public class WorkspaceService {
       throw new BadRequestException("Invalid branch name");
     }
 
-    // 1. Create the branch ref host-side in the bare origin so ahead/behind and the merge-tree
-    //    conflict probe (both run against origin refs) work from the first second.
-    // 2. Run the workspace's container.
-    // 3. Clone the new branch into the container's /workspace and set its commit identity.
-    createContainerWorkspace(repoId, workspaceId, newBranch, parentBranch, originPath, true);
+    // Only the durable state is created here: the branch ref host-side in the bare origin (so
+    // ahead/behind and the merge-tree conflict probe, both origin-side, work from the first
+    // second) plus the row below. No container, no clone — provisioning is lazy: first use goes
+    // through ensureContainer, which materializes the container from this branch ref. That keeps
+    // creation free of docker and the running git server (the cli seeds depend on this).
+    createBranchRefOnOrigin(originPath, newBranch, parentBranch);
 
     Workspace workspace = new Workspace();
     workspace.workspaceId = workspaceId;
@@ -467,7 +451,7 @@ public class WorkspaceService {
     workspace.parent = parentBranch;
     workspace.branch = newBranch;
     workspace.status = WorkspaceStatus.ACTIVE;
-    workspace.runtimeStatus = WorkspaceRuntimeStatus.RUNNING;
+    workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
     workspace.preamble = preamble;
     workspaceRepository.persist(workspace);
     recordEvent(workspace, WorkspaceEventType.CREATED, newBranch, parentBranch, null);
@@ -481,12 +465,14 @@ public class WorkspaceService {
   }
 
   /**
-   * Creates the default workspace for a repository's main branch: a checkout of the
+   * Creates the default workspace for a repository's main branch: a workspace on the
    * <em>existing</em> main branch (not a fork of a new branch), so working in it commits directly
    * to main. The workspace id is the branch name as a slug; it has no parent, since the main branch
-   * is the root of the branch tree. Idempotent: returns the existing workspace if one with the
-   * derived id is already present. Called by {@link RepositoryService} so every freshly added
-   * repository starts with its main branch workable.
+   * is the root of the branch tree. Like {@link #createWorkspace} this writes only the durable row
+   * — the container (with its checkout) is provisioned lazily on first use via {@link
+   * #ensureContainer}. Idempotent: returns the existing workspace if one with the derived id is
+   * already present. Called by {@link RepositoryService} so every freshly added repository starts
+   * with its main branch workable.
    */
   @Transactional
   public Workspace createMainWorkspace(String repoId, String branch) {
@@ -509,16 +495,15 @@ public class WorkspaceService {
           .orElseThrow();
     }
 
-    // No branch-create: check out the existing main branch rather than fork a new one off it.
-    createContainerWorkspace(repoId, workspaceId, branch, null, originPath, false);
-
+    // The main branch already exists in the origin, so there is no durable state to create beyond
+    // the row below — no branch ref, no container. ensureContainer provisions on first use.
     Workspace workspace = new Workspace();
     workspace.workspaceId = workspaceId;
     workspace.repository = repo;
     workspace.parent = null; // the main branch is the tree root — it has no fork point
     workspace.branch = branch;
     workspace.status = WorkspaceStatus.ACTIVE;
-    workspace.runtimeStatus = WorkspaceRuntimeStatus.RUNNING;
+    workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
     workspaceRepository.persist(workspace);
     recordEvent(workspace, WorkspaceEventType.CREATED, branch, null, null);
 
@@ -558,8 +543,9 @@ public class WorkspaceService {
    *       {@code docker start} it in place. This keeps the {@code /workspace} clone and any
    *       unpushed commits — the lossless recovery a re-clone can't give — so it wins over
    *       re-provisioning.
-   *   <li>container absent but the branch ref survives in origin → re-materialize a fresh container
-   *       from that branch ({@code createBranchRef=false}, the {@link #createMainWorkspace} path).
+   *   <li>container absent but the branch ref survives in origin → materialize a fresh container
+   *       from that branch via {@link #provisionContainer} — the single provisioning path, for
+   *       never-provisioned and pruned workspaces alike.
    *   <li>branch ref gone from origin → the work no longer exists anywhere: the workspace is
    *       ABANDONED here (now the <em>only</em> path to abandonment) and a 404 is thrown.
    * </ul>
@@ -649,8 +635,7 @@ public class WorkspaceService {
     QuarkusTransaction.requiringNew()
         .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.PROVISIONING, null));
     try {
-      createContainerWorkspace(
-          repoId, workspaceId, snapshot.branch(), snapshot.parent(), originPath, false);
+      provisionContainer(repoId, workspaceId, snapshot.branch(), snapshot.parent());
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
     } catch (RuntimeException e) {
@@ -765,9 +750,14 @@ public class WorkspaceService {
     }
 
     String currentBranch = workspace.branch;
-    // Integration merges origin refs (in a temp host workspace); the container may hold unpushed
-    // commits, so push the source branch first or the merge would miss them.
-    containerGit(repoId, workspaceId, "push", "origin", currentBranch);
+    // Integration merges origin refs (in a temp host workspace); a live container may hold
+    // unpushed commits, so push the source branch first or the merge would miss them. No container
+    // means nothing ever ran in the workspace, so its origin ref is provably complete — skip. A
+    // live container's failed push still aborts the merge (a swallowed failure would silently
+    // integrate a stale ref).
+    if (containers.exists(containers.containerName(workspaceId, repoId))) {
+      containerGit(repoId, workspaceId, "push", "origin", currentBranch);
+    }
     MergeResult result = mergeIntoTarget(repoId, currentBranch, resolvedTarget);
     if (!result.hasConflicts()) {
       recordEvent(

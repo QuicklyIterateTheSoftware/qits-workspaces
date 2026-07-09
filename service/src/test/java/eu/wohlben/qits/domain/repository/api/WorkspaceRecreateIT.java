@@ -122,8 +122,8 @@ public class WorkspaceRecreateIT {
             .extract()
             .path("project.id");
 
-    // Creating the repository clones the fixture and stands up the main workspace's container by
-    // cloning over the /git server — the first real container clone-over-HTTP round trip.
+    // Creating the repository clones the fixture and registers the main workspace (lazily — no
+    // container yet; the first real clone-over-HTTP round trip happens at ensure-container below).
     repoId =
         given()
             .contentType(ContentType.JSON)
@@ -137,7 +137,7 @@ public class WorkspaceRecreateIT {
             .extract()
             .path("repository.id");
 
-    // A workspace forked off master, materialized as a real container cloned from origin.
+    // A workspace forked off master. Creation is lazy — only the branch ref and STOPPED row exist.
     given()
         .contentType(ContentType.JSON)
         .body(
@@ -147,7 +147,16 @@ public class WorkspaceRecreateIT {
         .post("/api/repositories/" + repoId + "/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("workspace.runtimeStatus", equalTo("RUNNING"));
+        .body("workspace.runtimeStatus", equalTo("STOPPED"));
+
+    // First use materializes the real container, cloned from origin over the /git server.
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces/recreate-wt/ensure-container")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("runtimeStatus", equalTo("RUNNING"));
 
     String container = "qits-ws-recreate-wt-" + shortRepo(repoId);
 
