@@ -1,6 +1,5 @@
 package eu.wohlben.qits.domain.daemon.control;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.command.control.CommandOutputSink;
@@ -77,6 +76,8 @@ public class DaemonAttachTerminalTest {
     var project = projectService.create("Attach Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    // Creation is lazy; provision the container for the out-of-band session start below.
+    workspaceService.ensureContainer(repo.id, "work");
     String container = containers.containerName("work", repo.id);
 
     // Start a daemon session directly (the supervisor's follower isn't needed to prove the attach):
@@ -118,7 +119,20 @@ public class DaemonAttachTerminalTest {
         containers.daemonAlive(container, daemonId), "the daemon keeps running after detach");
 
     containers.killDaemon(container, daemonId);
-    assertFalse(containers.daemonAlive(container, daemonId), "kill tears the daemon session down");
+    // Poll rather than snapshot: a SIGKILL'd detached process can linger briefly (zombie until
+    // reaped) under suite load, and daemonAlive reads ProcessHandle.isAlive.
+    assertTrue(awaitDaemonDead(container, daemonId), "kill tears the daemon session down");
+  }
+
+  private boolean awaitDaemonDead(String container, String daemonId) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
+    while (System.currentTimeMillis() < deadline) {
+      if (!containers.daemonAlive(container, daemonId)) {
+        return true;
+      }
+      Thread.sleep(50);
+    }
+    return false;
   }
 
   private boolean awaitContains(CapturingSink sink, String needle) throws InterruptedException {
