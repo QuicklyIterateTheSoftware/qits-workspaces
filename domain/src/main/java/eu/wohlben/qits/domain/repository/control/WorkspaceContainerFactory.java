@@ -3,6 +3,8 @@ package eu.wohlben.qits.domain.repository.control;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -51,6 +53,17 @@ public class WorkspaceContainerFactory {
 
   @ConfigProperty(name = "qits.workspace.pnpm-volume", defaultValue = "qits_shared_pnpm")
   String pnpmVolume;
+
+  /**
+   * The IANA timezone every workspace container runs in ({@code TZ} env, honored by glibc, the JVM
+   * and node — tzdata is in the image). Blank/absent (the default) inherits qits' own zone, so
+   * wall-clock output in the container (logs, {@code date}, commit timestamps) matches the
+   * environment qits runs in — which the devcontainer in turn inherits from the host via compose.
+   * Containers already share the host kernel clock; only the rendered zone can differ. Optional
+   * because SmallRye treats an empty property value as "no value" and would fail a plain String.
+   */
+  @ConfigProperty(name = "qits.workspace.timezone")
+  Optional<String> timezone;
 
   static final String MAVEN_MOUNT = "/caches/m2";
   static final String PNPM_MOUNT = "/caches/pnpm";
@@ -101,7 +114,10 @@ public class WorkspaceContainerFactory {
             // controls container creation, so it is always set.
             .addHost("host.docker.internal:host-gateway")
             // Join the shared network so qits reaches the container's ports by DNS name (no -p).
-            .network(network);
+            .network(network)
+            // Same timezone as qits (host -> devcontainer -> workspace container), so wall-clock
+            // output agrees everywhere. The kernel clock is shared already; TZ is the only delta.
+            .env("TZ", timezone());
     // The shared credential volume so an in-container `claude` can read the one-time OAuth login.
     // Mounted read/write on every workspace container (agent and daemon share the container), so
     // any
@@ -143,6 +159,11 @@ public class WorkspaceContainerFactory {
   private String containerName(String workspaceId, String repoId) {
     String shortRepo = repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
     return "qits-ws-" + workspaceId + "-" + shortRepo;
+  }
+
+  /** The configured zone, or qits' own default zone when blank ({@code TZ}-aware via the JVM). */
+  private String timezone() {
+    return timezone.filter(tz -> !tz.isBlank()).orElseGet(() -> ZoneId.systemDefault().getId());
   }
 
   /**

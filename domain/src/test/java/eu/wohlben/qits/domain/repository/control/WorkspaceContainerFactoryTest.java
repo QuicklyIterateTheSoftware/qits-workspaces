@@ -3,7 +3,9 @@ package eu.wohlben.qits.domain.repository.control;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.ZoneId;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -22,6 +24,7 @@ class WorkspaceContainerFactoryTest {
     f.claudeMount = "/claude-home";
     f.mavenVolume = "qits_shared_m2";
     f.pnpmVolume = "qits_shared_pnpm";
+    f.timezone = Optional.empty();
     return f;
   }
 
@@ -54,6 +57,18 @@ class WorkspaceContainerFactoryTest {
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());
+    // The blank default timezone inherits qits' own zone, so container wall-clock matches qits'.
+    assertSequence(argv, "-e", "TZ=" + ZoneId.systemDefault().getId());
+  }
+
+  @Test
+  void anExplicitTimezoneOverridesTheInheritedZone() {
+    WorkspaceContainerFactory f = factory();
+    f.timezone = Optional.of("Pacific/Auckland");
+
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+
+    assertSequence(argv, "-e", "TZ=Pacific/Auckland");
   }
 
   @Test
