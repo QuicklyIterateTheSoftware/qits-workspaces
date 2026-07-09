@@ -50,6 +50,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
   @Inject WorkspaceContainerStartedRecorder startedRecorder;
+  @Inject WorkspaceContainerStoppingRecorder stoppingRecorder;
 
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
@@ -349,6 +350,41 @@ public class WorkspaceContainerLifecycleServiceTest {
         0,
         startedRecorder.countFor(repoId, "feat"),
         "a no-op ensureContainer on a live container fires nothing");
+  }
+
+  @Test
+  public void stopContainerFiresStoppingBeforeRm() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    stoppingRecorder.clear();
+
+    workspaceService.stopContainer(repoId, "feat");
+
+    var seen = stoppingRecorder.forKey(repoId, "feat");
+    assertEquals(1, seen.size(), "stopContainer fires exactly one stopping event");
+    assertTrue(seen.get(0).event().graceful(), "a graceful stop asks for a graceful settle");
+    assertTrue(
+        seen.get(0).containerExistedWhenObserved(),
+        "the stopping event fires before containers.rm — the container is still present when"
+            + " observed");
+  }
+
+  @Test
+  public void discardFiresStoppingImmediatelyBeforeRm() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    stoppingRecorder.clear();
+
+    workspaceService.discardWorkspace(repoId, "feat");
+
+    var seen = stoppingRecorder.forKey(repoId, "feat");
+    assertEquals(1, seen.size(), "discard fires exactly one stopping event");
+    assertFalse(seen.get(0).event().graceful(), "discard settles bookkeeping-only (immediate)");
+    assertTrue(
+        seen.get(0).containerExistedWhenObserved(),
+        "the stopping event fires before containers.rm");
   }
 
   /** Makes a commit in the container's /workspace without pushing it, returning the new HEAD. */

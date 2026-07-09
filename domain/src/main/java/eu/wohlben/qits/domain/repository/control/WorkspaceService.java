@@ -729,6 +729,10 @@ public class WorkspaceService {
             .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
     pushBranch(repoId, workspaceId, workspace.branch);
+    // Settle the workspace's daemons before the container goes away, so a live daemon's
+    // disappearance reads as a deliberate STOPPED (graceful: signal + grace) instead of a crash the
+    // restart policy would resurrect. Synchronous — completes while the container still exists.
+    containerEvents.fireStopping(repoId, workspaceId, true);
     containers.rm(containers.containerName(workspaceId, repoId));
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
   }
@@ -1073,7 +1077,9 @@ public class WorkspaceService {
       // Remove the workspace's container. Discard is intentionally lossy: unlike the graceful
       // stopContainer (which pushes first so recreation is lossless), here we delete the branch
       // right after, so pushing unpushed /workspace commits would be pointless — the operator asked
-      // to throw this work away.
+      // to throw this work away. Settle any live daemons first (immediate — no graceful signal, the
+      // work is being discarded) so their disappearance doesn't read as a crash to be resurrected.
+      containerEvents.fireStopping(repoId, workspace.workspaceId, false);
       containers.rm(containers.containerName(workspace.workspaceId, repoId));
 
       if (branch != null && !branch.isBlank()) {
