@@ -20,6 +20,7 @@ import jakarta.transaction.Transactional;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -47,6 +48,8 @@ public class WorkspaceService {
   String dataDir;
 
   @Inject QitsHostResolver qitsHostResolver;
+
+  @Inject GitIdentity gitIdentity;
 
   @ConfigProperty(name = "qits.workspace.qits-port", defaultValue = "8080")
   String qitsPort;
@@ -90,11 +93,12 @@ public class WorkspaceService {
   }
 
   /**
-   * Materializes a workspace's container from its durable branch ref: runs the container, clones
-   * {@code branch} into its {@code /workspace} and sets the {@code qits@local} commit identity.
-   * Removes the container again if the clone fails, so a retry can succeed. The branch ref must
-   * already exist in the origin — this is the on-demand half of workspace creation, invoked lazily
-   * by {@link #ensureContainer} for never-provisioned and pruned workspaces alike.
+   * Materializes a workspace's container from its durable branch ref: runs the container and clones
+   * {@code branch} into its {@code /workspace} (the commit identity arrives as container-level
+   * {@code GIT_*} env via {@link WorkspaceContainerFactory}, so nothing is configured in the
+   * clone). Removes the container again if the clone fails, so a retry can succeed. The branch ref
+   * must already exist in the origin — this is the on-demand half of workspace creation, invoked
+   * lazily by {@link #ensureContainer} for never-provisioned and pruned workspaces alike.
    */
   private void provisionContainer(
       String repoId, String workspaceId, String branch, String parentBranch) {
@@ -115,11 +119,6 @@ public class WorkspaceService {
       containers.rm(container);
       throw new InternalServerErrorException("Clone into container failed: " + clone.output());
     }
-    // Commit identity matches the one mergeIntoTarget/updateWorkspaceFromParent use host-side.
-    containers.exec(
-        container, "/workspace", java.util.Map.of(), "git", "config", "user.email", "qits@local");
-    containers.exec(
-        container, "/workspace", java.util.Map.of(), "git", "config", "user.name", "qits");
   }
 
   /** Appends a history event to a workspace's timeline. */
@@ -903,14 +902,14 @@ public class WorkspaceService {
     }
 
     try {
-      String output =
-          git.exec(
-              mergeCwd.toFile(),
-              "git",
-              "merge",
-              sourceBranch,
-              "-m",
-              "Merge " + sourceBranch + " into " + resolvedTarget);
+      // The one host-spawned synthetic commit: identity via -c (not host env) so it stays explicit
+      // at this call site and can't leak into other host git invocations.
+      List<String> merge = new ArrayList<>(List.of("git"));
+      merge.addAll(gitIdentity.inlineArgs());
+      merge.addAll(
+          List.of(
+              "merge", sourceBranch, "-m", "Merge " + sourceBranch + " into " + resolvedTarget));
+      String output = git.exec(mergeCwd.toFile(), merge.toArray(String[]::new));
       String commitHash = git.exec(mergeCwd.toFile(), "git", "rev-parse", "HEAD").trim();
       boolean hasConflicts = output.toLowerCase().contains("conflict");
       if (isTemp) {
@@ -1009,8 +1008,9 @@ public class WorkspaceService {
 
     // Inside the container: fetch, sync the container's own branch to origin's ref (it may have
     // advanced out-of-band), then merge the parent in (a merge commit — works where ff-only can't).
-    // Identity is supplied inline. On conflict, abort so the workspace stays usable and return a
-    // 400. On success, push so the origin reflects the merge.
+    // Identity arrives as container-level GIT_* env (WorkspaceContainerFactory). On conflict, abort
+    // so the workspace stays usable and return a 400. On success, push so the origin reflects the
+    // merge.
     try {
       containerGit(repoId, workspaceId, "fetch", "origin");
       containerGit(repoId, workspaceId, "merge", "--ff-only", "origin/" + workspace.branch);
@@ -1024,10 +1024,6 @@ public class WorkspaceService {
             "/workspace",
             java.util.Map.of(),
             "git",
-            "-c",
-            "user.email=qits@local",
-            "-c",
-            "user.name=qits",
             "merge",
             "--no-edit",
             "origin/" + parent);

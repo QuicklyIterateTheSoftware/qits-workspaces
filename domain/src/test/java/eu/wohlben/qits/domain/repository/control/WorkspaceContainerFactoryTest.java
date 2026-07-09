@@ -25,7 +25,15 @@ class WorkspaceContainerFactoryTest {
     f.mavenVolume = "qits_shared_m2";
     f.pnpmVolume = "qits_shared_pnpm";
     f.timezone = Optional.empty();
+    f.gitIdentity = identity("qits", "qits@local");
     return f;
+  }
+
+  private static GitIdentity identity(String name, String email) {
+    GitIdentity identity = new GitIdentity();
+    identity.name = name;
+    identity.email = email;
+    return identity;
   }
 
   @Test
@@ -59,6 +67,25 @@ class WorkspaceContainerFactoryTest {
     assertFalse(argv.contains("-p"), argv.toString());
     // The blank default timezone inherits qits' own zone, so container wall-clock matches qits'.
     assertSequence(argv, "-e", "TZ=" + ZoneId.systemDefault().getId());
+    // The commit identity as container-level env, so every git process in the container (qits'
+    // verbs, the agent, actions, ad-hoc shells) commits as the configured identity.
+    assertSequence(argv, "-e", "GIT_AUTHOR_NAME=qits");
+    assertSequence(argv, "-e", "GIT_AUTHOR_EMAIL=qits@local");
+    assertSequence(argv, "-e", "GIT_COMMITTER_NAME=qits");
+    assertSequence(argv, "-e", "GIT_COMMITTER_EMAIL=qits@local");
+  }
+
+  @Test
+  void aConfiguredIdentityFlowsIntoTheContainerEnv() {
+    WorkspaceContainerFactory f = factory();
+    f.gitIdentity = identity("qits-bot", "qits-bot@example.com");
+
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+
+    assertSequence(argv, "-e", "GIT_AUTHOR_NAME=qits-bot");
+    assertSequence(argv, "-e", "GIT_AUTHOR_EMAIL=qits-bot@example.com");
+    assertSequence(argv, "-e", "GIT_COMMITTER_NAME=qits-bot");
+    assertSequence(argv, "-e", "GIT_COMMITTER_EMAIL=qits-bot@example.com");
   }
 
   @Test

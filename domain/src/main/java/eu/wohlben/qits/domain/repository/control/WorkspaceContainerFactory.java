@@ -1,6 +1,7 @@
 package eu.wohlben.qits.domain.repository.control;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
@@ -65,6 +66,8 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "qits.workspace.timezone")
   Optional<String> timezone;
 
+  @Inject GitIdentity gitIdentity;
+
   static final String MAVEN_MOUNT = "/caches/m2";
   static final String PNPM_MOUNT = "/caches/pnpm";
 
@@ -95,9 +98,10 @@ public class WorkspaceContainerFactory {
    * A {@link WorkspaceContainer} seeded for {@code workspaceId} of {@code repoId}: its
    * deterministic name, the host uid, the four {@code qits.*} labels startup reconciliation reads
    * back, the {@code host.docker.internal} alias Linux needs, the shared {@code qits-net} network,
-   * the shared credential + build-cache volumes (whenever configured), the image, and {@code sleep
-   * infinity} as the command. Everything safety-critical is already in place; the caller may keep
-   * chaining but need not.
+   * the configured git commit identity as {@code GIT_*} env ({@link GitIdentity}), the shared
+   * credential + build-cache volumes (whenever configured), the image, and {@code sleep infinity}
+   * as the command. Everything safety-critical is already in place; the caller may keep chaining
+   * but need not.
    */
   public WorkspaceContainer forWorkspace(
       String repoId, String workspaceId, String branch, String parent) {
@@ -118,6 +122,10 @@ public class WorkspaceContainerFactory {
             // Same timezone as qits (host -> devcontainer -> workspace container), so wall-clock
             // output agrees everywhere. The kernel clock is shared already; TZ is the only delta.
             .env("TZ", timezone());
+    // The commit identity, as container-level env so *every* git process in the container — qits'
+    // own verbs, the coding agent, actions, ad-hoc shells — inherits it regardless of cwd or
+    // .git/config (identity env beats every git config level).
+    gitIdentity.envMap().forEach(container::env);
     // The shared credential volume so an in-container `claude` can read the one-time OAuth login.
     // Mounted read/write on every workspace container (agent and daemon share the container), so
     // any

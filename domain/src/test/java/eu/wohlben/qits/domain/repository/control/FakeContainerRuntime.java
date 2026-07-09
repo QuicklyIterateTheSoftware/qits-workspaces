@@ -2,6 +2,7 @@ package eu.wohlben.qits.domain.repository.control;
 
 import io.quarkus.test.Mock;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
@@ -32,6 +33,11 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * startDaemon} throws. This is what catches a use-site that forgot {@code ensureContainer} now that
  * workspace creation no longer provisions eagerly.
  *
+ * <p>Stands in for the container-level env {@link WorkspaceContainerFactory} sets at {@code docker
+ * run} by applying {@link GitIdentity#envMap()} under each call's own env (per-call entries win,
+ * mirroring a per-exec {@code -e} overriding container-creation env) — so commits made "in the
+ * container" carry the configured identity exactly like in a real container.
+ *
  * <p>Replaces {@link DockerExecutor} globally in this module's {@code @QuarkusTest}s via {@link
  * Mock}. Real-docker behavior is covered separately by integration tests behind {@code skipITs}.
  */
@@ -43,6 +49,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
 
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
+
+  @Inject GitIdentity gitIdentity;
 
   private record Info(String repoId, String workspaceId, String branch, String parent, Path dir) {}
 
@@ -112,6 +120,9 @@ public class FakeContainerRuntime implements ContainerRuntime {
       cmd.add("-C");
       cmd.add(wd);
     }
+    // Container-level identity env first, per-call env after — later `env K=V` assignments win,
+    // mirroring docker where a per-exec -e overrides container-creation env.
+    gitIdentity.envMap().forEach((k, v) -> cmd.add(k + "=" + v));
     if (env != null) {
       env.forEach((k, v) -> cmd.add(k + "=" + (v == null ? "" : v)));
     }
@@ -138,6 +149,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
       argv.add("-C");
       argv.add(wd);
     }
+    // Container-level identity env first, per-call env after (later assignments win, like docker).
+    gitIdentity.envMap().forEach((k, v) -> argv.add(k + "=" + v));
     if (env != null) {
       env.forEach((k, v) -> argv.add(k + "=" + (v == null ? "" : v)));
     }
@@ -281,6 +294,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
       if (wd != null) {
         pb.directory(wd.toFile());
       }
+      // Container-level identity env first, per-call env after (per-call wins, like docker).
+      pb.environment().putAll(gitIdentity.envMap());
       if (env != null) {
         env.forEach((k, v) -> pb.environment().put(k, v == null ? "" : v));
       }
