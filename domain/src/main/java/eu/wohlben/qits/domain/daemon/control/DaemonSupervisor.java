@@ -221,6 +221,104 @@ public class DaemonSupervisor {
     }
   }
 
+  /**
+   * Settle every live daemon of a workspace when its container is about to be deliberately removed
+   * ({@code stopContainer} / discard). This is the missing half of daemon↔workspace lifecycle
+   * coupling: without it, the liveness poll reads the imminent container disappearance as a crash
+   * and the restart policy resurrects the just-stopped container. Setting {@code stopRequested} on
+   * each instance first makes both {@link #handleExit} and {@link #relaunch} take the STOPPED/INFO
+   * path, so nothing crashes, restarts, or resurrects.
+   *
+   * <p>Runs <em>synchronously</em> on the caller's (event-firing) thread so it completes before
+   * {@code containers.rm}. {@code graceful} = true (stopContainer) sends each daemon's stop signal
+   * and waits up to {@code stop-grace-ms} for a clean flush; false (discard) settles bookkeeping
+   * only and lets {@code rm} kill the processes. Mirrors {@link #stop}/{@link #finishStop}, but
+   * batched over the workspace's live instances and blocking (there is no live container left to
+   * schedule the settle against afterwards).
+   */
+  public void settleForWorkspace(String repoId, String workspaceId, boolean graceful) {
+    String container = containers.containerName(workspaceId, repoId);
+    List<Instance> targets = new ArrayList<>();
+    synchronized (this) {
+      for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
+        Key key = entry.getKey();
+        if (!key.repoId().equals(repoId) || !key.workspaceId().equals(workspaceId)) {
+          continue;
+        }
+        Instance instance = entry.getValue();
+        if (!isLive(instance.status)) {
+          continue;
+        }
+        instance.stopRequested = true;
+        cancelPending(instance);
+        cancelLiveness(instance);
+        if (instance.status == DaemonStatus.RESTARTING) {
+          // No live session — the pending relaunch (just cancelled) was all there was to stop.
+          transition(
+              instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "workspace stopped", null);
+        } else {
+          targets.add(instance);
+        }
+      }
+      // A future container of this workspace should be re-probed for adoption from scratch.
+      adoptionProbed.removeIf(
+          key -> key.repoId().equals(repoId) && key.workspaceId().equals(workspaceId));
+    }
+
+    // Signal + grace + follower termination run off the monitor — terminate() joins the follower's
+    // reader thread, which may deliver a line into synchronized markReady (same reason finishStop
+    // runs off-monitor).
+    if (graceful) {
+      for (Instance instance : targets) {
+        containers.signalDaemon(container, instance.daemon.id(), instance.daemon.stopSignal());
+      }
+      awaitAllDeadOrTimeout(container, targets, stopGraceMillis);
+    }
+    for (Instance instance : targets) {
+      if (graceful && containers.daemonAlive(container, instance.daemon.id())) {
+        LOG.infof(
+            "Daemon '%s' ignored SIG%s for %d ms during workspace stop; force-killing",
+            instance.daemon.name(), instance.daemon.stopSignal(), stopGraceMillis);
+        containers.killDaemon(container, instance.daemon.id());
+      }
+      if (instance.commandId != null) {
+        registry.terminate(instance.commandId); // stop the follower tail
+      }
+    }
+
+    synchronized (this) {
+      for (Instance instance : targets) {
+        if (instance.status != DaemonStatus.STOPPED) {
+          transition(
+              instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "workspace stopped", null);
+        }
+      }
+    }
+  }
+
+  /** Poll until every target daemon's session is gone or the grace window elapses. */
+  private void awaitAllDeadOrTimeout(String container, List<Instance> targets, long graceMillis) {
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(graceMillis);
+    while (System.nanoTime() < deadline) {
+      boolean anyAlive = false;
+      for (Instance instance : targets) {
+        if (containers.daemonAlive(container, instance.daemon.id())) {
+          anyAlive = true;
+          break;
+        }
+      }
+      if (!anyAlive) {
+        return;
+      }
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return;
+      }
+    }
+  }
+
   /** Every daemon of the repository with its runtime state in this workspace. */
   public List<DaemonInstanceDto> effectiveDaemons(String repoId, String workspaceId) {
     List<RepositoryDaemonDto> definitions = repositoryDaemonService.resolveAll(repoId);
