@@ -129,6 +129,7 @@ public class DaemonProxyRouteTest {
                 readyPattern,
                 "TERM",
                 RestartPolicy.NEVER,
+                null, // autoStart (default true)
                 0,
                 null,
                 echoServer.actualPort(),
