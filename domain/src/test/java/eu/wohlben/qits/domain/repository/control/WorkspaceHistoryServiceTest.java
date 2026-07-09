@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.command.control.CommandService;
-import eu.wohlben.qits.domain.featureflow.control.RepositoryActionService;
+import eu.wohlben.qits.domain.featureflow.control.ActionConfigurationService;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceHistoryDetailDto;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceHistoryDto;
@@ -49,7 +49,7 @@ public class WorkspaceHistoryServiceTest {
 
   @Inject WorkspaceHistoryService workspaceHistoryService;
 
-  @Inject RepositoryActionService repositoryActionService;
+  @Inject ActionConfigurationService actionConfigurationService;
 
   @Inject CommandService commandService;
 
@@ -123,7 +123,9 @@ public class WorkspaceHistoryServiceTest {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     String actionId =
-        repositoryActionService.create(repoId, "echo", null, "echo hi", null, false, null).id;
+        actionConfigurationService.createForRepository(
+                repoId, "echo", null, "echo hi", null, false, null)
+            .id;
     commandService.launchAndAwait(repoId, "feat", actionId);
 
     // Previously the command's FK pinned the workspace row and this threw a constraint violation.
