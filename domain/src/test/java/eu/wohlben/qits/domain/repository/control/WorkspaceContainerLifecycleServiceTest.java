@@ -49,6 +49,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Inject RepositoryDiscoveryService discoveryService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
+  @Inject WorkspaceContainerStartedRecorder startedRecorder;
 
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
@@ -296,6 +297,58 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.ensureContainer(repoId, "feat");
     assertNotEquals(
         head, containerHead(container), "an unpushed commit is lost on unexpected container death");
+  }
+
+  @Test
+  public void ensureContainerFiresStartedOnFreshProvision() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    startedRecorder.clear();
+
+    workspaceService.ensureContainer(repoId, "feat");
+
+    assertTrue(
+        startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
+        "a fresh cold->RUNNING provision fires WorkspaceContainerStarted");
+  }
+
+  @Test
+  public void ensureContainerFiresStartedOnExitedRestart() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    String container = containers.containerName("feat", repoId);
+    ((FakeContainerRuntime) containers).markExited(container);
+    startedRecorder.clear();
+
+    // Restart-in-place of an Exited container is the second cold->RUNNING transition.
+    workspaceService.ensureContainer(repoId, "feat");
+
+    assertTrue(
+        startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
+        "restarting an Exited container fires WorkspaceContainerStarted");
+  }
+
+  @Test
+  public void ensureContainerDoesNotFireStartedWhenAlreadyRunning() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    // Wait for the fresh provision's (async) event to land before clearing, so a late delivery of
+    // it
+    // can't masquerade as a second fire below.
+    assertTrue(startedRecorder.awaitCount(repoId, "feat", 1, 5_000));
+    startedRecorder.clear();
+
+    // The already-running short-circuit must NOT fire — this is what terminates the auto-start
+    // reentrancy loop.
+    workspaceService.ensureContainer(repoId, "feat");
+
+    Thread.sleep(500); // give any (erroneous) async fire time to land
+    assertEquals(
+        0,
+        startedRecorder.countFor(repoId, "feat"),
+        "a no-op ensureContainer on a live container fires nothing");
   }
 
   /** Makes a commit in the container's /workspace without pushing it, returning the new HEAD. */

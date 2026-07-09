@@ -41,6 +41,8 @@ public class WorkspaceService {
 
   @Inject ContainerRuntime containers;
 
+  @Inject WorkspaceContainerEventPublisher containerEvents;
+
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
@@ -596,6 +598,8 @@ public class WorkspaceService {
         containers.start(container);
         QuarkusTransaction.requiringNew()
             .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
+        // Cold -> RUNNING: bring the repository's auto-start daemons up with the container (async).
+        containerEvents.fireStarted(repoId, workspaceId);
         return;
       } catch (RuntimeException e) {
         QuarkusTransaction.requiringNew()
@@ -638,6 +642,8 @@ public class WorkspaceService {
       provisionContainer(repoId, workspaceId, snapshot.branch(), snapshot.parent());
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
+      // Cold -> RUNNING: bring the repository's auto-start daemons up with the container (async).
+      containerEvents.fireStarted(repoId, workspaceId);
     } catch (RuntimeException e) {
       QuarkusTransaction.requiringNew()
           .run(
