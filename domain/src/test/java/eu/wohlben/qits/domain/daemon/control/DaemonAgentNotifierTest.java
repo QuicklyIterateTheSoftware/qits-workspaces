@@ -3,10 +3,10 @@ package eu.wohlben.qits.domain.daemon.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 import eu.wohlben.qits.domain.command.control.CommandRegistry;
 import eu.wohlben.qits.domain.command.control.CommandService;
 import eu.wohlben.qits.domain.command.dto.CommandDto;
-import eu.wohlben.qits.domain.command.dto.CommandLogLineDto;
 import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventKind;
 import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
@@ -27,8 +27,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The agent sink end to end: an event lands as one prefixed stream-json user message on the newest
- * running chat's stdin (visible via the persisted user echo), and with no chat running it is
- * spooled and handed to the next session.
+ * running chat's stdin (visible via the live user echo on an attached sink), and with no chat
+ * running it is spooled and handed to the next session.
  */
 @QuarkusTest
 @TestProfile(DaemonAgentNotifierTest.TestProfile.class)
@@ -94,14 +94,18 @@ public class DaemonAgentNotifierTest {
     CommandDto chat =
         commandService.launchChat(repoId, "work", "Claude chat", "sleep 10", Map.of());
     try {
+      // chatSend echoes the injected turn into the unified live stream (ring + broadcast; user
+      // echoes are no longer persisted — the durable record is the transcript import), so the
+      // message (with its [daemon:…] prefix) must reach an attached sink.
+      CapturingSink sink = new CapturingSink();
+      assertTrue(commandRegistry.attach(chat.id(), sink), "the chat must accept a sink");
+
       notifier.deliver(event(repoId, "NPE in handler", "stacktrace-here"));
 
-      // chatSend echoes the injected turn into the unified stream, which is persisted — so the
-      // message (with its [daemon:…] prefix) must show up in the chat's log.
-      List<CommandLogLineDto> lines = awaitLogContaining(chat.id(), "[daemon:dev-server]");
+      String streamed = awaitSinkContaining(sink, "[daemon:dev-server]");
       assertTrue(
-          lines.stream().anyMatch(l -> l.content().contains("stacktrace-here")),
-          "the log excerpt travels with the message: " + lines);
+          streamed.contains("stacktrace-here"),
+          "the log excerpt travels with the message: " + streamed);
       assertEquals(
           List.of(),
           spool.drain(repoId, "work"),
@@ -109,6 +113,36 @@ public class DaemonAgentNotifierTest {
     } finally {
       commandRegistry.terminate(chat.id());
     }
+  }
+
+  private static final class CapturingSink implements CommandOutputSink {
+    private final StringBuilder received = new StringBuilder();
+
+    @Override
+    public synchronized void write(String data) {
+      received.append(data);
+    }
+
+    @Override
+    public boolean isOpen() {
+      return true;
+    }
+
+    synchronized String text() {
+      return received.toString();
+    }
+  }
+
+  private String awaitSinkContaining(CapturingSink sink, String needle)
+      throws InterruptedException {
+    for (int i = 0; i < 40; i++) {
+      String text = sink.text();
+      if (text.contains(needle)) {
+        return text;
+      }
+      Thread.sleep(50);
+    }
+    throw new AssertionError("sink never received '" + needle + "': " + sink.text());
   }
 
   @Test
@@ -123,17 +157,5 @@ public class DaemonAgentNotifierTest {
         spooled.get(0).startsWith("[daemon:dev-server] ERROR: crashed (exit 1)"), spooled.get(0));
     assertTrue(spooled.get(0).contains("boom"), spooled.get(0));
     assertEquals(List.of(), spool.drain(repoId, "work"), "drain empties the spool");
-  }
-
-  private List<CommandLogLineDto> awaitLogContaining(String commandId, String needle)
-      throws InterruptedException {
-    for (int i = 0; i < 40; i++) {
-      List<CommandLogLineDto> lines = commandService.log(commandId, null);
-      if (lines.stream().anyMatch(l -> l.content().contains(needle))) {
-        return lines;
-      }
-      Thread.sleep(100);
-    }
-    throw new AssertionError("log never contained: " + needle);
   }
 }
