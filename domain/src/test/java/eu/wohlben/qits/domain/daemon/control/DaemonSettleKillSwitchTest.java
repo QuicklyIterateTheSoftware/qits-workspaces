@@ -73,6 +73,7 @@ public class DaemonSettleKillSwitchTest {
                 null,
                 null,
                 null,
+                null,
                 null)
             .id;
     supervisor.start(repo.id, "work", daemonId);

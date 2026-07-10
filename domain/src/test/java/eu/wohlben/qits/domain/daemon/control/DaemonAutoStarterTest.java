@@ -83,6 +83,7 @@ public class DaemonAutoStarterTest {
             null,
             null,
             null,
+            null,
             null)
         .id;
   }

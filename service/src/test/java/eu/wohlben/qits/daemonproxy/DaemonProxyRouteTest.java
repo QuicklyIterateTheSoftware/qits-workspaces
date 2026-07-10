@@ -137,6 +137,7 @@ public class DaemonProxyRouteTest {
                 basePath,
                 null,
                 null,
+                null,
                 null)
             .id;
     workspaceService.createWorkspace(repo.id, "work", "master", "work");

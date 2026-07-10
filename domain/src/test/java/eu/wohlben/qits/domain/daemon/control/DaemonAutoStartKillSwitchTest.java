@@ -73,6 +73,7 @@ public class DaemonAutoStartKillSwitchTest {
                 null,
                 null,
                 null,
+                null,
                 null)
             .id;
 

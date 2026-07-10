@@ -83,6 +83,13 @@ public class DaemonSupervisor {
     ScheduledFuture<?> liveness;
 
     /**
+     * Live healthcheck state for the current launch epoch — runtime-only, never persisted. Each
+     * (re)launch builds a fresh set, so a probe tick outliving a settled run can only write into a
+     * discarded object. Null when the daemon isn't running (reads all-UNKNOWN).
+     */
+    HealthProbeService.ProbeSet health;
+
+    /**
      * Where the daemon web-view proxy connects to reach the daemon's {@code webView.port} inside
      * the container — its DNS name + port on the shared network. Null when the daemon isn't
      * web-viewable; re-resolved on every (re)launch.
@@ -127,6 +134,8 @@ public class DaemonSupervisor {
   @Inject ContainerRuntime containers;
 
   @Inject WorkspaceChangePublisher changePublisher;
+
+  @Inject HealthProbeService healthProbes;
 
   /** Without a ready pattern, STARTING flips to READY after this long (if still alive). */
   @ConfigProperty(name = "qits.daemons.ready-grace-ms", defaultValue = "10000")
@@ -186,6 +195,7 @@ public class DaemonSupervisor {
     instance.stopRequested = true;
     cancelPending(instance);
     cancelLiveness(instance);
+    cancelHealth(instance);
     if (instance.status == DaemonStatus.RESTARTING) {
       // No live session — the pending relaunch was the only thing to cancel.
       transition(instance, DaemonStatus.STOPPED, DaemonEventSeverity.INFO, "stopped", null);
@@ -252,6 +262,7 @@ public class DaemonSupervisor {
         instance.stopRequested = true;
         cancelPending(instance);
         cancelLiveness(instance);
+        cancelHealth(instance);
         if (instance.status == DaemonStatus.RESTARTING) {
           // No live session — the pending relaunch (just cancelled) was all there was to stop.
           transition(
@@ -496,6 +507,41 @@ public class DaemonSupervisor {
       }
     }
     startLivenessPoll(instance, instance.commandId);
+    startHealthProbes(instance, container, publicBase, adopt);
+  }
+
+  /**
+   * Schedule the definition's healthchecks for this launch epoch. Probes run in the container's own
+   * network namespace, with the daemon's env plus {@code QITS_PUBLIC_BASE} (a COMMAND check probing
+   * an app that serves under the proxy base needs it). A state flip fires the same payload-free
+   * DAEMONS topic hint as a lifecycle transition — flips only, never per tick, so live clients
+   * refetch on change instead of polling. Health stays a display sidecar: nothing here touches
+   * {@link DaemonStatus} or publishes a daemon event.
+   */
+  private void startHealthProbes(
+      Instance instance, String container, String publicBase, boolean adopt) {
+    cancelHealth(instance);
+    Map<String, String> probeEnv = new HashMap<>(instance.daemon.environment());
+    if (publicBase != null) {
+      probeEnv.put("QITS_PUBLIC_BASE", publicBase);
+    }
+    instance.health =
+        healthProbes.start(
+            scheduler,
+            container,
+            instance.daemon.healthChecks(),
+            probeEnv,
+            adopt,
+            () ->
+                changePublisher.fire(
+                    instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.DAEMONS));
+  }
+
+  private static void cancelHealth(Instance instance) {
+    if (instance.health != null) {
+      instance.health.cancel();
+      instance.health = null;
+    }
   }
 
   /** Begin polling the detached session's liveness for the current run of {@code instance}. */
@@ -845,6 +891,13 @@ public class DaemonSupervisor {
     if (!isLive(status)) {
       closeTails(instance);
     }
+    // No process to probe outside STARTING/READY/DEGRADED (RESTARTING included — during the
+    // backoff there is nothing listening, and the relaunch starts a fresh probe epoch anyway).
+    if (status != DaemonStatus.STARTING
+        && status != DaemonStatus.READY
+        && status != DaemonStatus.DEGRADED) {
+      cancelHealth(instance);
+    }
     events.publish(
         new DaemonEventDto(
             instance.repoId,
@@ -928,9 +981,20 @@ public class DaemonSupervisor {
             ? DaemonProxyPath.servedBase(workspaceId, daemon.id(), daemon.webView().basePath())
             : null;
     if (instance == null) {
-      return new DaemonInstanceDto(daemon, DaemonStatus.STOPPED, 0, null, proxyPath);
+      return new DaemonInstanceDto(
+          daemon,
+          DaemonStatus.STOPPED,
+          0,
+          null,
+          proxyPath,
+          HealthProbeService.snapshotOrUnknown(null, daemon.healthChecks()));
     }
     return new DaemonInstanceDto(
-        daemon, instance.status, instance.restartCount, instance.commandId, proxyPath);
+        daemon,
+        instance.status,
+        instance.restartCount,
+        instance.commandId,
+        proxyPath,
+        HealthProbeService.snapshotOrUnknown(instance.health, daemon.healthChecks()));
   }
 }

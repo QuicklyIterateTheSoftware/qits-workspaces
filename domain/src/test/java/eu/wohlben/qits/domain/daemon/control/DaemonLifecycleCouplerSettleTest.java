@@ -74,7 +74,7 @@ public class DaemonLifecycleCouplerSettleTest {
   private String createDaemon(String repoId, String name, String command, RestartPolicy policy) {
     return repositoryDaemonService.create(
             repoId, name, null, command, null, "TERM", policy, false, 3, null, null, null, null,
-            null, null, null)
+            null, null, null, null)
         .id;
   }
 
