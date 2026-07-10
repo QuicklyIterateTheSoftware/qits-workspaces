@@ -801,4 +801,164 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode())
         .body("runtimeStatus", equalTo("RUNNING"));
   }
+
+  private static final String INLINE_COMPONENT =
+      """
+      import { Component } from '@angular/core';
+
+      @Component({
+        selector: 'app-greeting',
+        template: `
+          @if (greeting(); as g) {
+            <h1>Hello, {{ g.name }}!</h1>
+          }
+        `,
+      })
+      export class Greeting {}
+      """;
+
+  private String componentMapUrl(String repoId) {
+    return "/api/repositories/" + repoId + "/workspaces/master/component-map";
+  }
+
+  @Test
+  public void testComponentMapScansInlineAndExternalTemplateComponents() throws Exception {
+    String repoId = createProjectAndRepository();
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
+    Files.createDirectories(workspacePath.resolve("src/app/detail"));
+    Files.writeString(workspacePath.resolve("src/app/greeting.ts"), INLINE_COMPONENT);
+    Files.writeString(
+        workspacePath.resolve("src/app/detail/detail.ts"),
+        """
+        @Component({
+          selector: 'app-detail, [appDetail]',
+          templateUrl: './detail.html',
+          styleUrls: ['./detail.scss'],
+        })
+        export class Detail {}
+        """);
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("framework", equalTo("angular"))
+        .body("components", hasSize(2))
+        // the inline-template component carries only its .ts file
+        .body(
+            "components.find { it.className == 'Greeting' }.componentFile",
+            equalTo("src/app/greeting.ts"))
+        .body("components.find { it.className == 'Greeting' }.templateFile", nullValue())
+        .body("components.find { it.className == 'Greeting' }.styleFiles", hasSize(0))
+        .body(
+            "components.find { it.className == 'Greeting' }.selectors[0].element",
+            equalTo("app-greeting"))
+        // external refs resolve relative to the component file; the multi-selector is structured
+        .body(
+            "components.find { it.className == 'Detail' }.templateFile",
+            equalTo("src/app/detail/detail.html"))
+        .body(
+            "components.find { it.className == 'Detail' }.styleFiles",
+            contains("src/app/detail/detail.scss"))
+        .body(
+            "components.find { it.className == 'Detail' }.selectors[0].element",
+            equalTo("app-detail"))
+        .body(
+            "components.find { it.className == 'Detail' }.selectors[1].attribute",
+            equalTo("appDetail"));
+  }
+
+  @Test
+  public void testComponentMapEmptyForRepoWithoutComponents() {
+    String repoId = createProjectAndRepository();
+
+    // the fixture repo has no TypeScript at all — git grep matches nothing (exit 1), which must
+    // surface as an empty map, never an error
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("framework", equalTo("angular"))
+        .body("components", hasSize(0));
+  }
+
+  @Test
+  public void testComponentMapPicksUpNewUntrackedComponent() throws Exception {
+    String repoId = createProjectAndRepository();
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
+
+    // prime the cache with an empty scan…
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("components", hasSize(0));
+
+    // …then a brand-new (untracked, uncommitted) component must invalidate it and appear
+    Files.writeString(workspacePath.resolve("fresh.ts"), INLINE_COMPONENT);
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("components.className", hasItem("Greeting"));
+  }
+
+  @Test
+  public void testComponentMapReflectsEditToDirtyTrackedFile() throws Exception {
+    String repoId = createProjectAndRepository();
+    commitFile(repoId, "master", "tracked.ts", INLINE_COMPONENT, "add component");
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body(
+            "components.find { it.className == 'Greeting' }.selectors[0].element",
+            equalTo("app-greeting"));
+
+    // an uncommitted edit to the tracked file must invalidate the cached scan (git diff marker)
+    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
+    Files.writeString(
+        workspacePath.resolve("tracked.ts"),
+        INLINE_COMPONENT.replace("app-greeting", "app-renamed"));
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body(
+            "components.find { it.className == 'Greeting' }.selectors[0].element",
+            equalTo("app-renamed"));
+  }
+
+  @Test
+  public void testComponentMapExcludesSpecFiles() throws Exception {
+    String repoId = createProjectAndRepository();
+    Path workspacePath = ensuredWorkspacePath(repoId, "master");
+    // test-host components in specs would pollute the map
+    Files.writeString(
+        workspacePath.resolve("greeting.spec.ts"),
+        INLINE_COMPONENT.replace("Greeting", "TestHost"));
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(componentMapUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("components", hasSize(0));
+  }
 }

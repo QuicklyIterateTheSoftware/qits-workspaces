@@ -1,10 +1,12 @@
 package eu.wohlben.qits.domain.repository.api;
 
 import eu.wohlben.qits.domain.repository.control.CommitService;
+import eu.wohlben.qits.domain.repository.control.ComponentMapService;
 import eu.wohlben.qits.domain.repository.control.ResolveConflictService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceFilesService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.repository.dto.CommitLogDto;
+import eu.wohlben.qits.domain.repository.dto.ComponentMapDto;
 import eu.wohlben.qits.domain.repository.dto.LazyDirDto;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceFileContentDto;
@@ -36,6 +38,8 @@ public class WorkspaceController {
   @Inject ResolveConflictService resolveConflictService;
 
   @Inject WorkspaceFilesService workspaceFilesService;
+
+  @Inject ComponentMapService componentMapService;
 
   @Inject WorkspaceMapper workspaceMapper;
 
@@ -223,5 +227,18 @@ public class WorkspaceController {
       @PathParam("workspaceId") String workspaceId,
       @QueryParam("path") String path) {
     return workspaceFilesService.readFile(repoId, workspaceId, path);
+  }
+
+  /**
+   * The workspace's component map — every {@code @Component} in the working tree with its selector
+   * and source files — so a web-view pick can be attributed to the code that renders it. Scanned
+   * lazily and cached against the working tree's state; a tree without components yields an empty
+   * map, never an error.
+   */
+  @GET
+  @Path("/{workspaceId}/component-map")
+  public ComponentMapDto componentMap(
+      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+    return componentMapService.componentMap(repoId, workspaceId);
   }
 }
