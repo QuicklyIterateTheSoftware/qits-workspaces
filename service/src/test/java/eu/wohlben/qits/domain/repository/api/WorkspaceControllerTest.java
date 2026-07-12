@@ -961,4 +961,115 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode())
         .body("components", hasSize(0));
   }
+
+  private String detectionUrl(String repoId) {
+    return "/api/repositories/" + repoId + "/workspaces/master/detection";
+  }
+
+  /**
+   * The whole feature in one call: a Java project (pom-refined to Quarkus) nested with a Vitest
+   * Angular project, returning projects, per-framework membership, and the source→test link graph
+   * with runner kinds — all resolved server-side over the live working tree.
+   */
+  @Test
+  public void testDetectionReturnsProjectsMembershipAndLinksInOneCall() throws Exception {
+    String repoId = createProjectAndRepository();
+    Path ws = ensuredWorkspacePath(repoId, "master");
+    Files.createDirectories(ws.resolve("src/main/java/com"));
+    Files.createDirectories(ws.resolve("src/test/java/com"));
+    Files.createDirectories(ws.resolve("web/src"));
+    // a Java/Quarkus project at the repo root
+    Files.writeString(
+        ws.resolve("pom.xml"),
+        "<project><dependency><groupId>io.quarkus</groupId></dependency></project>\n");
+    Files.writeString(ws.resolve("src/main/java/com/App.java"), "package com; class App {}\n");
+    Files.writeString(
+        ws.resolve("src/test/java/com/AppTest.java"), "package com; class AppTest {}\n");
+    // a nested Angular project whose test builder is Vitest (must NOT default to karma)
+    Files.writeString(
+        ws.resolve("web/angular.json"),
+        "{ \"projects\": { \"app\": { \"architect\": { \"test\": { \"builder\":"
+            + " \"@angular/build:unit-test\" } } } } }\n");
+    Files.writeString(ws.resolve("web/src/foo.ts"), "export const foo = 1;\n");
+    Files.writeString(ws.resolve("web/src/foo.spec.ts"), "describe('foo', () => {});\n");
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(detectionUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        // projects: the Java root pom-refined to Quarkus, plus the nested Angular root
+        .body("projects.find { it.frameworkId == 'java-quarkus' }.label", equalTo("Java / Quarkus"))
+        .body("projects.find { it.frameworkId == 'java-quarkus' }.root", equalTo(""))
+        .body("projects.find { it.root == 'web' }.frameworkId", equalTo("ts-angular"))
+        // membership: all detected frameworks' member sets, in the one call
+        .body(
+            "frameworks.find { it.frameworkId == 'java-quarkus' }.memberPaths",
+            hasItems("pom.xml", "src/main/java/com/App.java", "src/test/java/com/AppTest.java"))
+        .body(
+            "frameworks.find { it.root == 'web' }.memberPaths",
+            hasItems("web/angular.json", "web/src/foo.ts", "web/src/foo.spec.ts"))
+        // links: Java source → its JUnit test
+        .body(
+            "links.find { it.path == 'src/main/java/com/App.java' }.tests[0].path",
+            equalTo("src/test/java/com/AppTest.java"))
+        .body(
+            "links.find { it.path == 'src/main/java/com/App.java' }.tests[0].kinds",
+            contains("junit"))
+        .body("links.find { it.path == 'src/main/java/com/App.java' }.projectRoot", equalTo(""))
+        // links: Angular source → its Vitest spec (config-detected, not a karma default)
+        .body(
+            "links.find { it.path == 'web/src/foo.ts' }.tests[0].path",
+            equalTo("web/src/foo.spec.ts"))
+        .body("links.find { it.path == 'web/src/foo.ts' }.tests[0].kinds", contains("vitest"));
+  }
+
+  /**
+   * Render-consistency: {@code /files} and {@code /detection}, over the same unchanged tree, agree
+   * on the generation token, so the client applies detection only while it matches the tree it
+   * renders.
+   */
+  @Test
+  public void testFilesAndDetectionShareTheGenerationToken() {
+    String repoId = createProjectAndRepository();
+    String filesUrl = "/api/repositories/" + repoId + "/workspaces/master/files";
+
+    String filesGeneration =
+        given()
+            .contentType(ContentType.JSON)
+            .when()
+            .get(filesUrl)
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("generation", not(emptyOrNullString()))
+            .extract()
+            .path("generation");
+
+    // /detection stamps the identical token so the two never render as a skewed combination.
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(detectionUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("generation", equalTo(filesGeneration));
+  }
+
+  @Test
+  public void testDetectionIsEmptyForARepoWithNoRecognisedFramework() {
+    String repoId = createProjectAndRepository();
+
+    // the fixture repo has no pom.xml / angular.json / docs dir — detection yields empty lists,
+    // never an error, and /files stays a pure String[] transport
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get(detectionUrl(repoId))
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("projects", hasSize(0))
+        .body("frameworks", hasSize(0))
+        .body("links", hasSize(0));
+  }
 }

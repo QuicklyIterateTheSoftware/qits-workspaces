@@ -2,11 +2,13 @@ package eu.wohlben.qits.domain.repository.api;
 
 import eu.wohlben.qits.domain.repository.control.CommitService;
 import eu.wohlben.qits.domain.repository.control.ComponentMapService;
+import eu.wohlben.qits.domain.repository.control.DetectionService;
 import eu.wohlben.qits.domain.repository.control.ResolveConflictService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceFilesService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.repository.dto.CommitLogDto;
 import eu.wohlben.qits.domain.repository.dto.ComponentMapDto;
+import eu.wohlben.qits.domain.repository.dto.DetectionDto;
 import eu.wohlben.qits.domain.repository.dto.LazyDirDto;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceFileContentDto;
@@ -40,6 +42,8 @@ public class WorkspaceController {
   @Inject WorkspaceFilesService workspaceFilesService;
 
   @Inject ComponentMapService componentMapService;
+
+  @Inject DetectionService detectionService;
 
   @Inject WorkspaceMapper workspaceMapper;
 
@@ -187,7 +191,7 @@ public class WorkspaceController {
   }
 
   public static record ListWorkspaceFilesRequest() {
-    public record Response(List<String> paths, List<LazyDirDto> lazyDirs) {}
+    public record Response(List<String> paths, List<LazyDirDto> lazyDirs, String generation) {}
   }
 
   @GET
@@ -205,7 +209,7 @@ public class WorkspaceController {
                     new LazyDirDto(
                         dir.path(), dir.childCount(), lazyDirHref(repoId, workspaceId, dir.path())))
             .toList();
-    return new ListWorkspaceFilesRequest.Response(listing.paths(), lazyDirs);
+    return new ListWorkspaceFilesRequest.Response(listing.paths(), lazyDirs, listing.generation());
   }
 
   /**
@@ -240,5 +244,20 @@ public class WorkspaceController {
   public ComponentMapDto componentMap(
       @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
     return componentMapService.componentMap(repoId, workspaceId);
+  }
+
+  /**
+   * The workspace's framework/project/test-link detection metadata, computed once over the working
+   * tree: the detected projects (pom-refined labels), every framework's resolved membership path
+   * set (the client's filter input), and the source→test link graph with runner kinds. Consumed by
+   * the file browser instead of re-deriving detection from path strings; {@code /files} stays a
+   * pure filesystem transport. Cached against the working tree's state; a tree with no recognised
+   * framework yields empty lists, never an error.
+   */
+  @GET
+  @Path("/{workspaceId}/detection")
+  public DetectionDto detection(
+      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+    return detectionService.detect(repoId, workspaceId);
   }
 }

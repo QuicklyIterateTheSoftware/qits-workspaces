@@ -19,6 +19,13 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
     /** The workspace's telemetry buffers got new data (debounced — highest churn). */
     TELEMETRY,
     /** A command's lifecycle changed (started, exited, terminated). */
-    COMMANDS
+    COMMANDS,
+    /**
+     * The workspace working tree changed on disk — a file was created, modified, deleted, or moved
+     * (typically the coding agent scaffolding without a commit). Fired by {@code
+     * WorkspaceWatchService} from a per-workspace {@code inotifywait}; the frontend re-fetches
+     * {@code /files} and {@code /detection}.
+     */
+    FILES
   }
 }
