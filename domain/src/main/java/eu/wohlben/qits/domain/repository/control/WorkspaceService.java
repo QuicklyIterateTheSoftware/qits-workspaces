@@ -93,6 +93,29 @@ public class WorkspaceService {
   }
 
   /**
+   * Whether {@code branch} already exists as a local ref in the bare origin. Uses {@code show-ref
+   * --verify --quiet}, whose non-zero exit (ref absent) is the answer, not a failure — so {@code
+   * execAllowNonZero} rather than {@code exec}. Backs workspace adoption of a pre-existing branch
+   * (see {@link #createWorkspace}).
+   */
+  private boolean branchExistsOnOrigin(Path originPath, String branch) {
+    try {
+      return git.execAllowNonZero(
+                  originPath.toFile(),
+                  "git",
+                  "show-ref",
+                  "--verify",
+                  "--quiet",
+                  "--end-of-options",
+                  "refs/heads/" + branch)
+              .exitCode()
+          == 0;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  /**
    * Materializes a workspace's container from its durable branch ref: runs the container and clones
    * {@code branch} into its {@code /workspace} (the commit identity arrives as container-level
    * {@code GIT_*} env via {@link WorkspaceContainerFactory}, so nothing is configured in the
@@ -399,12 +422,30 @@ public class WorkspaceService {
 
   public Workspace createWorkspace(
       String repoId, String workspaceId, String parent, String branch) {
-    return createWorkspace(repoId, workspaceId, parent, branch, null);
+    return createWorkspace(repoId, workspaceId, parent, branch, null, false);
   }
 
-  @Transactional
   public Workspace createWorkspace(
       String repoId, String workspaceId, String parent, String branch, String preamble) {
+    return createWorkspace(repoId, workspaceId, parent, branch, preamble, false);
+  }
+
+  /**
+   * Creates a workspace for a branch. Normally {@code branch} is a <em>new</em> branch this
+   * workspace owns, forked off {@code parent} — a fresh ref is created in the origin. When {@code
+   * adoptExisting} is set and {@code branch} already exists in the origin, the workspace instead
+   * <em>adopts</em> that existing branch in place: no ref is created, the row is simply recorded
+   * over it (the branch-list "Create workspace" button on a branch that has no workspace yet). The
+   * container is provisioned lazily from the branch ref on first use either way.
+   */
+  @Transactional
+  public Workspace createWorkspace(
+      String repoId,
+      String workspaceId,
+      String parent,
+      String branch,
+      String preamble,
+      boolean adoptExisting) {
     var repo =
         repositoryRepository
             .findByIdOptional(repoId)
@@ -444,7 +485,14 @@ public class WorkspaceService {
     // second) plus the row below. No container, no clone — provisioning is lazy: first use goes
     // through ensureContainer, which materializes the container from this branch ref. That keeps
     // creation free of docker and the running git server (the cli seeds depend on this).
-    createBranchRefOnOrigin(originPath, newBranch, parentBranch);
+    //
+    // Adoption: when asked to adopt and the branch already exists (e.g. a branch pushed or created
+    // outside qits), skip the ref creation and record the workspace over the existing branch. The
+    // normal path still creates the ref — and errors loudly if it already exists — so a typo'd
+    // "branch off" name is never silently swallowed.
+    if (!(adoptExisting && branchExistsOnOrigin(originPath, newBranch))) {
+      createBranchRefOnOrigin(originPath, newBranch, parentBranch);
+    }
 
     Workspace workspace = new Workspace();
     workspace.workspaceId = workspaceId;

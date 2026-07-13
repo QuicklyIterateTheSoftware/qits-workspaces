@@ -166,6 +166,53 @@ public class WorkspaceControllerTest {
   }
 
   @Test
+  public void testCreateWorkspaceAdoptsExistingBranch() {
+    String repoId = createProjectAndRepository();
+
+    // `feature` already exists in the fixture with no workspace. Adopting it must succeed (no
+    // duplicate `git branch`) and record a workspace that owns that branch, parented on main.
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new WorkspaceController.CreateWorkspaceRequest(
+                "feature-ws", "master", "feature", null, true))
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("workspace.workspaceId", equalTo("feature-ws"))
+        // branch is resolved only in the list path (the create DTO mapper ignores it), so the
+        // adopted-branch assertion lives on the list call below.
+        .body("workspace.parent", equalTo("master"));
+
+    // It shows up in the list bound to the adopted branch (not a fresh fork).
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get("/api/repositories/" + repoId + "/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body(
+            "entries.find { it.workspace.workspaceId == 'feature-ws' }.workspace.branch",
+            equalTo("feature"));
+  }
+
+  @Test
+  public void testCreateWorkspaceRejectsExistingBranchWhenNotAdopting() {
+    String repoId = createProjectAndRepository();
+
+    // Without adoptExisting, a workspace whose branch already exists must fail loudly rather than
+    // silently adopt it — a typo'd "branch off" name is a real error, not an adoption.
+    given()
+        .contentType(ContentType.JSON)
+        .body(new WorkspaceController.CreateWorkspaceRequest("dup-ws", "master", "feature", null))
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces")
+        .then()
+        .statusCode(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode());
+  }
+
+  @Test
   public void testListWorkspacesReportsCommitsAheadAndBehindParent() {
     String repoId = createProjectAndRepository();
 

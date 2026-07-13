@@ -62,8 +62,19 @@ public class WorkspaceController {
     return new ListWorkspacesRequest.Response(entries);
   }
 
+  /**
+   * {@code adoptExisting} lets the workspace take over a branch that already exists (the
+   * branch-list "Create workspace" button on a workspaceless branch) instead of forking a new one;
+   * false for the normal "branch off" flow, which creates a fresh branch and errors on a name
+   * collision.
+   */
   public static record CreateWorkspaceRequest(
-      @NotBlank String id, String parent, String branch, String preamble) {
+      @NotBlank String id, String parent, String branch, String preamble, boolean adoptExisting) {
+    /** Backward-compatible "branch off" form: create a new branch, never adopt an existing one. */
+    public CreateWorkspaceRequest(String id, String parent, String branch, String preamble) {
+      this(id, parent, branch, preamble, false);
+    }
+
     public record Response(WorkspaceDto workspace) {}
   }
 
@@ -72,7 +83,12 @@ public class WorkspaceController {
       @PathParam("repoId") String repoId, @Valid CreateWorkspaceRequest request) {
     var wt =
         workspaceService.createWorkspace(
-            repoId, request.id(), request.parent(), request.branch(), request.preamble());
+            repoId,
+            request.id(),
+            request.parent(),
+            request.branch(),
+            request.preamble(),
+            request.adoptExisting());
     return new CreateWorkspaceRequest.Response(workspaceMapper.toDto(wt));
   }
 
