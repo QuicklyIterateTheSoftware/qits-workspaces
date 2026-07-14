@@ -46,6 +46,16 @@ public class GitExecutor {
     return new ExecResult(exitCode, output);
   }
 
+  /**
+   * Reads a file's contents out of a bare repository at a given revision ({@code git show
+   * <rev>:<path>}), returning the exit code alongside the output rather than throwing. A non-zero
+   * exit means the file is absent at that revision (e.g. no {@code .gitmodules}) — a meaningful
+   * answer, not a failure — so callers treat it as "empty" rather than an error.
+   */
+  public ExecResult showFile(java.io.File bareRepo, String rev, String path) throws Exception {
+    return execAllowNonZero(bareRepo, "git", "show", "--end-of-options", rev + ":" + path);
+  }
+
   public String getCurrentBranch(Path workspacePath) {
     try {
       return exec(workspacePath.toFile(), "git", "branch", "--show-current").trim();

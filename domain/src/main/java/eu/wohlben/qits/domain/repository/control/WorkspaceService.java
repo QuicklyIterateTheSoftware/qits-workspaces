@@ -5,12 +5,14 @@ import eu.wohlben.qits.domain.error.InternalServerErrorException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.entity.Repository;
+import eu.wohlben.qits.domain.repository.entity.RepositorySubmodule;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceEvent;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceEventType;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceStatus;
 import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
+import eu.wohlben.qits.domain.repository.persistence.RepositorySubmoduleRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceEventRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -31,6 +33,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 public class WorkspaceService {
 
   @Inject RepositoryRepository repositoryRepository;
+
+  @Inject RepositorySubmoduleRepository repositorySubmoduleRepository;
 
   @Inject WorkspaceRepository workspaceRepository;
 
@@ -142,6 +146,53 @@ public class WorkspaceService {
       containers.rm(container);
       throw new InternalServerErrorException("Clone into container failed: " + clone.output());
     }
+
+    // Materialize submodules only when the repository has them — leaving the clone above
+    // byte-for-byte
+    // the historical argv, so every submodule-free workspace is a strict no-op. Each edge's
+    // committed
+    // relative url is a *name* (`../qits-fixture-angular.git`), but qits addresses repos by id and
+    // serves them by id (`/git/<childId>`), so before `submodule update` we override
+    // `submodule.<name>.url` to the child's own git-host url. `submodule update --init` respects an
+    // already-set url (it does not re-derive it from `.gitmodules`), so the fetch resolves to the
+    // child mirror on disk and completes offline on qits-net. Run through `containerGit`, whose
+    // throw-without-rm keeps the superproject checkout when a submodule is unreachable (an
+    // attributable failure, not the clone's opaque all-or-nothing rm).
+    for (List<String> command :
+        submoduleWiringCommands(
+            repositorySubmoduleRepository.findByParentId(repoId), child -> cloneUrl(child.id))) {
+      containerGit(repoId, workspaceId, command.toArray(new String[0]));
+    }
+  }
+
+  /**
+   * The container-side git commands to run <em>after</em> the clone to materialize a superproject's
+   * submodules: one {@code config submodule.<name>.url <childCloneUrl>} per edge (pointing each
+   * submodule at its child repository's git-host url so the fetch is offline and id-addressed),
+   * followed by a single {@code submodule update --init --recursive}. Empty when there are no edges
+   * — the no-op case, so a submodule-free workspace runs nothing extra.
+   *
+   * <p>Only single-level submodules resolve offline: the overrides cover a superproject's direct
+   * edges, so a submodule that itself has sub-submodules would fail the recursive update (its
+   * nested urls stay un-overridden names). This matches the fixture case (a leaf SPA submodule) and
+   * is a documented boundary.
+   */
+  static List<List<String>> submoduleWiringCommands(
+      List<RepositorySubmodule> submodules,
+      java.util.function.Function<Repository, String> childCloneUrl) {
+    if (submodules.isEmpty()) {
+      return List.of();
+    }
+    List<List<String>> commands = new ArrayList<>();
+    for (RepositorySubmodule submodule : submodules) {
+      commands.add(
+          List.of(
+              "config",
+              "submodule." + submodule.name + ".url",
+              childCloneUrl.apply(submodule.child)));
+    }
+    commands.add(List.of("submodule", "update", "--init", "--recursive"));
+    return commands;
   }
 
   /** Appends a history event to a workspace's timeline. */
