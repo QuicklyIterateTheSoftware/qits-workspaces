@@ -113,6 +113,22 @@ public class CaptureResourceTest {
             "prefersColorScheme", "dark"));
     String html = "<html style=\"color: black\"><body>hello anna</body></html>";
     root.put("dom", Map.of("html", html, "truncated", false, "bytes", html.length()));
+    String selHtml = "<app-greeting style=\"color: black\"><button>Go</button></app-greeting>";
+    root.put(
+        "selection",
+        Map.of(
+            "html",
+            selHtml,
+            "truncated",
+            false,
+            "bytes",
+            selHtml.length(),
+            "selector",
+            "#go",
+            "tag",
+            "button",
+            "component",
+            "app-greeting"));
     root.put("state", Map.of("cart", Map.of("items", 2)));
     return toJson(root);
   }
@@ -201,6 +217,9 @@ public class CaptureResourceTest {
                 containsString("**Source workspace**: `master`"),
                 containsString("## App state at capture"),
                 containsString("\"items\" : 2"),
+                containsString("## Selected component (style-frozen)"),
+                containsString("**Picked**: `button` in `app-greeting` — `#go`"),
+                containsString("<app-greeting"),
                 containsString("<details><summary>"),
                 containsString("hello anna")));
   }
@@ -212,7 +231,7 @@ public class CaptureResourceTest {
     // Straight through the service seam with one fixed instant — a REST-level double post would
     // flake at minute boundaries.
     Instant fixed = Instant.parse("2026-07-14T12:00:11Z");
-    CaptureContent content = new CaptureContent(null, null, null, null, null, null);
+    CaptureContent content = new CaptureContent(null, null, null, null, null, null, null);
 
     Workspace first = captureService.capture(repoId, content, fixed);
     Workspace second = captureService.capture(repoId, content, fixed);

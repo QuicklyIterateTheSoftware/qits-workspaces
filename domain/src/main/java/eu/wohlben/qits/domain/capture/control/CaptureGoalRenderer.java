@@ -47,8 +47,28 @@ public class CaptureGoalRenderer {
           .append("\n");
     }
 
+    if (content.selection() != null && content.selection().html() != null) {
+      CaptureContent.Selection sel = content.selection();
+      goal.append("\n## Selected component (style-frozen)\n\n")
+          .append(selectionProvenance(sel))
+          .append("\n\n")
+          .append(frozenSection(sel.html(), sel.clientTruncated(), sel.bytes(), "selection"));
+    }
+
     goal.append("\n## Rendered DOM (style-frozen)\n\n").append(domSection(content.dom()));
     return goal.toString();
+  }
+
+  private static String selectionProvenance(CaptureContent.Selection sel) {
+    StringBuilder line = new StringBuilder("**Picked**: ");
+    line.append(sel.tag() == null ? "—" : codeSpan(sel.tag()));
+    if (sel.component() != null) {
+      line.append(" in ").append(codeSpan(sel.component()));
+    }
+    if (sel.selector() != null) {
+      line.append(" — ").append(codeSpan(sel.selector()));
+    }
+    return line.toString();
   }
 
   private static java.util.Optional<String> whereLine(CaptureContent.Page page) {
@@ -104,15 +124,25 @@ public class CaptureGoalRenderer {
     if (dom == null || dom.html() == null) {
       return "*No DOM captured.*\n";
     }
-    String embedded = utf8Truncate(dom.html(), goalDomMaxBytes);
-    boolean truncatedHere = embedded.length() < dom.html().length();
+    return frozenSection(dom.html(), dom.clientTruncated(), dom.bytes(), "DOM");
+  }
+
+  /**
+   * A style-frozen HTML fragment in a collapsed {@code <details>} block, byte-capped
+   * <em>before</em> the closing fence is appended so truncation can never split it. Shared by the
+   * whole-page DOM and the picked component; {@code noun} names which in the truncation marker.
+   */
+  private String frozenSection(
+      String html, boolean clientTruncated, long originalBytes, String noun) {
+    String embedded = utf8Truncate(html, goalDomMaxBytes);
+    boolean truncatedHere = embedded.length() < html.length();
     int shownBytes = embedded.getBytes(StandardCharsets.UTF_8).length;
 
     StringBuilder summary = new StringBuilder("~").append(kiB(shownBytes)).append(" kB");
     if (truncatedHere) {
       summary.append(", truncated at ").append(kiB(goalDomMaxBytes)).append(" kB");
     }
-    if (dom.clientTruncated()) {
+    if (clientTruncated) {
       summary.append(" (already truncated client-side)");
     }
 
@@ -127,8 +157,10 @@ public class CaptureGoalRenderer {
       section
           .append("\n*Truncated at ")
           .append(goalDomMaxBytes)
-          .append(" bytes (DOM was ")
-          .append(dom.bytes())
+          .append(" bytes (")
+          .append(noun)
+          .append(" was ")
+          .append(originalBytes)
           .append(" bytes; config `qits.capture.goal-dom-max-bytes`).*\n");
     }
     section.append("</details>\n");

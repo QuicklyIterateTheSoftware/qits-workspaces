@@ -85,6 +85,7 @@ public class CaptureResource {
       Page page,
       Environment environment,
       Dom dom,
+      Selection selection,
       JsonNode state) {
     public record Identity(
         @JsonProperty("qits.repository.id") String repositoryId,
@@ -97,6 +98,14 @@ public class CaptureResource {
     public record Viewport(Integer width, Integer height, Double devicePixelRatio) {}
 
     public record Dom(String html, Boolean truncated, Long bytes) {}
+
+    public record Selection(
+        String html,
+        Boolean truncated,
+        Long bytes,
+        String selector,
+        String tag,
+        String component) {}
   }
 
   public record CaptureResponse(WorkspaceRef workspace, String url) {
@@ -137,7 +146,21 @@ public class CaptureResource {
                 dom.html(),
                 Boolean.TRUE.equals(dom.truncated()),
                 dom.bytes() == null ? dom.html().length() : dom.bytes()),
+        toSelection(request.selection()),
         stateJson(request.state()));
+  }
+
+  private CaptureContent.Selection toSelection(CaptureRequest.Selection selection) {
+    if (selection == null || selection.html() == null) {
+      return null;
+    }
+    return new CaptureContent.Selection(
+        selection.html(),
+        Boolean.TRUE.equals(selection.truncated()),
+        selection.bytes() == null ? selection.html().length() : selection.bytes(),
+        selection.selector(),
+        selection.tag(),
+        selection.component());
   }
 
   private String stateJson(JsonNode state) {

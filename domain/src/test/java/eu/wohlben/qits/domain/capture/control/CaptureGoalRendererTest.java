@@ -26,6 +26,13 @@ class CaptureGoalRendererTest {
             "http://app.example/greeting/anna", "greeting/anna", "greeting/:name", "Greeting"),
         new CaptureContent.Environment(1440, 900, 2.0, "Mozilla/5.0", "dark"),
         new CaptureContent.Dom("<html><body>hello</body></html>", false, 31),
+        new CaptureContent.Selection(
+            "<app-greeting><button>Go</button></app-greeting>",
+            false,
+            48,
+            "#go",
+            "button",
+            "app-greeting"),
         "{\n  \"cart\" : { }\n}");
   }
 
@@ -41,6 +48,12 @@ class CaptureGoalRendererTest {
     assertTrue(goal.contains("**Captured**: 2026-07-14T11:59:58Z"));
     assertTrue(goal.contains("## App state at capture"));
     assertTrue(goal.contains("```json\n{\n  \"cart\" : { }\n}\n```"));
+    assertTrue(goal.contains("## Selected component (style-frozen)"));
+    assertTrue(goal.contains("**Picked**: `button` in `app-greeting` — `#go`"));
+    assertTrue(goal.contains("<app-greeting><button>Go</button></app-greeting>"));
+    // The selected component renders before the whole-page DOM.
+    assertTrue(
+        goal.indexOf("## Selected component") < goal.indexOf("## Rendered DOM (style-frozen)"));
     assertTrue(goal.contains("## Rendered DOM (style-frozen)"));
     assertTrue(goal.contains("<details><summary>"));
     assertTrue(goal.contains("<html><body>hello</body></html>"));
@@ -49,10 +62,35 @@ class CaptureGoalRendererTest {
   }
 
   @Test
+  void omitsSelectionSectionWhenAbsent() {
+    CaptureContent content =
+        new CaptureContent(
+            null, null, null, null, new CaptureContent.Dom("<html/>", false, 7), null, null);
+    assertFalse(renderer.render(content, RECEIVED).contains("## Selected component"));
+  }
+
+  @Test
+  void selectionProvenanceOmitsComponentWhenNoAppAncestor() {
+    CaptureContent content =
+        new CaptureContent(
+            null,
+            null,
+            null,
+            null,
+            null,
+            new CaptureContent.Selection("<p>x</p>", false, 8, "#p", "p", null),
+            null);
+    String goal = renderer.render(content, RECEIVED);
+    assertTrue(goal.contains("## Selected component (style-frozen)"));
+    assertTrue(goal.contains("**Picked**: `p` — `#p`"));
+    assertFalse(goal.contains(" in `"));
+  }
+
+  @Test
   void omitsStateSectionWhenAbsent() {
     CaptureContent content =
         new CaptureContent(
-            null, null, null, null, new CaptureContent.Dom("<html/>", false, 7), null);
+            null, null, null, null, new CaptureContent.Dom("<html/>", false, 7), null, null);
     String goal = renderer.render(content, RECEIVED);
 
     assertFalse(goal.contains("## App state at capture"));
@@ -61,7 +99,8 @@ class CaptureGoalRendererTest {
 
   @Test
   void toleratesFullySparsePayload() {
-    String goal = renderer.render(new CaptureContent(null, null, null, null, null, null), RECEIVED);
+    String goal =
+        renderer.render(new CaptureContent(null, null, null, null, null, null, null), RECEIVED);
 
     assertTrue(goal.contains("# Captured from the running app — 2026-07-14 12:00 UTC"));
     assertTrue(goal.contains("*No DOM captured.*"));
@@ -74,7 +113,7 @@ class CaptureGoalRendererTest {
     String dom = "<html>" + "x".repeat(500) + "</html>";
     CaptureContent content =
         new CaptureContent(
-            null, null, null, null, new CaptureContent.Dom(dom, false, dom.length()), null);
+            null, null, null, null, new CaptureContent.Dom(dom, false, dom.length()), null, null);
 
     String goal = renderer.render(content, RECEIVED);
 
@@ -106,6 +145,7 @@ class CaptureGoalRendererTest {
             null,
             null,
             new CaptureContent.Dom(dom, false, dom.length()),
+            null,
             "{\"snippet\": \"````\"}");
 
     String goal = renderer.render(content, RECEIVED);
@@ -123,7 +163,7 @@ class CaptureGoalRendererTest {
     renderer.goalDomMaxBytes = 70;
     CaptureContent content =
         new CaptureContent(
-            null, null, null, null, new CaptureContent.Dom(dom, false, dom.length()), null);
+            null, null, null, null, new CaptureContent.Dom(dom, false, dom.length()), null, null);
 
     String goal = renderer.render(content, RECEIVED);
 
