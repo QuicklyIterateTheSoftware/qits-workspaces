@@ -76,7 +76,9 @@ public class CaptureResource {
         .build();
   }
 
-  /** The capture payload (docs/feature-ideas/spa-feature-capture-3.md, "The capture payload"). */
+  /**
+   * The capture payload (docs/features/2026-07-14_spa-feature-capture.md, "The capture payload").
+   */
   public record CaptureRequest(
       String capturedAt,
       Identity identity,
