@@ -58,6 +58,13 @@ public class WorkspaceService {
   @ConfigProperty(name = "qits.workspace.qits-port", defaultValue = "8080")
   String qitsPort;
 
+  /**
+   * A backstop for the container-side submodule walk: a cyclic pair of imported repositories would
+   * otherwise check each other out forever (the walk has no dedup — a diamond legitimately
+   * materializes the same child at two paths).
+   */
+  private static final int MAX_SUBMODULE_DEPTH = 10;
+
   /** The URL a workspace container clones/pushes its branch over (the in-process JGit host). */
   private String cloneUrl(String repoId) {
     return "http://" + qitsHostResolver.qitsHost() + ":" + qitsPort + "/git/" + repoId;
@@ -148,37 +155,120 @@ public class WorkspaceService {
     }
 
     // Materialize submodules only when the repository has them — leaving the clone above
-    // byte-for-byte
-    // the historical argv, so every submodule-free workspace is a strict no-op. Each edge's
-    // committed
-    // relative url is a *name* (`../qits-fixture-angular.git`), but qits addresses repos by id and
-    // serves them by id (`/git/<childId>`), so before `submodule update` we override
-    // `submodule.<name>.url` to the child's own git-host url. `submodule update --init` respects an
-    // already-set url (it does not re-derive it from `.gitmodules`), so the fetch resolves to the
-    // child mirror on disk and completes offline on qits-net. Run through `containerGit`, whose
-    // throw-without-rm keeps the superproject checkout when a submodule is unreachable (an
-    // attributable failure, not the clone's opaque all-or-nothing rm).
+    // byte-for-byte the historical argv, so every submodule-free workspace is a strict no-op.
+    wireSubmodules(repoId, workspaceId, repoId, ".", 0);
+  }
+
+  /**
+   * Wires and materializes one level of submodules, then descends into each child that has edges of
+   * its own — the container-side walk over the DB's IMPORTED submodule edges. Import is user-driven
+   * layer by layer (a creation toggle imports direct submodules; the repository detail view's
+   * "import submodules" action goes one level deeper per invocation), so a partial closure is the
+   * normal case: exactly the imported subtree materializes, and everything else stays an
+   * uninitialized gitlink directory.
+   *
+   * <p>Each edge's committed url is a <em>name</em> (`../qits-fixture-angular.git`), but qits
+   * addresses repos by id and serves them by id (`/git/<childId>`), so before each level's {@code
+   * submodule update} we override that level's {@code submodule.<name>.url} to the child's own
+   * git-host url ({@code submodule update --init} respects an already-set url — it does not
+   * re-derive it from {@code .gitmodules}). The update is deliberately NOT {@code --recursive}
+   * (git's own recursion reads each <em>child's</em> {@code .gitmodules}, whose urls nothing
+   * overrode, and folds relative names against the child's rewritten origin into un-servable
+   * name-based paths — see docs/issues/resolved/2026-07-16_nested-submodule-clone-fails-workspace-
+   * container.md) and it is PATH-SCOPED to the imported edges (a bare {@code update --init} would
+   * try to fetch unimported submodules from their raw, unreachable urls) — this walk re-applies the
+   * same override→update sequence per level.
+   *
+   * <p>Guards: edges are parsed from the default branch at import, so this workspace's branch may
+   * lack an edge's gitlink — such edges are filtered out per level ({@code ls-files
+   * --error-unmatch}; a missing pathspec would fail the whole update), and a non-root level is only
+   * wired if its own path was actually checked out ({@code <path>/.git} exists). The depth cap is
+   * the cycle backstop (a cyclic pair of imported repos would otherwise check each other out
+   * forever). Runs through {@code containerGit}, whose throw-without-rm keeps the superproject
+   * checkout when a submodule is unreachable (an attributable failure, not the clone's opaque
+   * all-or-nothing rm).
+   */
+  private void wireSubmodules(
+      String repoId, String workspaceId, String levelRepoId, String path, int depth) {
+    if (depth >= MAX_SUBMODULE_DEPTH) {
+      return;
+    }
+    List<RepositorySubmodule> edges = repositorySubmoduleRepository.findByParentId(levelRepoId);
+    if (edges.isEmpty()) {
+      return;
+    }
+    if (!".".equals(path) && !submoduleCheckedOut(repoId, workspaceId, path)) {
+      return;
+    }
+    List<RepositorySubmodule> present =
+        edges.stream()
+            .filter(edge -> gitlinkOnBranch(repoId, workspaceId, path, edge.path))
+            .toList();
     for (List<String> command :
-        submoduleWiringCommands(
-            repositorySubmoduleRepository.findByParentId(repoId), child -> cloneUrl(child.id))) {
+        submoduleWiringCommands(present, path, child -> cloneUrl(child.id))) {
       containerGit(repoId, workspaceId, command.toArray(new String[0]));
+    }
+    for (RepositorySubmodule edge : present) {
+      String childPath = ".".equals(path) ? edge.path : path + "/" + edge.path;
+      wireSubmodules(repoId, workspaceId, edge.child.id, childPath, depth + 1);
     }
   }
 
   /**
-   * The container-side git commands to run <em>after</em> the clone to materialize a superproject's
-   * submodules: one {@code config submodule.<name>.url <childCloneUrl>} per edge (pointing each
-   * submodule at its child repository's git-host url so the fetch is offline and id-addressed),
-   * followed by a single {@code submodule update --init --recursive}. Empty when there are no edges
-   * — the no-op case, so a submodule-free workspace runs nothing extra.
-   *
-   * <p>Only single-level submodules resolve offline: the overrides cover a superproject's direct
-   * edges, so a submodule that itself has sub-submodules would fail the recursive update (its
-   * nested urls stay un-overridden names). This matches the fixture case (a leaf SPA submodule) and
-   * is a documented boundary.
+   * Whether the checked-out tree at {@code levelPath} actually tracks a gitlink at {@code
+   * edgePath}: {@code ls-files --error-unmatch} exits non-zero for an unknown pathspec — the
+   * mismatch case when this workspace's branch predates a submodule imported from the default
+   * branch.
+   */
+  private boolean gitlinkOnBranch(
+      String repoId, String workspaceId, String levelPath, String edgePath) {
+    String container = containers.containerName(workspaceId, repoId);
+    return containers
+            .exec(
+                container,
+                "/workspace",
+                java.util.Map.of(),
+                "git",
+                "-C",
+                levelPath,
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                edgePath)
+            .exitCode()
+        == 0;
+  }
+
+  /**
+   * Whether a submodule working tree was actually populated at {@code path} (relative to {@code
+   * /workspace}): a checked-out submodule carries a {@code .git} file pointing at its gitdir. Plain
+   * {@code test -e}, not a git verb — {@code git -C <uninitialized-gitlink-dir>} would resolve to
+   * the ENCLOSING superproject and answer for the wrong repo.
+   */
+  private boolean submoduleCheckedOut(String repoId, String workspaceId, String path) {
+    String container = containers.containerName(workspaceId, repoId);
+    return containers
+            .exec(container, "/workspace", java.util.Map.of(), "test", "-e", path + "/.git")
+            .exitCode()
+        == 0;
+  }
+
+  /**
+   * The container-side git commands that wire ONE level of a superproject's IMPORTED submodules,
+   * all rooted at {@code path} (relative to {@code /workspace}; {@code "."} for the superproject
+   * itself): one {@code -C <path> config submodule.<name>.url <childCloneUrl>} per edge (pointing
+   * each submodule at its child repository's git-host url so the fetch is offline and
+   * id-addressed), followed by a single non-recursive {@code -C <path> submodule update --init}
+   * PATH-SCOPED to exactly those edges — unimported submodules must stay untouched (their raw urls
+   * are unreachable names; leaving them uninitialized is the layer-by-layer import contract). Empty
+   * when there are no edges — the no-op case, so a submodule-free workspace runs nothing extra.
+   * Nested levels are handled by {@link #wireSubmodules} re-invoking this per checked-out child,
+   * never by git's own {@code --recursive} (whose nested url derivation cannot be overridden ahead
+   * of time).
    */
   static List<List<String>> submoduleWiringCommands(
       List<RepositorySubmodule> submodules,
+      String path,
       java.util.function.Function<Repository, String> childCloneUrl) {
     if (submodules.isEmpty()) {
       return List.of();
@@ -187,11 +277,18 @@ public class WorkspaceService {
     for (RepositorySubmodule submodule : submodules) {
       commands.add(
           List.of(
+              "-C",
+              path,
               "config",
               "submodule." + submodule.name + ".url",
               childCloneUrl.apply(submodule.child)));
     }
-    commands.add(List.of("submodule", "update", "--init", "--recursive"));
+    List<String> update =
+        new ArrayList<>(List.of("-C", path, "submodule", "update", "--init", "--"));
+    for (RepositorySubmodule submodule : submodules) {
+      update.add(submodule.path);
+    }
+    commands.add(List.copyOf(update));
     return commands;
   }
 

@@ -57,7 +57,7 @@ public class WorkspaceRelativeDataDirTest {
         .contentType(ContentType.JSON)
         .body(
             new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRepositoryRequest(
-                fixtureUrl, null))
+                fixtureUrl, null, null))
         .when()
         .post("/api/projects/" + projectId + "/repositories")
         .then()
