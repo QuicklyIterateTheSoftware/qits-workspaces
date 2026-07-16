@@ -36,7 +36,10 @@ import java.util.Optional;
  * as processes with the user's privileges"): the framed app's JS runs same-origin with qits, and
  * every web-viewable daemon is reachable by anyone who can reach qits itself. Note {@code
  * /daemon/*} is a raw router route, so websockets-next's {@code SameOriginUpgradeCheck} does not
- * guard it — if qits ever grows auth, this route needs the same guard.
+ * guard it — but the global {@code QitsAuthPolicy} (auth-core) does: in every auth build variant
+ * this route requires an authenticated identity like the rest of the UI surface (the oauth session
+ * cookie or the proxy's forward-auth headers ride along automatically, the iframe being
+ * same-origin).
  */
 @ApplicationScoped
 public class DaemonProxyRoute {
