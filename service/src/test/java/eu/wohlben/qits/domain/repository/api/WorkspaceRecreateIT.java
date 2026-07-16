@@ -41,6 +41,11 @@ import org.junit.jupiter.api.Test;
  * anywhere. Build the image first: {@code docker build -t qits/workspace docker/workspace}. On a
  * host where a container cannot reach {@code host.docker.internal:8080} (e.g. some WSL2 setups)
  * this test skips; that reachability is the same prerequisite the feature needs to work at all.
+ *
+ * <p>Every REST request carries {@code Remote-User}: the packaged app runs in prod mode under the
+ * forwardauth build variant, where the dev/test fallback identity is LaunchMode-disabled — exactly
+ * like a real deployment, the trusted proxy header is the only way in. (The container-side git
+ * traffic needs none; /git is on the public path list.)
  */
 @QuarkusIntegrationTest
 @TestProfile(WorkspaceRecreateIT.Profile.class)
@@ -111,6 +116,7 @@ public class WorkspaceRecreateIT {
 
     String projectId =
         given()
+            .header("Remote-User", "it")
             .contentType(ContentType.JSON)
             .body(
                 new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRequest(
@@ -126,10 +132,11 @@ public class WorkspaceRecreateIT {
     // container yet; the first real clone-over-HTTP round trip happens at ensure-container below).
     repoId =
         given()
+            .header("Remote-User", "it")
             .contentType(ContentType.JSON)
             .body(
                 new eu.wohlben.qits.domain.project.api.ProjectController
-                    .CreateProjectRepositoryRequest(fixtureUrl, null))
+                    .CreateProjectRepositoryRequest(fixtureUrl, null, null))
             .when()
             .post("/api/projects/" + projectId + "/repositories")
             .then()
@@ -139,6 +146,7 @@ public class WorkspaceRecreateIT {
 
     // A workspace forked off master. Creation is lazy — only the branch ref and STOPPED row exist.
     given()
+        .header("Remote-User", "it")
         .contentType(ContentType.JSON)
         .body(
             new WorkspaceController.CreateWorkspaceRequest(
@@ -151,6 +159,7 @@ public class WorkspaceRecreateIT {
 
     // First use materializes the real container, cloned from origin over the /git server.
     given()
+        .header("Remote-User", "it")
         .contentType(ContentType.JSON)
         .when()
         .post("/api/repositories/" + repoId + "/workspaces/recreate-wt/ensure-container")
@@ -179,6 +188,7 @@ public class WorkspaceRecreateIT {
 
     // Hitting the ensure-container endpoint re-provisions from the durable branch.
     given()
+        .header("Remote-User", "it")
         .contentType(ContentType.JSON)
         .when()
         .post("/api/repositories/" + repoId + "/workspaces/recreate-wt/ensure-container")
