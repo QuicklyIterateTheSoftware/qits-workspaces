@@ -498,8 +498,40 @@ public class WorkspaceControllerTest {
         .when()
         .post("/api/repositories/" + repoId + "/workspaces/" + workspaceId + "/ensure-container")
         .then()
-        .statusCode(Response.Status.OK.getStatusCode());
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("technicalProcessId", notNullValue());
+    // ensure-container provisions asynchronously now (it returns a technical-process id and the
+    // work streams over SSE), so wait for the clone to exist before touching the working tree.
+    awaitRunning(repoId, workspaceId);
     return Path.of(dataDir, repoId, "workspaces", workspaceId);
+  }
+
+  /** Polls the workspace list until {@code workspaceId} reads RUNNING (provision finished). */
+  private void awaitRunning(String repoId, String workspaceId) {
+    long deadline = System.currentTimeMillis() + 15_000;
+    while (System.currentTimeMillis() < deadline) {
+      String status =
+          given()
+              .when()
+              .get("/api/repositories/" + repoId + "/workspaces")
+              .then()
+              .statusCode(Response.Status.OK.getStatusCode())
+              .extract()
+              .path(
+                  "entries.find { it.workspace.workspaceId == '"
+                      + workspaceId
+                      + "' }.workspace.runtimeStatus");
+      if ("RUNNING".equals(status)) {
+        return;
+      }
+      try {
+        Thread.sleep(50);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(e);
+      }
+    }
+    throw new AssertionError("workspace " + workspaceId + " never reached RUNNING");
   }
 
   private void commitFile(
@@ -821,14 +853,16 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode())
         .body("workspace.runtimeStatus", equalTo("STOPPED"));
 
-    // First use provisions the container from the durable branch.
+    // First use provisions the container from the durable branch (asynchronously — the response
+    // carries the technical-process id; RUNNING is awaited through the list).
     given()
         .contentType(ContentType.JSON)
         .when()
         .post("/api/repositories/" + repoId + "/workspaces/wt-run/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("runtimeStatus", equalTo("RUNNING"));
+        .body("technicalProcessId", notNullValue());
+    awaitRunning(repoId, "wt-run");
 
     // Graceful stop removes the container but keeps the workspace active (STOPPED).
     given()
@@ -839,14 +873,15 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode())
         .body("runtimeStatus", equalTo("STOPPED"));
 
-    // Ensure re-provisions from the durable branch — the container is back and RUNNING.
+    // Ensure re-provisions from the durable branch — the container comes back RUNNING.
     given()
         .contentType(ContentType.JSON)
         .when()
         .post("/api/repositories/" + repoId + "/workspaces/wt-run/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("runtimeStatus", equalTo("RUNNING"));
+        .body("technicalProcessId", notNullValue());
+    awaitRunning(repoId, "wt-run");
   }
 
   private static final String INLINE_COMPONENT =

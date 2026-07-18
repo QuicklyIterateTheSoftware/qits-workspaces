@@ -1,5 +1,6 @@
 package eu.wohlben.qits.domain.repository.api;
 
+import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.repository.control.CommitService;
 import eu.wohlben.qits.domain.repository.control.ComponentMapService;
 import eu.wohlben.qits.domain.repository.control.DetectionService;
@@ -47,6 +48,8 @@ public class WorkspaceController {
 
   @Inject WorkspaceMapper workspaceMapper;
 
+  @Inject TechnicalProcessRegistry technicalProcesses;
+
   public static record ListWorkspacesRequest() {
     public record Response(List<Entry> entries) {
       public record Entry(WorkspaceDto workspace) {}
@@ -92,18 +95,49 @@ public class WorkspaceController {
     return new CreateWorkspaceRequest.Response(workspaceMapper.toDto(wt));
   }
 
+  public static record EnsureContainerRequest() {
+    /**
+     * The workspace's state at submit time plus the technical process streaming the start — watch
+     * it live (replay + live + terminal {@code done}) at {@code
+     * /api/technical-processes/{technicalProcessId}/events}.
+     */
+    public record Response(WorkspaceDto workspace, String technicalProcessId) {}
+  }
+
   /**
    * Start (or recreate) the workspace's container on demand — the container is a recreatable cache
-   * of the durable branch. Idempotent (a running container is left as-is). 404 if the branch itself
-   * is gone (the workspace is then abandoned); the error surfaces to the client rather than a
-   * silent no-op. Returns the refreshed workspace with its live runtime status.
+   * of the durable branch. Idempotent (a running container is left as-is). The provision runs
+   * asynchronously: this returns a technical-process id immediately and the work — docker run,
+   * clone, submodule wiring, daemon auto-start — streams over the process's SSE endpoint, where
+   * failures surface too (alongside the workspace's {@code runtimeError}). 404 only when the
+   * workspace itself is unknown.
    */
   @POST
   @Path("/{workspaceId}/ensure-container")
-  public WorkspaceDto ensureContainer(
+  public EnsureContainerRequest.Response ensureContainer(
       @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    workspaceService.ensureContainer(repoId, workspaceId);
-    return workspaceService.getWorkspace(repoId, workspaceId);
+    String technicalProcessId = workspaceService.beginEnsureContainer(repoId, workspaceId);
+    return new EnsureContainerRequest.Response(
+        workspaceService.getWorkspace(repoId, workspaceId), technicalProcessId);
+  }
+
+  public static record ActiveProcessRequest() {
+    /** The workspace's currently-running technical process, or null when none is live. */
+    public record Response(String technicalProcessId) {}
+  }
+
+  /**
+   * Discovery for the workspace detail route's transient process tab: the id of the technical
+   * process currently running against this workspace (null once it completes). Announced over the
+   * workspace's payload-free SSE channel as a {@code process} hint, so clients re-fetch this
+   * instead of polling.
+   */
+  @GET
+  @Path("/{workspaceId}/active-process")
+  public ActiveProcessRequest.Response activeProcess(
+      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+    return new ActiveProcessRequest.Response(
+        technicalProcesses.activeFor(repoId, workspaceId).orElse(null));
   }
 
   /**

@@ -26,6 +26,12 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
      * WorkspaceWatchService} from a per-workspace {@code inotifywait}; the frontend re-fetches
      * {@code /files} and {@code /detection}.
      */
-    FILES
+    FILES,
+    /**
+     * A technical process for this workspace started or completed (e.g. a container start). The
+     * frontend re-fetches {@code /active-process} and — when an id comes back — opens the separate
+     * payload-bearing process SSE stream; this channel stays hint-only.
+     */
+    PROCESS
   }
 }

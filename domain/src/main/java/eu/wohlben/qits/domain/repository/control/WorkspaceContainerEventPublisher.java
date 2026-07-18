@@ -28,7 +28,12 @@ public class WorkspaceContainerEventPublisher {
   @Inject Event<WorkspaceContainerStopping> stopping;
 
   public void fireStarted(String repoId, String workspaceId) {
-    started.fireAsync(new WorkspaceContainerStarted(repoId, workspaceId));
+    fireStarted(repoId, workspaceId, null);
+  }
+
+  /** {@code technicalProcessId} correlates the async daemon phase with the start's log stream. */
+  public void fireStarted(String repoId, String workspaceId, String technicalProcessId) {
+    started.fireAsync(new WorkspaceContainerStarted(repoId, workspaceId, technicalProcessId));
   }
 
   /** Synchronous by design — settling must finish before the caller's {@code containers.rm}. */

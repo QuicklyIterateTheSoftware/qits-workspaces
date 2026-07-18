@@ -124,11 +124,42 @@ public class DockerExecutor implements ContainerRuntime {
   @Override
   public ExecResult exec(
       String container, String workdir, Map<String, String> env, String... argv) {
+    return exec(container, workdir, env, (java.util.function.Consumer<String>) null, argv);
+  }
+
+  @Override
+  public ExecResult exec(
+      String container,
+      String workdir,
+      Map<String, String> env,
+      java.util.function.Consumer<String> onLine,
+      String... argv) {
     List<String> command = new ArrayList<>(execArgv(container, false, workdir, env));
     for (String arg : argv) {
       command.add(arg);
     }
-    return runCapturing(null, command);
+    return runCapturing(null, command, onLine);
+  }
+
+  @Override
+  public String run(
+      String repoId,
+      String workspaceId,
+      String branch,
+      String parent,
+      java.util.function.Consumer<String> onLine) {
+    String name = containerName(workspaceId, repoId);
+    List<String> argv = new ArrayList<>();
+    argv.add(runtime);
+    argv.add("run");
+    argv.addAll(containerFactory.forWorkspace(repoId, workspaceId, branch, parent).toRunArgv());
+
+    ExecResult result = runCapturing(null, argv, onLine);
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start container " + name + ": " + result.output());
+    }
+    return name;
   }
 
   @Override
@@ -392,6 +423,16 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   private ExecResult runCapturing(Path cwd, List<String> command) {
+    return runCapturing(cwd, command, null);
+  }
+
+  /**
+   * Runs the command capturing its combined output; a non-null {@code onLine} additionally receives
+   * each line as it arrives — the live tap the technical-process log stream rides on. Tap failures
+   * are swallowed so a broken consumer can never fail the underlying docker verb.
+   */
+  private ExecResult runCapturing(
+      Path cwd, List<String> command, java.util.function.Consumer<String> onLine) {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd.toFile());
@@ -401,7 +442,24 @@ public class DockerExecutor implements ContainerRuntime {
       Process p = pb.start();
       String output;
       try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-        output = reader.lines().collect(Collectors.joining("\n"));
+        if (onLine == null) {
+          output = reader.lines().collect(Collectors.joining("\n"));
+        } else {
+          StringBuilder collected = new StringBuilder();
+          String line;
+          while ((line = reader.readLine()) != null) {
+            if (collected.length() > 0) {
+              collected.append('\n');
+            }
+            collected.append(line);
+            try {
+              onLine.accept(line);
+            } catch (RuntimeException ignored) {
+              // the tap is observational only
+            }
+          }
+          output = collected.toString();
+        }
       }
       int exitCode = p.waitFor();
       return new ExecResult(exitCode, output);

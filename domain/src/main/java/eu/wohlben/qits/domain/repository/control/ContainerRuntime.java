@@ -55,6 +55,39 @@ public interface ContainerRuntime {
   ExecResult exec(String container, String workdir, Map<String, String> env, String... argv);
 
   /**
+   * {@link #exec} with a per-line tap: {@code onLine} receives each output line as it arrives (the
+   * technical-process log stream), while the full output is still captured and returned. The
+   * default delivers the lines only after completion — {@link DockerExecutor} overrides it with
+   * genuine streaming; the test fake keeps the default (ordering is preserved either way).
+   */
+  default ExecResult exec(
+      String container,
+      String workdir,
+      Map<String, String> env,
+      java.util.function.Consumer<String> onLine,
+      String... argv) {
+    ExecResult result = exec(container, workdir, env, argv);
+    if (onLine != null && !result.output().isEmpty()) {
+      result.output().lines().forEach(onLine);
+    }
+    return result;
+  }
+
+  /**
+   * {@link #run} with a per-line tap on the {@code docker run} output. The default ignores the tap
+   * (the capturing run embeds its output in the failure exception); {@link DockerExecutor}
+   * overrides it with genuine streaming.
+   */
+  default String run(
+      String repoId,
+      String workspaceId,
+      String branch,
+      String parent,
+      java.util.function.Consumer<String> onLine) {
+    return run(repoId, workspaceId, branch, parent);
+  }
+
+  /**
    * The {@code docker exec} argv <em>prefix</em> up to and including the container name — the
    * caller appends the command to run. {@code tty} selects {@code -it} (interactive PTY) vs {@code
    * -i} (plain pipe). This is the single seam the command registry prepends to every launched

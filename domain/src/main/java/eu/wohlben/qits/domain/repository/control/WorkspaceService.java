@@ -3,6 +3,8 @@ package eu.wohlben.qits.domain.repository.control;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.InternalServerErrorException;
 import eu.wohlben.qits.domain.error.NotFoundException;
+import eu.wohlben.qits.domain.process.control.TechnicalProcess;
+import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.entity.Repository;
 import eu.wohlben.qits.domain.repository.entity.RepositorySubmodule;
@@ -16,6 +18,7 @@ import eu.wohlben.qits.domain.repository.persistence.RepositorySubmoduleReposito
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceEventRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -26,11 +29,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 
 @ApplicationScoped
 public class WorkspaceService {
+
+  private static final Logger LOG = Logger.getLogger(WorkspaceService.class);
 
   @Inject RepositoryRepository repositoryRepository;
 
@@ -47,6 +56,25 @@ public class WorkspaceService {
   @Inject ContainerRuntime containers;
 
   @Inject WorkspaceContainerEventPublisher containerEvents;
+
+  @Inject TechnicalProcessRegistry processes;
+
+  /**
+   * Runs {@link #beginEnsureContainer}'s provision work off the request thread — the HTTP call
+   * returns the technical-process id immediately and the browser watches the work over SSE.
+   */
+  private final ExecutorService processExecutor =
+      Executors.newCachedThreadPool(
+          runnable -> {
+            Thread thread = new Thread(runnable, "workspace-provision");
+            thread.setDaemon(true);
+            return thread;
+          });
+
+  @PreDestroy
+  void shutdown() {
+    processExecutor.shutdownNow();
+  }
 
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
@@ -76,12 +104,18 @@ public class WorkspaceService {
    * the checkout lives in the container rather than on the host.
    */
   private String containerGit(String repoId, String workspaceId, String... gitArgs) {
+    return containerGit(repoId, workspaceId, null, gitArgs);
+  }
+
+  /** {@link #containerGit} with a per-line tap for the technical-process log stream. */
+  private String containerGit(
+      String repoId, String workspaceId, Consumer<String> onLine, String... gitArgs) {
     String container = containers.containerName(workspaceId, repoId);
     String[] argv = new String[gitArgs.length + 1];
     argv[0] = "git";
     System.arraycopy(gitArgs, 0, argv, 1, gitArgs.length);
     ContainerRuntime.ExecResult result =
-        containers.exec(container, "/workspace", java.util.Map.of(), argv);
+        containers.exec(container, "/workspace", java.util.Map.of(), onLine, argv);
     if (result.exitCode() != 0) {
       throw new InternalServerErrorException(
           "Container git failed ["
@@ -133,16 +167,37 @@ public class WorkspaceService {
    * clone). Removes the container again if the clone fails, so a retry can succeed. The branch ref
    * must already exist in the origin — this is the on-demand half of workspace creation, invoked
    * lazily by {@link #ensureContainer} for never-provisioned and pruned workspaces alike.
+   *
+   * <p>A non-null {@code process} receives the provision as streamed segments: {@code docker-run}
+   * (container create/start) and {@code clone} (the clone plus the per-level submodule wiring) —
+   * lines arrive live via the container runtime's streaming tap, and each segment settles when its
+   * step completes. A failure leaves the open segment for the caller to settle {@code failed}.
    */
   private void provisionContainer(
-      String repoId, String workspaceId, String branch, String parentBranch) {
-    String container = containers.run(repoId, workspaceId, branch, parentBranch);
+      String repoId,
+      String workspaceId,
+      String branch,
+      String parentBranch,
+      TechnicalProcess process) {
+    if (process != null) {
+      process.openSegment("docker-run");
+    }
+    Consumer<String> runLines =
+        process == null ? null : line -> process.appendLine("docker-run", line);
+    String container = containers.run(repoId, workspaceId, branch, parentBranch, runLines);
+    if (process != null) {
+      process.settleSegment("docker-run", true);
+      process.openSegment("clone");
+    }
+    Consumer<String> cloneLines =
+        process == null ? null : line -> process.appendLine("clone", line);
 
     ContainerRuntime.ExecResult clone =
         containers.exec(
             container,
             null,
             java.util.Map.of(),
+            cloneLines,
             "git",
             "clone",
             "--branch",
@@ -156,7 +211,10 @@ public class WorkspaceService {
 
     // Materialize submodules only when the repository has them — leaving the clone above
     // byte-for-byte the historical argv, so every submodule-free workspace is a strict no-op.
-    wireSubmodules(repoId, workspaceId, repoId, ".", 0);
+    wireSubmodules(repoId, workspaceId, repoId, ".", 0, cloneLines);
+    if (process != null) {
+      process.settleSegment("clone", true);
+    }
   }
 
   /**
@@ -189,11 +247,21 @@ public class WorkspaceService {
    * all-or-nothing rm).
    */
   private void wireSubmodules(
-      String repoId, String workspaceId, String levelRepoId, String path, int depth) {
+      String repoId,
+      String workspaceId,
+      String levelRepoId,
+      String path,
+      int depth,
+      Consumer<String> onLine) {
     if (depth >= MAX_SUBMODULE_DEPTH) {
       return;
     }
-    List<RepositorySubmodule> edges = repositorySubmoduleRepository.findByParentId(levelRepoId);
+    // In its own transaction: this walk also runs on beginEnsureContainer's worker thread, which
+    // has no request context to lazily open a session from. The edges (and their eagerly-fetched
+    // child repositories) detach safely for the container-side git work below.
+    List<RepositorySubmodule> edges =
+        QuarkusTransaction.requiringNew()
+            .call(() -> repositorySubmoduleRepository.findByParentId(levelRepoId));
     if (edges.isEmpty()) {
       return;
     }
@@ -206,11 +274,11 @@ public class WorkspaceService {
             .toList();
     for (List<String> command :
         submoduleWiringCommands(present, path, child -> cloneUrl(child.id))) {
-      containerGit(repoId, workspaceId, command.toArray(new String[0]));
+      containerGit(repoId, workspaceId, onLine, command.toArray(new String[0]));
     }
     for (RepositorySubmodule edge : present) {
       String childPath = ".".equals(path) ? edge.path : path + "/" + edge.path;
-      wireSubmodules(repoId, workspaceId, edge.child.id, childPath, depth + 1);
+      wireSubmodules(repoId, workspaceId, edge.child.id, childPath, depth + 1, onLine);
     }
   }
 
@@ -757,6 +825,51 @@ public class WorkspaceService {
    * so it is safe to call from non-request threads (like {@code CommandService.prepare}).
    */
   public void ensureContainer(String repoId, String workspaceId) {
+    ensureContainer(repoId, workspaceId, null);
+  }
+
+  /**
+   * The streaming Start: registers a {@link TechnicalProcess} for the workspace <em>before</em> any
+   * work runs (so the very first {@code docker run} line is captured), spawns {@link
+   * #ensureContainer(String, String, TechnicalProcess)} on a worker thread, and returns the process
+   * id immediately. The browser watches the work — including the asynchronous daemon auto-start
+   * phase — over the process's SSE stream; failures surface there (and in {@code
+   * workspace.runtimeError}), not as an HTTP error. Throws 404 in-request when the workspace
+   * doesn't exist, so a bad id still fails fast.
+   */
+  public String beginEnsureContainer(String repoId, String workspaceId) {
+    QuarkusTransaction.requiringNew()
+        .run(
+            () ->
+                workspaceRepository
+                    .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
+                    .orElseThrow(
+                        () -> new NotFoundException("Workspace not found: " + workspaceId)));
+    TechnicalProcess process = processes.begin(repoId, workspaceId);
+    processExecutor.submit(
+        () -> {
+          try {
+            ensureContainer(repoId, workspaceId, process);
+          } catch (RuntimeException e) {
+            // Surface the failure in the stream: settle the open segment failed (appending the
+            // message) and emit done. Idempotent — a no-op if the process already ended.
+            process.failProvision(e.getMessage());
+            LOG.debugf(
+                e, "Streamed ensure-container failed for workspace %s/%s", repoId, workspaceId);
+          }
+        });
+    return process.id();
+  }
+
+  /**
+   * {@link #ensureContainer(String, String)} with an optional {@link TechnicalProcess} receiving
+   * the work as streamed segments. With a process attached, every outcome also ends the process:
+   * the already-running short-circuit completes it as a no-op, a provision failure fails it, and a
+   * successful start hands the process id to the async daemon phase via {@link
+   * WorkspaceContainerEventPublisher#fireStarted(String, String, String)} — the process then
+   * reaches {@code done} only once the auto-started daemons settle.
+   */
+  private void ensureContainer(String repoId, String workspaceId, TechnicalProcess process) {
     String container = containers.containerName(workspaceId, repoId);
 
     // Load branch/parent and short-circuit a live container, in its own transaction.
@@ -777,6 +890,9 @@ public class WorkspaceService {
                   return new BranchParent(wt.branch, wt.parent);
                 });
     if (snapshot == null) {
+      if (process != null) {
+        process.completeNoOp("container-start", "Container is already running — nothing to do.");
+      }
       return;
     }
 
@@ -792,11 +908,21 @@ public class WorkspaceService {
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.PROVISIONING, null));
       try {
+        if (process != null) {
+          process.openSegment("container-start");
+        }
         containers.start(container);
+        if (process != null) {
+          process.appendLine(
+              "container-start",
+              "Started the existing container in place (its /workspace clone is preserved).");
+          process.settleSegment("container-start", true);
+          process.finishProvision(true);
+        }
         QuarkusTransaction.requiringNew()
             .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
         // Cold -> RUNNING: bring the repository's auto-start daemons up with the container (async).
-        containerEvents.fireStarted(repoId, workspaceId);
+        containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id());
         return;
       } catch (RuntimeException e) {
         QuarkusTransaction.requiringNew()
@@ -836,11 +962,14 @@ public class WorkspaceService {
     QuarkusTransaction.requiringNew()
         .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.PROVISIONING, null));
     try {
-      provisionContainer(repoId, workspaceId, snapshot.branch(), snapshot.parent());
+      provisionContainer(repoId, workspaceId, snapshot.branch(), snapshot.parent(), process);
+      if (process != null) {
+        process.finishProvision(true);
+      }
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
       // Cold -> RUNNING: bring the repository's auto-start daemons up with the container (async).
-      containerEvents.fireStarted(repoId, workspaceId);
+      containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id());
     } catch (RuntimeException e) {
       QuarkusTransaction.requiringNew()
           .run(
