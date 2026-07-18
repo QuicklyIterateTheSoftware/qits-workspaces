@@ -158,8 +158,8 @@ public class WorkspaceRecreateIT {
         .body("workspace.runtimeStatus", equalTo("STOPPED"));
 
     // First use materializes the real container, cloned from origin over the /git server. The
-    // provision is asynchronous now (the response carries a technical-process id), so RUNNING is
-    // awaited through the workspace list before touching the container.
+    // provision is asynchronous now (the response carries a technical-process id), so completion
+    // is awaited via /active-process before touching the container.
     given()
         .header("Remote-User", "it")
         .contentType(ContentType.JSON)
@@ -167,7 +167,7 @@ public class WorkspaceRecreateIT {
         .post("/api/repositories/" + repoId + "/workspaces/recreate-wt/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
-    awaitRunning(repoId, "recreate-wt");
+    awaitProvisioned(repoId, "recreate-wt");
 
     String container = "qits-ws-recreate-wt-" + shortRepo(repoId);
 
@@ -196,7 +196,7 @@ public class WorkspaceRecreateIT {
         .post("/api/repositories/" + repoId + "/workspaces/recreate-wt/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
-    awaitRunning(repoId, "recreate-wt");
+    awaitProvisioned(repoId, "recreate-wt");
 
     // The recreated container is a fresh clone of origin: it has the pushed commit...
     assertEquals(
@@ -214,23 +214,24 @@ public class WorkspaceRecreateIT {
     return repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
   }
 
-  /** Polls the workspace list until {@code workspaceId} reads RUNNING (async provision done). */
-  private void awaitRunning(String repoId, String workspaceId) {
+  /**
+   * Polls until the workspace's technical process completed — the async provision (and daemon
+   * phase) is fully done. Deliberately not a runtime-status poll: the live container set reports
+   * RUNNING as soon as {@code docker run} happened, while the clone is still writing the tree.
+   */
+  private void awaitProvisioned(String repoId, String workspaceId) {
     long deadline = System.currentTimeMillis() + 60_000;
     while (System.currentTimeMillis() < deadline) {
-      String status =
+      String processId =
           given()
               .header("Remote-User", "it")
               .when()
-              .get("/api/repositories/" + repoId + "/workspaces")
+              .get("/api/repositories/" + repoId + "/workspaces/" + workspaceId + "/active-process")
               .then()
               .statusCode(Response.Status.OK.getStatusCode())
               .extract()
-              .path(
-                  "entries.find { it.workspace.workspaceId == '"
-                      + workspaceId
-                      + "' }.workspace.runtimeStatus");
-      if ("RUNNING".equals(status)) {
+              .path("technicalProcessId");
+      if (processId == null) {
         return;
       }
       try {
@@ -240,7 +241,7 @@ public class WorkspaceRecreateIT {
         throw new RuntimeException(e);
       }
     }
-    throw new AssertionError("workspace " + workspaceId + " never reached RUNNING");
+    throw new AssertionError("workspace " + workspaceId + " provision never completed");
   }
 
   private boolean dockerAndImageAvailable() {

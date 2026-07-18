@@ -501,27 +501,31 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode())
         .body("technicalProcessId", notNullValue());
     // ensure-container provisions asynchronously now (it returns a technical-process id and the
-    // work streams over SSE), so wait for the clone to exist before touching the working tree.
-    awaitRunning(repoId, workspaceId);
+    // work streams over SSE), so wait for the provision to finish before touching the working
+    // tree.
+    awaitProvisioned(repoId, workspaceId);
     return Path.of(dataDir, repoId, "workspaces", workspaceId);
   }
 
-  /** Polls the workspace list until {@code workspaceId} reads RUNNING (provision finished). */
-  private void awaitRunning(String repoId, String workspaceId) {
+  /**
+   * Polls until the workspace's technical process completed — i.e. the async provision (and any
+   * daemon auto-start) is fully done. Deliberately NOT a runtime-status poll: the workspace list
+   * computes RUNNING live from the container set, which reports the container as soon as {@code
+   * docker run} happened — while the clone is still writing the working tree (and its final index
+   * write would clobber a concurrent {@code git add} from the test).
+   */
+  private void awaitProvisioned(String repoId, String workspaceId) {
     long deadline = System.currentTimeMillis() + 15_000;
     while (System.currentTimeMillis() < deadline) {
-      String status =
+      String processId =
           given()
               .when()
-              .get("/api/repositories/" + repoId + "/workspaces")
+              .get("/api/repositories/" + repoId + "/workspaces/" + workspaceId + "/active-process")
               .then()
               .statusCode(Response.Status.OK.getStatusCode())
               .extract()
-              .path(
-                  "entries.find { it.workspace.workspaceId == '"
-                      + workspaceId
-                      + "' }.workspace.runtimeStatus");
-      if ("RUNNING".equals(status)) {
+              .path("technicalProcessId");
+      if (processId == null) {
         return;
       }
       try {
@@ -531,7 +535,7 @@ public class WorkspaceControllerTest {
         throw new RuntimeException(e);
       }
     }
-    throw new AssertionError("workspace " + workspaceId + " never reached RUNNING");
+    throw new AssertionError("workspace " + workspaceId + " provision never completed");
   }
 
   private void commitFile(
@@ -854,7 +858,7 @@ public class WorkspaceControllerTest {
         .body("workspace.runtimeStatus", equalTo("STOPPED"));
 
     // First use provisions the container from the durable branch (asynchronously — the response
-    // carries the technical-process id; RUNNING is awaited through the list).
+    // carries the technical-process id; completion is awaited via /active-process).
     given()
         .contentType(ContentType.JSON)
         .when()
@@ -862,7 +866,8 @@ public class WorkspaceControllerTest {
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("technicalProcessId", notNullValue());
-    awaitRunning(repoId, "wt-run");
+    awaitProvisioned(repoId, "wt-run");
+    assertRuntimeStatus(repoId, "wt-run", "RUNNING");
 
     // Graceful stop removes the container but keeps the workspace active (STOPPED).
     given()
@@ -881,7 +886,23 @@ public class WorkspaceControllerTest {
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("technicalProcessId", notNullValue());
-    awaitRunning(repoId, "wt-run");
+    awaitProvisioned(repoId, "wt-run");
+    assertRuntimeStatus(repoId, "wt-run", "RUNNING");
+  }
+
+  /** Asserts the workspace's runtime status through the list endpoint. */
+  private void assertRuntimeStatus(String repoId, String workspaceId, String expected) {
+    given()
+        .when()
+        .get("/api/repositories/" + repoId + "/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body(
+            "entries.find { it.workspace.workspaceId == '"
+                + workspaceId
+                + "' }"
+                + ".workspace.runtimeStatus",
+            equalTo(expected));
   }
 
   private static final String INLINE_COMPONENT =
