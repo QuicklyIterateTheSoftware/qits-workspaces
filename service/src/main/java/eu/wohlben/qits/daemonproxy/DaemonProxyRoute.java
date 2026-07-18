@@ -4,6 +4,7 @@ import eu.wohlben.qits.domain.daemon.control.DaemonProxyPath;
 import eu.wohlben.qits.domain.daemon.control.DaemonSupervisor;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
+import eu.wohlben.qits.http.RootPath;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -18,6 +19,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.util.Optional;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * The daemon web-view reverse proxy: {@code /daemon/{workspaceId}/{daemonId}/*} on the qits origin
@@ -48,16 +50,29 @@ public class DaemonProxyRoute {
 
   @Inject DaemonSupervisor supervisor;
 
+  /**
+   * Only relevant when qits itself runs under a path prefix (a qits-in-qits daemon bridges {@code
+   * -Dquarkus.http.root-path}): the route below is registered on the root-path-mounted router, so
+   * it matches relative to the prefix — but {@code rc.request().path()} returns the FULL path, so
+   * the segment parse must strip the prefix first. {@code "/"} (the normal deployment) strips
+   * nothing.
+   */
+  @ConfigProperty(name = "quarkus.http.root-path", defaultValue = "/")
+  String rootPath;
+
   private HttpClient proxyClient;
+  private String rootPrefix;
 
   void init(@Observes Router router) {
     proxyClient = vertx.createHttpClient();
+    rootPrefix = RootPath.prefix(rootPath);
     router.route(DaemonProxyPath.PREFIX + "*").handler(this::handle);
   }
 
   private void handle(RoutingContext rc) {
     String path = rc.request().path();
-    String[] segments = path.substring(DaemonProxyPath.PREFIX.length()).split("/", 3);
+    String[] segments =
+        path.substring(rootPrefix.length() + DaemonProxyPath.PREFIX.length()).split("/", 3);
     if (segments.length < 2 || segments[0].isEmpty() || segments[1].isEmpty()) {
       respond(rc, 404, "No daemon here.");
       return;
