@@ -1,0 +1,98 @@
+package eu.wohlben.qits.domain.process.control;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Plain-JUnit test of the registry's lifecycle: active-process discovery, the post-done retention
+ * window (replay + immediate done, then eviction → unknown id), the PROCESS hints on begin/done,
+ * and the max-lifetime backstop. The publisher is a recording stub — the CDI wiring is covered by
+ * the service module's channel tests.
+ */
+class TechnicalProcessRegistryTest {
+
+  private record Fired(String repoId, String workspaceId, WorkspaceChangeHint.Topic topic) {}
+
+  private final List<Fired> fired = new CopyOnWriteArrayList<>();
+  private TechnicalProcessRegistry registry;
+
+  @BeforeEach
+  void setUp() {
+    registry = new TechnicalProcessRegistry();
+    registry.doneTtlMillis = 150;
+    registry.maxLifetimeMillis = 60_000;
+    registry.changePublisher =
+        new WorkspaceChangePublisher() {
+          @Override
+          public void fire(String repoId, String workspaceId, WorkspaceChangeHint.Topic topic) {
+            fired.add(new Fired(repoId, workspaceId, topic));
+          }
+        };
+  }
+
+  @Test
+  void beginRegistersTheProcessAsTheWorkspacesActiveOneAndFiresAProcessHint() {
+    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+
+    assertEquals(process.id(), registry.activeFor("repo-1", "ws-1").orElseThrow());
+    assertEquals(process, registry.find(process.id()).orElseThrow());
+    assertEquals(List.of(new Fired("repo-1", "ws-1", WorkspaceChangeHint.Topic.PROCESS)), fired);
+  }
+
+  @Test
+  void doneClearsTheActiveMappingFiresAHintAndEvictsAfterTheRetentionWindow() throws Exception {
+    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    process.completeNoOp("container-start", "already running");
+
+    assertTrue(registry.activeFor("repo-1", "ws-1").isEmpty(), "done means no longer active");
+    assertEquals(2, fired.size(), "begin + done each announce a PROCESS hint");
+    assertTrue(
+        registry.find(process.id()).isPresent(),
+        "within the retention window a late subscriber still resolves the id");
+
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (registry.find(process.id()).isPresent() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20);
+    }
+    assertFalse(registry.find(process.id()).isPresent(), "evicted after the TTL");
+  }
+
+  @Test
+  void aNewerProcessForTheSameWorkspaceBecomesTheActiveOne() {
+    TechnicalProcess first = registry.begin("repo-1", "ws-1");
+    TechnicalProcess second = registry.begin("repo-1", "ws-1");
+
+    assertEquals(second.id(), registry.activeFor("repo-1", "ws-1").orElseThrow());
+    // The older process finishing must not clear the newer active mapping.
+    first.completeNoOp("container-start", "superseded");
+    assertEquals(second.id(), registry.activeFor("repo-1", "ws-1").orElseThrow());
+  }
+
+  @Test
+  void theMaxLifetimeBackstopForceFinishesAProcessThatNeverConverges() throws Exception {
+    registry.maxLifetimeMillis = 100;
+    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    process.openSegment("docker-run"); // never settled — e.g. a ready pattern that never matches
+
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (!process.isTerminal() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20);
+    }
+    assertTrue(process.isTerminal(), "the backstop must end a stuck process");
+    assertTrue(registry.activeFor("repo-1", "ws-1").isEmpty());
+  }
+
+  @Test
+  void findOnAnUnknownOrNullIdIsEmpty() {
+    assertTrue(registry.find("nope").isEmpty());
+    assertTrue(registry.find(null).isEmpty());
+  }
+}

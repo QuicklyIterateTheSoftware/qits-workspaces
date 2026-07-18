@@ -14,6 +14,8 @@ import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.daemon.entity.LogObserverKind;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
+import eu.wohlben.qits.domain.process.control.SegmentLineSink;
+import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
@@ -101,6 +103,13 @@ public class DaemonSupervisor {
      */
     List<ContainerTailSource> tails = List.of();
 
+    /**
+     * The technical process tracking the container start that auto-started this instance, or null
+     * for manual/adopted starts. Its {@code daemon:<name>} segment receives the startup log and
+     * settles on the first terminal-ish transition (READY/CRASHED/STOPPED).
+     */
+    TechnicalProcess process;
+
     Instance(String repoId, String workspaceId, RepositoryDaemonDto daemon) {
       this.repoId = repoId;
       this.workspaceId = workspaceId;
@@ -173,6 +182,16 @@ public class DaemonSupervisor {
    * enforced — "restart" beats two dev servers fighting over a port.
    */
   public synchronized DaemonInstanceDto start(String repoId, String workspaceId, String daemonId) {
+    return start(repoId, workspaceId, daemonId, null);
+  }
+
+  /**
+   * {@link #start(String, String, String)} with an optional {@link TechnicalProcess}: the auto
+   * start path passes the container start's process so this daemon's startup log streams into its
+   * {@code daemon:<name>} segment and the segment settles on READY/CRASHED/STOPPED.
+   */
+  public synchronized DaemonInstanceDto start(
+      String repoId, String workspaceId, String daemonId, TechnicalProcess process) {
     RepositoryDaemonDto daemon = repositoryDaemonService.resolve(repoId, daemonId);
     Key key = new Key(repoId, workspaceId, daemonId);
     Instance existing = instances.get(key);
@@ -181,6 +200,7 @@ public class DaemonSupervisor {
           "Daemon '" + daemon.name() + "' is already running in this workspace");
     }
     Instance instance = new Instance(repoId, workspaceId, daemon);
+    instance.process = process;
     instances.put(key, instance);
     launch(instance);
     return toInstanceDto(instance, null, workspaceId);
@@ -419,6 +439,13 @@ public class DaemonSupervisor {
     List<CommandOutputSink> sinks = new ArrayList<>();
     instance.tail = new TailSink();
     sinks.add(instance.tail);
+    // A process-tracked auto-start streams the startup log into the process's daemon segment; the
+    // sink self-closes (and is pruned) once the segment settles, so a chatty daemon stops feeding
+    // an already-decided expander. Relaunches re-add it — lines keep landing until settlement.
+    if (instance.process != null) {
+      sinks.add(
+          new SegmentLineSink(instance.process, TechnicalProcess.daemonSegment(daemon.name())));
+    }
     // A fresh start reads the log from the top, so the ready line is seen and flips STARTING→READY.
     // An adopted session is already READY and tails from the end, so no old line re-triggers it.
     if (!adopt && daemon.readyPattern() != null) {
@@ -887,6 +914,7 @@ public class DaemonSupervisor {
       String summary,
       String logExcerpt) {
     instance.status = status;
+    settleProcessSegment(instance, status, summary);
     changePublisher.fire(instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.DAEMONS);
     if (!isLive(status)) {
       closeTails(instance);
@@ -915,6 +943,31 @@ public class DaemonSupervisor {
             null,
             null,
             Instant.now()));
+  }
+
+  /**
+   * Settle a process-tracked instance's {@code daemon:<name>} segment on the first decisive status:
+   * READY (or a deliberate STOPPED during the window) settles {@code ok}, CRASHED settles {@code
+   * failed} — with the transition summary appended as the segment's closing line. RESTARTING is
+   * deliberately not terminal: the segment stays open across the backoff and settles with the
+   * retry's outcome. Idempotent via the process's first-verdict-wins settle.
+   */
+  private static void settleProcessSegment(Instance instance, DaemonStatus status, String summary) {
+    if (instance.process == null) {
+      return;
+    }
+    String segment = TechnicalProcess.daemonSegment(instance.daemon.name());
+    switch (status) {
+      case READY, STOPPED -> {
+        instance.process.appendLine(segment, summary);
+        instance.process.settleSegment(segment, true);
+      }
+      case CRASHED -> {
+        instance.process.appendLine(segment, summary);
+        instance.process.settleSegment(segment, false);
+      }
+      default -> {}
+    }
   }
 
   /**

@@ -2,6 +2,8 @@ package eu.wohlben.qits.domain.daemon.control;
 
 import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
 import eu.wohlben.qits.domain.error.BadRequestException;
+import eu.wohlben.qits.domain.process.control.TechnicalProcess;
+import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStarted;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStopping;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -41,6 +43,8 @@ public class DaemonLifecycleCoupler {
 
   @Inject DaemonSupervisor supervisor;
 
+  @Inject TechnicalProcessRegistry processRegistry;
+
   /** Kill switch for the start coupling (belt-and-suspenders over the per-daemon opt-out). */
   @ConfigProperty(name = "qits.daemons.autostart-enabled", defaultValue = "true")
   boolean autostartEnabled;
@@ -50,26 +54,44 @@ public class DaemonLifecycleCoupler {
   boolean autostopEnabled;
 
   void onContainerStarted(@ObservesAsync WorkspaceContainerStarted evt) {
-    if (!autostartEnabled) {
-      return;
+    // The technical process (if this start is stream-tracked) must always learn the auto-start
+    // set — even when it is empty or the kill switch is off — because its terminal `done` waits
+    // for exactly that declaration.
+    TechnicalProcess process = processRegistry.find(evt.technicalProcessId()).orElse(null);
+    List<RepositoryDaemonDto> autoStarts =
+        !autostartEnabled
+            ? List.of()
+            : repositoryDaemonService.resolveAll(evt.repoId()).stream()
+                .filter(RepositoryDaemonDto::autoStart)
+                .toList();
+    if (process != null) {
+      process.expectDaemons(autoStarts.stream().map(RepositoryDaemonDto::name).toList());
     }
-    List<RepositoryDaemonDto> definitions = repositoryDaemonService.resolveAll(evt.repoId());
-    for (RepositoryDaemonDto daemon : definitions) {
-      if (!daemon.autoStart()) {
-        continue;
-      }
+    for (RepositoryDaemonDto daemon : autoStarts) {
       try {
-        supervisor.start(evt.repoId(), evt.workspaceId(), daemon.id());
+        supervisor.start(evt.repoId(), evt.workspaceId(), daemon.id(), process);
       } catch (BadRequestException alreadyRunning) {
         // An instance is already live (a concurrent manual start, or a re-adopted session). The
         // supervisor enforces one instance per (workspace, daemon); tolerating this is exactly the
-        // idempotency auto-start wants.
+        // idempotency auto-start wants — and it settles the daemon's segment so the process's
+        // `done` doesn't wait on a daemon that was up all along.
+        if (process != null) {
+          String segment = TechnicalProcess.daemonSegment(daemon.name());
+          process.appendLine(segment, "Already running — nothing to start.");
+          process.settleSegment(segment, true);
+        }
         LOG.debugf(
             "Auto-start skipped daemon '%s' in workspace %s: %s",
             daemon.name(), evt.workspaceId(), alreadyRunning.getMessage());
       } catch (RuntimeException e) {
         // One daemon failing to launch must not block the others; the failure already surfaces as a
-        // STARTING -> CRASHED transition (daemon events + SSE) via the supervisor, never here.
+        // STARTING -> CRASHED transition (daemon events + SSE) via the supervisor. The segment is
+        // settled here too for launch failures that never reach the supervisor's state machine.
+        if (process != null) {
+          String segment = TechnicalProcess.daemonSegment(daemon.name());
+          process.appendLine(segment, "Launch failed: " + e.getMessage());
+          process.settleSegment(segment, false);
+        }
         LOG.warnf(
             e,
             "Auto-start failed for daemon '%s' in workspace %s",
