@@ -16,8 +16,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * The in-memory registry of live {@link TechnicalProcess}es, keyed by process id and by the
- * workspace they run against — so a Start's HTTP response can hand the id to the browser, and the
- * workspace detail route can discover the current process for its workspace ({@link #activeFor}).
+ * workspace or repository they run against — so a Start/Pull's HTTP response can hand the id to the
+ * browser, and the detail route can discover the current process for its workspace ({@link
+ * #activeFor}) or repository ({@link #activeForRepository}).
  *
  * <p>Lifecycle: {@link #begin} registers a process <em>before</em> the work starts (the very first
  * output line is captured); the process's terminal {@code done} clears the active mapping and
@@ -51,6 +52,12 @@ public class TechnicalProcessRegistry {
 
   private final Map<String, TechnicalProcess> byId = new ConcurrentHashMap<>();
   private final Map<String, String> activeByWorkspace = new ConcurrentHashMap<>();
+  private final Map<String, RepoActive> activeByRepository = new ConcurrentHashMap<>();
+
+  /**
+   * The live repository-scoped process plus its operation kind (e.g. {@code pull}/{@code sync}).
+   */
+  private record RepoActive(String processId, String kind) {}
 
   private final ScheduledExecutorService scheduler =
       Executors.newSingleThreadScheduledExecutor(
@@ -77,19 +84,41 @@ public class TechnicalProcessRegistry {
   }
 
   /**
-   * Register a new repository-scoped process (null workspaceId) — for work that pulls/operates on a
-   * repository as a whole rather than a single workspace (e.g. a streamed {@code repository pull}).
-   * Unlike {@link #begin}, it keeps no {@link #activeByWorkspace} mapping and fires no {@code
-   * PROCESS} hint (there is no per-workspace channel): v1 hands the id straight to the browser via
-   * the HTTP response and relies on the post-done retention window for reattach. It is otherwise a
-   * full process — registered by id and reaped when idle.
+   * Atomic, kind-aware single-flight for a repository-scoped process (null workspaceId) — for work
+   * that operates on a repository as a whole rather than a single workspace (a streamed {@code
+   * pull} or {@code sync}, passed as {@code kind}). Check-and-register run under the registry
+   * monitor so two racing POSTs can't both register (the second would otherwise clobber the active
+   * mapping and leave two walks contending on the bare origin's ref-locks):
+   *
+   * <ul>
+   *   <li>A live process of the <em>same</em> kind → {@link RepoProcessLease.Reused} (the caller
+   *       returns its id and starts no second walk; a reload / second tab reattaches to it via
+   *       {@link #activeForRepository}).
+   *   <li>A live process of a <em>different</em> kind → {@link RepoProcessLease.Conflict} (a pull
+   *       and a sync can't share a walk — a pull would skip the push — nor run concurrently; the
+   *       caller rejects).
+   *   <li>Otherwise a fresh process is registered → {@link RepoProcessLease.Fresh}. It fires the
+   *       {@code PROCESS} hint on the repository channel ({@code (repoId, null)} — see {@code
+   *       RepositoryEventsController}) so the browser learns a pull became active without polling.
+   * </ul>
    */
-  public TechnicalProcess beginForRepository(String repoId) {
+  public synchronized RepoProcessLease beginForRepository(String repoId, String kind) {
+    RepoActive current = activeByRepository.get(repoId);
+    if (current != null) {
+      TechnicalProcess existing = byId.get(current.processId());
+      if (existing != null && !existing.isTerminal()) {
+        return kind.equals(current.kind())
+            ? new RepoProcessLease.Reused(current.processId())
+            : new RepoProcessLease.Conflict(current.kind());
+      }
+    }
     String id = UUID.randomUUID().toString();
     TechnicalProcess process = new TechnicalProcess(id, repoId, null, this::onDone);
     byId.put(id, process);
+    activeByRepository.put(repoId, new RepoActive(id, kind));
     scheduleIdleReaper(process);
-    return process;
+    changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.PROCESS);
+    return new RepoProcessLease.Fresh(process);
   }
 
   /**
@@ -122,16 +151,36 @@ public class TechnicalProcessRegistry {
     return Optional.ofNullable(activeByWorkspace.get(workspaceKey(repoId, workspaceId)));
   }
 
+  /** The id of the repository's currently-running process, if any (cleared on done). */
+  public Optional<String> activeForRepository(String repoId) {
+    return Optional.ofNullable(activeByRepository.get(repoId)).map(RepoActive::processId);
+  }
+
   private void onDone(TechnicalProcess process) {
-    // Workspace-scoped processes clear their active mapping and announce it; repository-scoped ones
-    // (null workspaceId, from beginForRepository) have neither, so only the retention schedule
-    // runs.
+    // Each scope clears its own active mapping and announces the change on its channel. Workspace-
+    // scoped processes fire the per-workspace hint; repository-scoped ones (null workspaceId, from
+    // beginForRepository) fire the repository hint (repoId, null).
     if (process.workspaceId() != null) {
       activeByWorkspace.remove(workspaceKey(process.repoId(), process.workspaceId()), process.id());
       changePublisher.fire(
           process.repoId(), process.workspaceId(), WorkspaceChangeHint.Topic.PROCESS);
+    } else if (process.repoId() != null) {
+      clearRepositoryIfCurrent(process);
+      changePublisher.fire(process.repoId(), null, WorkspaceChangeHint.Topic.PROCESS);
     }
     scheduler.schedule(() -> byId.remove(process.id()), doneTtlMillis, TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Clear the repository's active mapping only if it still points at <em>this</em> process — under
+   * the same monitor {@link #beginForRepository} registers under, so a done racing a fresh begin
+   * never removes the newer mapping (the {@link RepoActive} record is compared by id).
+   */
+  private synchronized void clearRepositoryIfCurrent(TechnicalProcess process) {
+    RepoActive current = activeByRepository.get(process.repoId());
+    if (current != null && current.processId().equals(process.id())) {
+      activeByRepository.remove(process.repoId());
+    }
   }
 
   private static String workspaceKey(String repoId, String workspaceId) {

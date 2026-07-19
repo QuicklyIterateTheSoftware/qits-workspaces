@@ -2,6 +2,7 @@ package eu.wohlben.qits.domain.process.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
@@ -74,6 +75,81 @@ class TechnicalProcessRegistryTest {
     // The older process finishing must not clear the newer active mapping.
     first.completeNoOp("container-start", "superseded");
     assertEquals(second.id(), registry.activeFor("repo-1", "ws-1").orElseThrow());
+  }
+
+  @Test
+  void beginForRepositoryRegistersTheActiveProcessAndFiresARepoScopedHint() {
+    TechnicalProcess process = fresh(registry.beginForRepository("repo-1", "pull"));
+
+    assertEquals(process.id(), registry.activeForRepository("repo-1").orElseThrow());
+    assertEquals(process, registry.find(process.id()).orElseThrow());
+    // A repository process announces on the repository channel: workspaceId is null.
+    assertEquals(List.of(new Fired("repo-1", null, WorkspaceChangeHint.Topic.PROCESS)), fired);
+    assertTrue(
+        registry.activeFor("repo-1", "ws-1").isEmpty(),
+        "a repo process is not a workspace's active process");
+  }
+
+  @Test
+  void aSecondSameKindBeginReusesTheLiveProcessWithoutAnotherHint() {
+    TechnicalProcess process = fresh(registry.beginForRepository("repo-1", "pull"));
+
+    RepoProcessLease second = registry.beginForRepository("repo-1", "pull");
+    assertEquals(
+        process.id(),
+        assertInstanceOf(RepoProcessLease.Reused.class, second).processId(),
+        "a same-kind begin reuses the live process (single-flight)");
+    assertEquals(1, fired.size(), "reuse registers nothing new, so no second hint fires");
+  }
+
+  @Test
+  void aDifferentKindBeginConflictsWithTheLiveProcess() {
+    fresh(registry.beginForRepository("repo-1", "pull"));
+
+    RepoProcessLease second = registry.beginForRepository("repo-1", "sync");
+    assertEquals(
+        "pull",
+        assertInstanceOf(RepoProcessLease.Conflict.class, second).runningKind(),
+        "a sync while a pull is live is a conflict naming the running kind");
+    assertEquals(1, fired.size(), "a conflict registers nothing, so no second hint fires");
+  }
+
+  @Test
+  void aFreshBeginAfterTheLiveOneFinishedGetsANewProcess() {
+    TechnicalProcess first = fresh(registry.beginForRepository("repo-1", "pull"));
+    first.completeNoOp("pull:repo-1", "up to date");
+
+    // The mapping cleared on done, so even a different kind now starts fresh (not a conflict).
+    TechnicalProcess second = fresh(registry.beginForRepository("repo-1", "sync"));
+    assertEquals(second.id(), registry.activeForRepository("repo-1").orElseThrow());
+  }
+
+  @Test
+  void doneClearsTheRepositoryActiveMappingFiresAHintAndEvicts() throws Exception {
+    TechnicalProcess process = fresh(registry.beginForRepository("repo-1", "pull"));
+    process.completeNoOp("pull:repo-1", "up to date");
+
+    assertTrue(registry.activeForRepository("repo-1").isEmpty(), "done means no longer active");
+    assertEquals(2, fired.size(), "begin + done each announce a repo PROCESS hint");
+    assertEquals(new Fired("repo-1", null, WorkspaceChangeHint.Topic.PROCESS), fired.get(1));
+    assertTrue(
+        registry.find(process.id()).isPresent(),
+        "within the retention window a late subscriber still resolves the id");
+
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (registry.find(process.id()).isPresent() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20);
+    }
+    assertFalse(registry.find(process.id()).isPresent(), "evicted after the TTL");
+  }
+
+  @Test
+  void activeForRepositoryIsEmptyForAnUnknownRepository() {
+    assertTrue(registry.activeForRepository("nope").isEmpty());
+  }
+
+  private static TechnicalProcess fresh(RepoProcessLease lease) {
+    return assertInstanceOf(RepoProcessLease.Fresh.class, lease).process();
   }
 
   @Test
