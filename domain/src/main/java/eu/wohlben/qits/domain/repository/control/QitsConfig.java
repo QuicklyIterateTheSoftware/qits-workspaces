@@ -24,7 +24,8 @@ public record QitsConfig(
     RepositorySection repository,
     List<FrameworkDecl> frameworks,
     List<ActionDecl> actions,
-    List<DaemonDecl> daemons) {
+    List<DaemonDecl> daemons,
+    List<BootstrapDecl> bootstrap) {
 
   /**
    * The reserved name suffix stamped on every config-declared action/daemon. URL-safe, no spaces.
@@ -32,17 +33,23 @@ public record QitsConfig(
   public static final String CONFIG_NAME_SUFFIX = "@qits-config";
 
   /** An absent/empty file — the no-op that keeps a config-free repository on the old path. */
-  public static final QitsConfig EMPTY = new QitsConfig(null, List.of(), List.of(), List.of());
+  public static final QitsConfig EMPTY =
+      new QitsConfig(null, List.of(), List.of(), List.of(), List.of());
 
   /** Normalize the collections to non-null so callers never null-check. */
   public QitsConfig {
     frameworks = frameworks == null ? List.of() : List.copyOf(frameworks);
     actions = actions == null ? List.of() : List.copyOf(actions);
     daemons = daemons == null ? List.of() : List.copyOf(daemons);
+    bootstrap = bootstrap == null ? List.of() : List.copyOf(bootstrap);
   }
 
   public boolean isEmpty() {
-    return repository == null && frameworks.isEmpty() && actions.isEmpty() && daemons.isEmpty();
+    return repository == null
+        && frameworks.isEmpty()
+        && actions.isEmpty()
+        && daemons.isEmpty()
+        && bootstrap.isEmpty();
   }
 
   /** The stored name for a declared entry: {@code <base>@qits-config}. */
@@ -108,6 +115,17 @@ public record QitsConfig(
       List<ObserverDecl> observers,
       List<SourceDecl> sources,
       List<HealthCheckDecl> healthChecks) {}
+
+  /**
+   * One {@code bootstrap[]} entry → a {@code BootstrapCommand}; list position becomes {@code
+   * orderIndex} (the file's order is the execution order).
+   */
+  public record BootstrapDecl(
+      String name,
+      String description,
+      String execute,
+      String check,
+      Map<String, String> environment) {}
 
   /** The {@code web-view:} block → {@code WebView} embeddable. */
   public record WebViewDecl(Integer port, String entryPath, String basePath) {}

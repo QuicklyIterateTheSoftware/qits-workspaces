@@ -21,6 +21,12 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
     /** A command's lifecycle changed (started, exited, terminated). */
     COMMANDS,
     /**
+     * The bootstrap chain's state changed for this workspace — a chain started or ended, or a
+     * command's last-run outcome was recorded. The frontend re-fetches the workspace bootstrap
+     * surface.
+     */
+    BOOTSTRAP,
+    /**
      * The workspace working tree changed on disk — a file was created, modified, deleted, or moved
      * (typically the coding agent scaffolding without a commit). Fired by {@code
      * WorkspaceWatchService} from a per-workspace {@code inotifywait}; the frontend re-fetches

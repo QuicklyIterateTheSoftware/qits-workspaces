@@ -25,15 +25,32 @@ public class WorkspaceContainerEventPublisher {
 
   @Inject Event<WorkspaceContainerStarted> started;
 
+  @Inject Event<WorkspaceReadyForDaemons> ready;
+
   @Inject Event<WorkspaceContainerStopping> stopping;
 
+  /** Restart-shaped convenience (no process, not a fresh provision) — the test-suite shorthand. */
   public void fireStarted(String repoId, String workspaceId) {
-    fireStarted(repoId, workspaceId, null);
+    fireStarted(repoId, workspaceId, null, false);
   }
 
-  /** {@code technicalProcessId} correlates the async daemon phase with the start's log stream. */
-  public void fireStarted(String repoId, String workspaceId, String technicalProcessId) {
-    started.fireAsync(new WorkspaceContainerStarted(repoId, workspaceId, technicalProcessId));
+  /**
+   * {@code technicalProcessId} correlates the async bootstrap/daemon phases with the start's log
+   * stream; {@code freshProvision} marks the docker-run+clone transition that triggers bootstrap.
+   */
+  public void fireStarted(
+      String repoId, String workspaceId, String technicalProcessId, boolean freshProvision) {
+    started.fireAsync(
+        new WorkspaceContainerStarted(repoId, workspaceId, technicalProcessId, freshProvision));
+  }
+
+  /**
+   * Announce that bootstrap is out of the way (ran successfully, or nothing to run) — the trigger
+   * daemon auto-start couples to. Async like {@code started}: firing must never block the bootstrap
+   * runner's thread on daemon startup work.
+   */
+  public void fireReadyForDaemons(String repoId, String workspaceId, String technicalProcessId) {
+    ready.fireAsync(new WorkspaceReadyForDaemons(repoId, workspaceId, technicalProcessId));
   }
 
   /** Synchronous by design — settling must finish before the caller's {@code containers.rm}. */

@@ -865,9 +865,9 @@ public class WorkspaceService {
    * {@link #ensureContainer(String, String)} with an optional {@link TechnicalProcess} receiving
    * the work as streamed segments. With a process attached, every outcome also ends the process:
    * the already-running short-circuit completes it as a no-op, a provision failure fails it, and a
-   * successful start hands the process id to the async daemon phase via {@link
-   * WorkspaceContainerEventPublisher#fireStarted(String, String, String)} — the process then
-   * reaches {@code done} only once the auto-started daemons settle.
+   * successful start hands the process id to the async bootstrap-then-daemon phase via {@link
+   * WorkspaceContainerEventPublisher#fireStarted(String, String, String, boolean)} — the process
+   * then reaches {@code done} only once the bootstrap chain and the auto-started daemons settle.
    */
   private void ensureContainer(String repoId, String workspaceId, TechnicalProcess process) {
     String container = containers.containerName(workspaceId, repoId);
@@ -921,8 +921,10 @@ public class WorkspaceService {
         }
         QuarkusTransaction.requiringNew()
             .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
-        // Cold -> RUNNING: bring the repository's auto-start daemons up with the container (async).
-        containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id());
+        // Cold -> RUNNING, but not a fresh provision: the clone (and its bootstrap state) survived,
+        // so the bootstrap runner passes straight through to daemon auto-start (async).
+        containerEvents.fireStarted(
+            repoId, workspaceId, process == null ? null : process.id(), false);
         return;
       } catch (RuntimeException e) {
         QuarkusTransaction.requiringNew()
@@ -968,8 +970,9 @@ public class WorkspaceService {
       }
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
-      // Cold -> RUNNING: bring the repository's auto-start daemons up with the container (async).
-      containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id());
+      // Cold -> RUNNING off a fresh provision (bare clone): run the bootstrap chain, then daemon
+      // auto-start (async; the runner passes straight through when the chain is empty).
+      containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id(), true);
     } catch (RuntimeException e) {
       QuarkusTransaction.requiringNew()
           .run(
