@@ -35,9 +35,17 @@ public class TechnicalProcessRegistry {
   @ConfigProperty(name = "qits.process.done-ttl-ms", defaultValue = "60000")
   long doneTtlMillis;
 
-  /** Backstop: a process older than this is force-finished so it can't leak forever. */
-  @ConfigProperty(name = "qits.process.max-lifetime-ms", defaultValue = "900000")
-  long maxLifetimeMillis;
+  /**
+   * Backstop: a process <em>idle</em> (no emitted frame) this long is force-finished so it can't
+   * leak forever. Deliberately an idle window, not a total-lifetime cap: a provision's process now
+   * spans the whole bootstrap chain, whose length is unbounded (N commands × the per-command
+   * await), so a fixed cap would either cut a legitimately long-but-active chain mid-run or be far
+   * too long to reap a genuinely stuck process (e.g. a ready pattern that never matches). Measured
+   * against {@link TechnicalProcess#millisSinceLastActivity()}: an actively streaming chain keeps
+   * resetting it, a stalled one trips it.
+   */
+  @ConfigProperty(name = "qits.process.max-idle-ms", defaultValue = "900000")
+  long maxIdleMillis;
 
   @Inject WorkspaceChangePublisher changePublisher;
 
@@ -63,9 +71,29 @@ public class TechnicalProcessRegistry {
     TechnicalProcess process = new TechnicalProcess(id, repoId, workspaceId, this::onDone);
     byId.put(id, process);
     activeByWorkspace.put(workspaceKey(repoId, workspaceId), id);
-    scheduler.schedule(process::forceFinish, maxLifetimeMillis, TimeUnit.MILLISECONDS);
+    scheduleIdleReaper(process);
     changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROCESS);
     return process;
+  }
+
+  /**
+   * Force-finish the process once it has been idle for {@link #maxIdleMillis}; while it is still
+   * producing frames, re-arm for the remaining idle window instead of cutting it off.
+   */
+  private void scheduleIdleReaper(TechnicalProcess process) {
+    scheduler.schedule(() -> reapIfIdle(process), maxIdleMillis, TimeUnit.MILLISECONDS);
+  }
+
+  private void reapIfIdle(TechnicalProcess process) {
+    if (process.isTerminal()) {
+      return;
+    }
+    long idle = process.millisSinceLastActivity();
+    if (idle < maxIdleMillis) {
+      scheduler.schedule(() -> reapIfIdle(process), maxIdleMillis - idle, TimeUnit.MILLISECONDS);
+    } else {
+      process.forceFinish();
+    }
   }
 
   /** The process for {@code id} — live or within its post-done retention window. */

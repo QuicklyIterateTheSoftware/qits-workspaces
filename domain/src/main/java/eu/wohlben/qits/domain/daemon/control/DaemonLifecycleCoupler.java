@@ -4,8 +4,8 @@ import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
-import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStarted;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStopping;
+import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForDaemons;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
@@ -18,15 +18,18 @@ import org.jboss.logging.Logger;
  * Couples the container lifecycle to the daemon lifecycle from the daemon side, both directions:
  *
  * <ul>
- *   <li><b>start</b> — when a workspace container comes up (a cold&#8594;RUNNING transition in
- *       {@code WorkspaceService.ensureContainer}, signalled by {@link WorkspaceContainerStarted}),
- *       start the repository's auto-start daemons so a freshly provisioned or restarted workspace
- *       runs its dev server unattended instead of coming up daemon-less. Observed with
+ *   <li><b>start</b> — when a freshly started workspace container is past its bootstrap chain
+ *       (signalled by {@link WorkspaceReadyForDaemons}, fired by {@code WorkspaceBootstrapRunner}
+ *       either as a pass-through of the container start or after the chain succeeded), start the
+ *       repository's auto-start daemons so the workspace runs its dev server unattended instead of
+ *       coming up daemon-less. Deliberately <em>not</em> coupled to {@code
+ *       WorkspaceContainerStarted} directly: bootstrap must finish first, and CDI gives two async
+ *       observers of one event no ordering, so the sequencing is structural. Observed with
  *       {@code @ObservesAsync} — runs on the async observer thread and never adds to {@code
  *       ensureContainer}'s latency. Reentrancy is safe by construction: {@code supervisor.start}
  *       &#8594; {@code beginDaemonRun} &#8594; {@code ensureContainer} hits the already-RUNNING
- *       short-circuit, which does not fire the event — the cycle terminates after one cheap no-op
- *       hop.
+ *       short-circuit, which does not fire the container-started event — the cycle terminates after
+ *       one cheap no-op hop.
  *   <li><b>stop</b> — when a workspace container is about to be deliberately removed ({@link
  *       WorkspaceContainerStopping}), settle its live daemons so their imminent disappearance reads
  *       as a clean STOPPED instead of a crash the restart policy would resurrect. Observed
@@ -53,7 +56,7 @@ public class DaemonLifecycleCoupler {
   @ConfigProperty(name = "qits.daemons.autostop-enabled", defaultValue = "true")
   boolean autostopEnabled;
 
-  void onContainerStarted(@ObservesAsync WorkspaceContainerStarted evt) {
+  void onReadyForDaemons(@ObservesAsync WorkspaceReadyForDaemons evt) {
     // The technical process (if this start is stream-tracked) must always learn the auto-start
     // set — even when it is empty or the kill switch is off — because its terminal `done` waits
     // for exactly that declaration.

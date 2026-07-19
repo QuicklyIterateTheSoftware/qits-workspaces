@@ -92,6 +92,9 @@ public final class TechnicalProcess {
   private boolean terminal;
   private boolean doneOk;
 
+  /** Wall-clock of the last emitted frame — the registry's idle backstop measures against it. */
+  private volatile long lastActivityMillis = System.currentTimeMillis();
+
   TechnicalProcess(
       String id, String repoId, String workspaceId, Consumer<TechnicalProcess> onDone) {
     this.id = id;
@@ -114,6 +117,16 @@ public final class TechnicalProcess {
 
   public synchronized boolean isTerminal() {
     return terminal;
+  }
+
+  /**
+   * Milliseconds since this process last emitted a frame (produced any output or settled anything).
+   * The registry reaps a process only after it has been <em>idle</em> this long, so an actively
+   * streaming chain — however long in total — is never cut mid-run, while a truly stuck one still
+   * can't leak forever.
+   */
+  public long millisSinceLastActivity() {
+    return System.currentTimeMillis() - lastActivityMillis;
   }
 
   /** Attach a listener: replay everything buffered, then stream live (or complete if terminal). */
@@ -333,6 +346,7 @@ public final class TechnicalProcess {
   }
 
   private void broadcast(TechnicalProcessFrame frame) {
+    lastActivityMillis = System.currentTimeMillis();
     for (Iterator<Listener> it = listeners.iterator(); it.hasNext(); ) {
       Listener listener = it.next();
       if (!listener.isOpen()) {

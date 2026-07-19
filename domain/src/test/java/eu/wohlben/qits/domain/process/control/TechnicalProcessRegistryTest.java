@@ -14,8 +14,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Plain-JUnit test of the registry's lifecycle: active-process discovery, the post-done retention
  * window (replay + immediate done, then eviction → unknown id), the PROCESS hints on begin/done,
- * and the max-lifetime backstop. The publisher is a recording stub — the CDI wiring is covered by
- * the service module's channel tests.
+ * and the idle backstop (reaps a quiet process, re-arms for an actively streaming one). The
+ * publisher is a recording stub — the CDI wiring is covered by the service module's channel tests.
  */
 class TechnicalProcessRegistryTest {
 
@@ -28,7 +28,7 @@ class TechnicalProcessRegistryTest {
   void setUp() {
     registry = new TechnicalProcessRegistry();
     registry.doneTtlMillis = 150;
-    registry.maxLifetimeMillis = 60_000;
+    registry.maxIdleMillis = 60_000;
     registry.changePublisher =
         new WorkspaceChangePublisher() {
           @Override
@@ -77,8 +77,8 @@ class TechnicalProcessRegistryTest {
   }
 
   @Test
-  void theMaxLifetimeBackstopForceFinishesAProcessThatNeverConverges() throws Exception {
-    registry.maxLifetimeMillis = 100;
+  void theIdleBackstopForceFinishesAProcessThatGoesQuiet() throws Exception {
+    registry.maxIdleMillis = 100;
     TechnicalProcess process = registry.begin("repo-1", "ws-1");
     process.openSegment("docker-run"); // never settled — e.g. a ready pattern that never matches
 
@@ -86,8 +86,30 @@ class TechnicalProcessRegistryTest {
     while (!process.isTerminal() && System.currentTimeMillis() < deadline) {
       Thread.sleep(20);
     }
-    assertTrue(process.isTerminal(), "the backstop must end a stuck process");
+    assertTrue(process.isTerminal(), "the backstop must end a stuck (idle) process");
     assertTrue(registry.activeFor("repo-1", "ws-1").isEmpty());
+  }
+
+  @Test
+  void theIdleBackstopReArmsForAnActivelyStreamingProcess() throws Exception {
+    registry.maxIdleMillis = 200;
+    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    process.openSegment("chain");
+
+    // Keep emitting past a single idle window: each line resets the idle clock, so a legitimately
+    // long-but-active chain (unbounded total) is never cut mid-run.
+    for (int i = 0; i < 6; i++) {
+      Thread.sleep(60);
+      process.appendLine("chain", "line " + i);
+    }
+    assertFalse(process.isTerminal(), "an actively streaming process outlives the idle window");
+
+    // Once it goes quiet the backstop still reaps it.
+    long deadline = System.currentTimeMillis() + 5_000;
+    while (!process.isTerminal() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20);
+    }
+    assertTrue(process.isTerminal(), "after going idle the backstop ends it");
   }
 
   @Test
