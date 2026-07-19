@@ -77,6 +77,22 @@ public class TechnicalProcessRegistry {
   }
 
   /**
+   * Register a new repository-scoped process (null workspaceId) — for work that pulls/operates on a
+   * repository as a whole rather than a single workspace (e.g. a streamed {@code repository pull}).
+   * Unlike {@link #begin}, it keeps no {@link #activeByWorkspace} mapping and fires no {@code
+   * PROCESS} hint (there is no per-workspace channel): v1 hands the id straight to the browser via
+   * the HTTP response and relies on the post-done retention window for reattach. It is otherwise a
+   * full process — registered by id and reaped when idle.
+   */
+  public TechnicalProcess beginForRepository(String repoId) {
+    String id = UUID.randomUUID().toString();
+    TechnicalProcess process = new TechnicalProcess(id, repoId, null, this::onDone);
+    byId.put(id, process);
+    scheduleIdleReaper(process);
+    return process;
+  }
+
+  /**
    * Force-finish the process once it has been idle for {@link #maxIdleMillis}; while it is still
    * producing frames, re-arm for the remaining idle window instead of cutting it off.
    */
@@ -107,9 +123,14 @@ public class TechnicalProcessRegistry {
   }
 
   private void onDone(TechnicalProcess process) {
-    activeByWorkspace.remove(workspaceKey(process.repoId(), process.workspaceId()), process.id());
-    changePublisher.fire(
-        process.repoId(), process.workspaceId(), WorkspaceChangeHint.Topic.PROCESS);
+    // Workspace-scoped processes clear their active mapping and announce it; repository-scoped ones
+    // (null workspaceId, from beginForRepository) have neither, so only the retention schedule
+    // runs.
+    if (process.workspaceId() != null) {
+      activeByWorkspace.remove(workspaceKey(process.repoId(), process.workspaceId()), process.id());
+      changePublisher.fire(
+          process.repoId(), process.workspaceId(), WorkspaceChangeHint.Topic.PROCESS);
+    }
     scheduler.schedule(() -> byId.remove(process.id()), doneTtlMillis, TimeUnit.MILLISECONDS);
   }
 
