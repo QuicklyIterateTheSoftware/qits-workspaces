@@ -6,6 +6,7 @@ import io.smallrye.mutiny.operators.multi.processors.BroadcastProcessor;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.ObservesAsync;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -150,6 +151,23 @@ public class WorkspaceEventBroadcaster {
 
   private static String key(String repoId, String workspaceId) {
     return repoId + "/" + workspaceId;
+  }
+
+  /**
+   * Merge the ~25s SSE {@code ping} heartbeat into a hint stream — shared by the workspace and
+   * repository events controllers so both keep idle connections alive identically through the dev
+   * proxies (the frontend ignores the {@code ping} topic). {@code EventSource} reconnects on its
+   * own, so no replay protocol is needed.
+   */
+  public Multi<String> withHeartbeat(Multi<String> hints) {
+    Multi<String> heartbeat =
+        Multi.createFrom()
+            .ticks()
+            .every(Duration.ofSeconds(25))
+            .onOverflow()
+            .drop()
+            .map(tick -> "ping");
+    return Multi.createBy().merging().streams(hints, heartbeat);
   }
 
   /** Test seam: how many workspace channels currently have at least one subscriber. */

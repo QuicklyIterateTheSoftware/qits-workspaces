@@ -7,7 +7,6 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
-import java.time.Duration;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.jboss.resteasy.reactive.RestStreamElementType;
 
@@ -32,14 +31,6 @@ public class WorkspaceEventsController {
   @Operation(hidden = true)
   public Multi<String> events(
       @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    Multi<String> hints = broadcaster.subscribe(repoId, workspaceId);
-    Multi<String> heartbeat =
-        Multi.createFrom()
-            .ticks()
-            .every(Duration.ofSeconds(25))
-            .onOverflow()
-            .drop()
-            .map(tick -> "ping");
-    return Multi.createBy().merging().streams(hints, heartbeat);
+    return broadcaster.withHeartbeat(broadcaster.subscribe(repoId, workspaceId));
   }
 }
