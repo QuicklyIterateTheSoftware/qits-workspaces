@@ -10,10 +10,11 @@ import java.util.Map;
 
 /**
  * The parsed, framework-free representation of a repository's committed {@code .qits-config.yml}
- * (see {@code docs/features/2026-07-18_qits-config-in-repo-configuration.md}). Every field maps 1:1
- * onto an existing entity field — the schema is the entity model re-expressed in kebab-case, so
- * there are no new domain concepts here. {@link QitsConfigParser} produces it; {@link
- * QitsConfigReconciler} upserts it into the existing tables.
+ * (see {@code
+ * docs/epics/qits-project-repositories/features/2026-07-18_qits-config-in-repo-configuration.md}).
+ * Every field maps 1:1 onto an existing entity field — the schema is the entity model re-expressed
+ * in kebab-case, so there are no new domain concepts here. {@link QitsConfigParser} produces it;
+ * {@link QitsConfigReconciler} upserts it into the existing tables.
  *
  * <p>Declared actions/daemons are namespaced by {@link #CONFIG_NAME_SUFFIX}: their stored name is
  * {@code <declared-name>@qits-config}. The write API rejects that suffix in user-supplied names, so

@@ -130,7 +130,8 @@ public class WorkspaceContainerFactory {
     // Mounted read/write on every workspace container (agent and daemon share the container), so
     // any
     // command in the container can read the token off the volume — the accepted trade for the
-    // shared-login model (docs/features/2026-07-04_container-agent-sessions.md).
+    // shared-login model
+    // (docs/epics/qits-coding-agents/features/2026-07-04_container-agent-sessions.md).
     if (claudeVolume != null && !claudeVolume.isBlank()) {
       container.volume(claudeVolume, claudeMount);
       // Point every in-container `claude` at the shared credential dir regardless of HOME. The
