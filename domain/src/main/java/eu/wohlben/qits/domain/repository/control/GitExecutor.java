@@ -4,6 +4,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -13,7 +14,19 @@ public class GitExecutor {
   public record ExecResult(int exitCode, String output) {}
 
   public String exec(java.io.File cwd, String... command) throws Exception {
-    ExecResult result = execAllowNonZero(cwd, command);
+    return exec(cwd, (Consumer<String>) null, command);
+  }
+
+  /**
+   * {@link #exec(java.io.File, String...)} with a per-line tap for the technical-process log
+   * stream: {@code onLine} is invoked as each merged stdout/stderr line arrives (so a slow {@code
+   * git fetch} streams progress live and keeps the process's idle reaper at bay), while the full
+   * output is still accumulated and returned. Mirrors {@code ContainerRuntime.exec(..., onLine,
+   * ...)}; passing a null {@code onLine} is the plain blocking behaviour.
+   */
+  public String exec(java.io.File cwd, Consumer<String> onLine, String... command)
+      throws Exception {
+    ExecResult result = execAllowNonZero(cwd, onLine, command);
     if (result.exitCode() != 0) {
       throw new RuntimeException(
           "Command failed ["
@@ -32,6 +45,12 @@ public class GitExecutor {
    * {@code git merge-tree}, which exits 1 to report merge conflicts.
    */
   public ExecResult execAllowNonZero(java.io.File cwd, String... command) throws Exception {
+    return execAllowNonZero(cwd, (Consumer<String>) null, command);
+  }
+
+  /** {@link #execAllowNonZero(java.io.File, String...)} with the per-line tap of {@link #exec}. */
+  public ExecResult execAllowNonZero(java.io.File cwd, Consumer<String> onLine, String... command)
+      throws Exception {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd);
@@ -40,7 +59,27 @@ public class GitExecutor {
     Process p = pb.start();
     String output;
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-      output = reader.lines().collect(Collectors.joining("\n"));
+      if (onLine == null) {
+        output = reader.lines().collect(Collectors.joining("\n"));
+      } else {
+        // Read line by line so the tap sees each line as it arrives (readLine also splits on a bare
+        // `\r`, so git's in-place progress updates stream through too, and it yields the final
+        // unterminated line so nothing is dropped). Still accumulate the full joined output.
+        StringBuilder collected = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+          if (collected.length() > 0) {
+            collected.append('\n');
+          }
+          collected.append(line);
+          try {
+            onLine.accept(line);
+          } catch (RuntimeException ignored) {
+            // the tap is observational only — a failing sink must not abort the git command
+          }
+        }
+        output = collected.toString();
+      }
     }
     int exitCode = p.waitFor();
     return new ExecResult(exitCode, output);
