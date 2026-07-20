@@ -12,6 +12,8 @@ import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptDraftRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -35,6 +37,8 @@ public class WorkspacePromptDraftService {
   @Inject WorkspacePromptDraftRepository draftRepository;
 
   @Inject WorkspacePromptAttachmentRepository attachmentRepository;
+
+  @Inject WorkspaceChangePublisher changePublisher;
 
   @Inject ObjectMapper objectMapper;
 
@@ -102,6 +106,9 @@ public class WorkspacePromptDraftService {
     draft.content = content;
     draft.serializedPrompt = serializedPrompt;
     draftRepository.persist(draft);
+    // Notify other open clients (another device/browser) to rehydrate — they apply the refetched
+    // draft only when their local copy is pristine, so this never clobbers mid-typing.
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
     return draft;
   }
 
@@ -114,5 +121,6 @@ public class WorkspacePromptDraftService {
     Workspace workspace = resolveWorkspace(repoId, workspaceId);
     draftRepository.deleteByWorkspaceId(workspace.id);
     attachmentRepository.deleteByWorkspaceId(workspace.id);
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
   }
 }
