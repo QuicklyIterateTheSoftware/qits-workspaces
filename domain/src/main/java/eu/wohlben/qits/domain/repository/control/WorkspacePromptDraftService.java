@@ -8,10 +8,8 @@ import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.error.PayloadTooLargeException;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
 import eu.wohlben.qits.domain.repository.entity.WorkspacePromptDraft;
-import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptDraftRepository;
-import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -30,9 +28,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @ApplicationScoped
 public class WorkspacePromptDraftService {
 
-  @Inject RepositoryRepository repositoryRepository;
-
-  @Inject WorkspaceRepository workspaceRepository;
+  @Inject WorkspaceResolver workspaceResolver;
 
   @Inject WorkspacePromptDraftRepository draftRepository;
 
@@ -49,19 +45,9 @@ public class WorkspacePromptDraftService {
   @ConfigProperty(name = "qits.workspace.prompt-draft-max-bytes", defaultValue = "2097152")
   long maxBytes;
 
-  /** The active workspace behind {@code repoId}/{@code workspaceId}, or 404. */
-  private Workspace resolveWorkspace(String repoId, String workspaceId) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
-    return workspaceRepository
-        .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-        .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
-  }
-
   /** The workspace's current draft, or 404 when none has been saved. */
   public WorkspacePromptDraft getDraft(String repoId, String workspaceId) {
-    Workspace workspace = resolveWorkspace(repoId, workspaceId);
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
     return draftRepository
         .findByWorkspaceId(workspace.id)
         .orElseThrow(() -> new NotFoundException("No prompt draft for workspace: " + workspaceId));
@@ -93,23 +79,22 @@ public class WorkspacePromptDraftService {
       throw new BadRequestException("Prompt draft content is not valid JSON", e);
     }
 
-    Workspace workspace = resolveWorkspace(repoId, workspaceId);
-    WorkspacePromptDraft draft =
-        draftRepository
-            .findByWorkspaceId(workspace.id)
-            .orElseGet(
-                () -> {
-                  WorkspacePromptDraft fresh = new WorkspacePromptDraft();
-                  fresh.workspaceId = workspace.id;
-                  return fresh;
-                });
-    draft.content = content;
-    draft.serializedPrompt = serializedPrompt;
-    draftRepository.persist(draft);
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+    // Atomic DB-level upsert (H2 MERGE) rather than a read-then-insert: the draft's PK *is* the
+    // workspace id (shared 1:1 PK/FK), so two concurrent first-saves for a draftless workspace —
+    // the exact cross-device flow this feature targets — would both find no row and both insert the
+    // same PK, and the loser's insert would 500 on the constraint violation. MERGE serializes them
+    // under the row lock (last write wins), so a first-insert race is a clean upsert, not a 500.
+    // See docs/issues/resolved/2026-07-20_prompt-draft-concurrent-first-insert-500.md.
+    draftRepository.upsert(workspace.id, content, serializedPrompt);
     // Notify other open clients (another device/browser) to rehydrate — they apply the refetched
     // draft only when their local copy is pristine, so this never clobbers mid-typing.
     changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
-    return draft;
+    // Re-read so the returned entity carries the DB-assigned updatedAt (the value a later GET will
+    // return) — the client stores it to dedup its own SSE echo, so it must match byte-for-byte.
+    return draftRepository
+        .findByWorkspaceId(workspace.id)
+        .orElseThrow(() -> new NotFoundException("No prompt draft for workspace: " + workspaceId));
   }
 
   /**
@@ -118,7 +103,7 @@ public class WorkspacePromptDraftService {
    */
   @Transactional
   public void deleteDraft(String repoId, String workspaceId) {
-    Workspace workspace = resolveWorkspace(repoId, workspaceId);
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
     draftRepository.deleteByWorkspaceId(workspace.id);
     attachmentRepository.deleteByWorkspaceId(workspace.id);
     changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);

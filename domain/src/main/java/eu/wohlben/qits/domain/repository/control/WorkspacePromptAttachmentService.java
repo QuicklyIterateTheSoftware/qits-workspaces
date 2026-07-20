@@ -6,9 +6,7 @@ import eu.wohlben.qits.domain.error.PayloadTooLargeException;
 import eu.wohlben.qits.domain.repository.entity.PromptAttachmentSource;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
 import eu.wohlben.qits.domain.repository.entity.WorkspacePromptAttachment;
-import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
-import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -27,25 +25,13 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @ApplicationScoped
 public class WorkspacePromptAttachmentService {
 
-  @Inject RepositoryRepository repositoryRepository;
-
-  @Inject WorkspaceRepository workspaceRepository;
+  @Inject WorkspaceResolver workspaceResolver;
 
   @Inject WorkspacePromptAttachmentRepository attachmentRepository;
 
   /** Per-image cap on the decoded bytes; over this yields a 413. */
   @ConfigProperty(name = "qits.workspace.prompt-attachment-max-bytes", defaultValue = "2097152")
   long maxBytes;
-
-  /** The active workspace behind {@code repoId}/{@code workspaceId}, or 404. */
-  private Workspace resolveWorkspace(String repoId, String workspaceId) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
-    return workspaceRepository
-        .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-        .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
-  }
 
   /**
    * Ingests one image attachment. Validates the payload before touching the DB — invalid base64 or
@@ -77,7 +63,7 @@ public class WorkspacePromptAttachmentService {
       throw new BadRequestException("Attachment is not a PNG or JPEG image");
     }
 
-    Workspace workspace = resolveWorkspace(repoId, workspaceId);
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
     WorkspacePromptAttachment attachment = new WorkspacePromptAttachment();
     attachment.id = UUID.randomUUID().toString();
     attachment.workspaceId = workspace.id;
@@ -92,7 +78,7 @@ public class WorkspacePromptAttachmentService {
   /** Removes one attachment scoped to its workspace; 404 if the workspace or the row is unknown. */
   @Transactional
   public void deleteAttachment(String repoId, String workspaceId, String attachmentId) {
-    Workspace workspace = resolveWorkspace(repoId, workspaceId);
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
     if (!attachmentRepository.deleteByWorkspaceIdAndId(workspace.id, attachmentId)) {
       throw new NotFoundException("Attachment not found: " + attachmentId);
     }
