@@ -40,11 +40,21 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
      */
     PROCESS,
     /**
-     * The workspace's persisted prompt draft changed — an autosave {@code PUT} or a {@code DELETE}
-     * (Discard/Clear). Fired by {@code WorkspacePromptDraftService}; the frontend invalidates the
-     * draft query so a draft edited on another device rehydrates the open view (applied only when
-     * the local draft is pristine, so mid-typing is never clobbered).
+     * The workspace's persisted prompt draft text changed — an autosave {@code PUT} or a {@code
+     * DELETE} (Discard/Clear). Fired by {@code WorkspacePromptDraftService}; the frontend
+     * invalidates the draft query so a draft edited on another device rehydrates the open view
+     * (applied only when the local draft is pristine, so mid-typing is never clobbered). Kept
+     * separate from {@link #PROMPT_ATTACHMENTS} so a high-churn text autosave never re-downloads
+     * the image payloads.
      */
-    PROMPT_DRAFT
+    PROMPT_DRAFT,
+    /**
+     * The workspace's prompt image attachments changed — a row was added or removed. Fired by
+     * {@code WorkspacePromptAttachmentService}; the frontend invalidates only the attachments query
+     * so another open view refreshes its thumbnail rows. Its own topic (not {@link #PROMPT_DRAFT})
+     * so the far larger image-bytes refetch fires only on an actual attachment change, not on every
+     * debounced prompt-text keystroke autosave.
+     */
+    PROMPT_ATTACHMENTS
   }
 }
