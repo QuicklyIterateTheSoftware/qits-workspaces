@@ -45,6 +45,24 @@ public class WorkspacePromptDraftService {
   @ConfigProperty(name = "qits.workspace.prompt-draft-max-bytes", defaultValue = "2097152")
   long maxBytes;
 
+  /**
+   * Whether this workspace has a draft the {@code taskPrompt} tool would serve — a non-blank {@code
+   * serializedPrompt} or at least one attachment. Read-only, container-free; the launch path uses
+   * it to decide whether a bootstrap turn is worth pushing (no draft ⇒ nothing to fetch, so the
+   * session stays idle).
+   */
+  @Transactional
+  public boolean hasDeliverablePrompt(String repoId, String workspaceId) {
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+    boolean hasMarkdown =
+        draftRepository
+            .findByWorkspaceId(workspace.id)
+            .map(d -> d.serializedPrompt)
+            .filter(s -> s != null && !s.isBlank())
+            .isPresent();
+    return hasMarkdown || !attachmentRepository.listByWorkspaceId(workspace.id).isEmpty();
+  }
+
   /** The workspace's current draft, or 404 when none has been saved. */
   public WorkspacePromptDraft getDraft(String repoId, String workspaceId) {
     Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
@@ -95,6 +113,20 @@ public class WorkspacePromptDraftService {
     return draftRepository
         .findByWorkspaceId(workspace.id)
         .orElseThrow(() -> new NotFoundException("No prompt draft for workspace: " + workspaceId));
+  }
+
+  /**
+   * Records that this workspace's draft was handed to an agent run — stamps {@code last_run_at},
+   * copies the live {@code prompt_version} into {@code last_run_prompt_version}, and records the
+   * launched {@code commandId} (which owns the run's session lineage). Fires a {@code PROMPT_DRAFT}
+   * hint so open views reflect "handed to the agent". A no-op when the workspace has no draft row.
+   * Called from {@code AgentLaunchService} after a launch that delivered the bootstrap turn.
+   */
+  @Transactional
+  public void recordRun(String repoId, String workspaceId, String commandId) {
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+    draftRepository.recordRun(workspace.id, commandId);
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
   }
 
   /**

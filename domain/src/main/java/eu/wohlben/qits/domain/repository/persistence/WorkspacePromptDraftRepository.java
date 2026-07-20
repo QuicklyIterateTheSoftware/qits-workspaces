@@ -23,6 +23,9 @@ public class WorkspacePromptDraftRepository implements PanacheRepository<Workspa
    * unused) Hibernate persist path.
    */
   public void upsert(Long workspaceId, String content, String serializedPrompt) {
+    // The MERGE lists only content/serialized_prompt/updated_at, so on update H2 leaves the other
+    // columns (prompt_version, last_run_*) untouched; on insert they take their DDL defaults
+    // (prompt_version 0, last_run_* null).
     getEntityManager()
         .createNativeQuery(
             "merge into workspace_prompt_draft"
@@ -32,6 +35,31 @@ public class WorkspacePromptDraftRepository implements PanacheRepository<Workspa
         .setParameter(1, workspaceId)
         .setParameter(2, content)
         .setParameter(3, serializedPrompt)
+        .executeUpdate();
+    // Bump the version in the same transaction — a PUT means the composition changed (the frontend
+    // only saves when dirty), so every upsert names a new draft state. Kept a separate statement to
+    // avoid a self-referencing subquery inside the MERGE.
+    getEntityManager()
+        .createNativeQuery(
+            "update workspace_prompt_draft set prompt_version = prompt_version + 1"
+                + " where workspace_id_fk = ?1")
+        .setParameter(1, workspaceId)
+        .executeUpdate();
+  }
+
+  /**
+   * Records that the draft's current version was handed to an agent run: stamps {@code
+   * last_run_at}, copies the live {@code prompt_version} into {@code last_run_prompt_version}, and
+   * records the launched command id. Idempotent no-op when the workspace has no draft row.
+   */
+  public void recordRun(Long workspaceId, String commandId) {
+    getEntityManager()
+        .createNativeQuery(
+            "update workspace_prompt_draft set last_run_at = current_timestamp,"
+                + " last_run_prompt_version = prompt_version, last_run_command_id = ?2"
+                + " where workspace_id_fk = ?1")
+        .setParameter(1, workspaceId)
+        .setParameter(2, commandId)
         .executeUpdate();
   }
 

@@ -44,6 +44,32 @@ public class WorkspacePromptDraft extends PanacheEntityBase {
   @Column(name = "serialized_prompt")
   public String serializedPrompt;
 
+  /**
+   * A monotonic counter bumped by every content-changing {@code upsert}. It names the exact draft
+   * state a launch handed to the agent (recorded in {@link #lastRunPromptVersion}), so the Agents
+   * tab can tell an un-run edit from an already-delivered one and not silently re-run it on
+   * re-attach. Distinct from {@link #updatedAt} (a wall-clock timestamp two rapid saves could
+   * share) — this is a strict integer ordering.
+   */
+  @Column(name = "prompt_version", nullable = false)
+  public long promptVersion;
+
+  /** When a bootstrap turn was last delivered from this draft to an agent run; null until then. */
+  @Column(name = "last_run_at")
+  public Instant lastRunAt;
+
+  /** The {@link #promptVersion} that was delivered on the last run; null until the first run. */
+  @Column(name = "last_run_prompt_version")
+  public Long lastRunPromptVersion;
+
+  /**
+   * The launched {@code Command} id of the last run — it owns the agent-session lineage (its
+   * session refs carry the {@code sessionId}), so this links a composed prompt version to the
+   * session that ran it. Null until the first run.
+   */
+  @Column(name = "last_run_command_id")
+  public String lastRunCommandId;
+
   @UpdateTimestamp
   @Column(name = "updated_at", nullable = false)
   public Instant updatedAt;
