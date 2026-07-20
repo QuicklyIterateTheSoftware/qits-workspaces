@@ -9,6 +9,7 @@ import eu.wohlben.qits.domain.error.PayloadTooLargeException;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
 import eu.wohlben.qits.domain.repository.entity.WorkspacePromptDraft;
 import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
+import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptDraftRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -32,6 +33,8 @@ public class WorkspacePromptDraftService {
   @Inject WorkspaceRepository workspaceRepository;
 
   @Inject WorkspacePromptDraftRepository draftRepository;
+
+  @Inject WorkspacePromptAttachmentRepository attachmentRepository;
 
   @Inject ObjectMapper objectMapper;
 
@@ -102,10 +105,14 @@ public class WorkspacePromptDraftService {
     return draft;
   }
 
-  /** Removes a workspace's draft (idempotent — a no-op when none exists). */
+  /**
+   * Removes a workspace's draft and its attachment rows (idempotent — a no-op when none exist). The
+   * attachments are the draft's payload, so clearing the draft clears them too.
+   */
   @Transactional
   public void deleteDraft(String repoId, String workspaceId) {
     Workspace workspace = resolveWorkspace(repoId, workspaceId);
     draftRepository.deleteByWorkspaceId(workspace.id);
+    attachmentRepository.deleteByWorkspaceId(workspace.id);
   }
 }
