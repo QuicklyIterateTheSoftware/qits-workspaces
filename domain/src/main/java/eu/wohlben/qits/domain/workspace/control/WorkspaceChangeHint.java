@@ -38,6 +38,13 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
      * frontend re-fetches {@code /active-process} and — when an id comes back — opens the separate
      * payload-bearing process SSE stream; this channel stays hint-only.
      */
-    PROCESS
+    PROCESS,
+    /**
+     * The workspace's persisted prompt draft changed — an autosave {@code PUT} or a {@code DELETE}
+     * (Discard/Clear). Fired by {@code WorkspacePromptDraftService}; the frontend invalidates the
+     * draft query so a draft edited on another device rehydrates the open view (applied only when
+     * the local draft is pristine, so mid-typing is never clobbered).
+     */
+    PROMPT_DRAFT
   }
 }
