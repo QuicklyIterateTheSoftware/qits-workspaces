@@ -3,14 +3,18 @@ package eu.wohlben.qits.domain.repository.control;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.error.PayloadTooLargeException;
+import eu.wohlben.qits.domain.repository.dto.WorkspacePromptAttachmentDataDto;
 import eu.wohlben.qits.domain.repository.entity.PromptAttachmentSource;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
 import eu.wohlben.qits.domain.repository.entity.WorkspacePromptAttachment;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.util.Base64;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -28,6 +32,8 @@ public class WorkspacePromptAttachmentService {
   @Inject WorkspaceResolver workspaceResolver;
 
   @Inject WorkspacePromptAttachmentRepository attachmentRepository;
+
+  @Inject WorkspaceChangePublisher changePublisher;
 
   /** Per-image cap on the decoded bytes; over this yields a 413. */
   @ConfigProperty(name = "qits.workspace.prompt-attachment-max-bytes", defaultValue = "2097152")
@@ -72,7 +78,32 @@ public class WorkspacePromptAttachmentService {
     attachment.source = parsedSource;
     attachment.bytes = bytes;
     attachmentRepository.persist(attachment);
+    // Fire the attachments-only SSE topic (not prompt-draft) so another open view refreshes its
+    // GET-list without every prompt-text autosave re-downloading the image payloads.
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
     return attachment;
+  }
+
+  /**
+   * A workspace's attachments (oldest first) with their base64-encoded image payloads, so the
+   * compose UI can rehydrate its thumbnail rows on load. Read inside a transaction so the
+   * {@code @Lob} bytes are encoded while the session is open. Empty (not 404) when the workspace
+   * has none.
+   */
+  @Transactional
+  public List<WorkspacePromptAttachmentDataDto> listAttachments(String repoId, String workspaceId) {
+    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+    return attachmentRepository.listByWorkspaceId(workspace.id).stream()
+        .map(
+            a ->
+                new WorkspacePromptAttachmentDataDto(
+                    a.id,
+                    a.mimeType,
+                    a.label,
+                    a.source,
+                    a.createdAt,
+                    Base64.getEncoder().encodeToString(a.bytes)))
+        .toList();
   }
 
   /** Removes one attachment scoped to its workspace; 404 if the workspace or the row is unknown. */
@@ -82,6 +113,7 @@ public class WorkspacePromptAttachmentService {
     if (!attachmentRepository.deleteByWorkspaceIdAndId(workspace.id, attachmentId)) {
       throw new NotFoundException("Attachment not found: " + attachmentId);
     }
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
   }
 
   private static PromptAttachmentSource parseSource(String source) {
