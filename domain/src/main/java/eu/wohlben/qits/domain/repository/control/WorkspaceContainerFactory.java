@@ -143,6 +143,13 @@ public class WorkspaceContainerFactory {
       // every `docker exec`, so cross-container persistence no longer relies on each launcher
       // remembering the HOME overlay.
       container.env("CLAUDE_CONFIG_DIR", claudeMount + "/.claude");
+      // Same for Kimi Code (the second harness —
+      // docs/epics/qits-coding-agents/feature-ideas/kimi-code-harness.md):
+      // KIMI_CODE_HOME relocates its entire data root (config.toml, credentials, sessions) onto the
+      // volume. Without it an in-container kimi would default to ~/.kimi-code =
+      // /workspace/.kimi-code
+      // (the image's HOME) — the clone, container-local and invisible to every other container.
+      container.env("KIMI_CODE_HOME", claudeMount + "/.kimi-code");
     }
     // Shared build caches (Maven repo + pnpm store), the same named volumes qits' devcontainer
     // mounts — so a dependency fetched by one build (a fixture `./mvnw`, an action, the agent, or

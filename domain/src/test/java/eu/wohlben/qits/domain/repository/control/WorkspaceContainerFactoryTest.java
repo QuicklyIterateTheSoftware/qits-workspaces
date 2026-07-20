@@ -46,6 +46,9 @@ class WorkspaceContainerFactoryTest {
     // ...and every in-container `claude` is pointed at it regardless of HOME, so a login persists
     // across containers even for ad-hoc runs.
     assertSequence(argv, "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude");
+    // ...and Kimi Code's data root likewise (KIMI_CODE_HOME relocates config, credentials and
+    // sessions onto the same volume).
+    assertSequence(argv, "-e", "KIMI_CODE_HOME=/claude-home/.kimi-code");
     // Shared build caches mounted + tools pointed at them, so downloads are reused across builds.
     assertSequence(argv, "-v", "qits_shared_m2:/caches/m2");
     assertSequence(argv, "-e", "MAVEN_OPTS=-Dmaven.repo.local=/caches/m2");
@@ -106,9 +109,10 @@ class WorkspaceContainerFactoryTest {
 
     List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
 
-    // The blanked caches drop their mount (and, for claude, CLAUDE_CONFIG_DIR too)...
+    // The blanked caches drop their mount (and, for claude/kimi, the credential-dir env too)...
     assertFalse(argv.contains("qits_shared_dot_claude:/claude-home"), argv.toString());
     assertFalse(argv.contains("CLAUDE_CONFIG_DIR=/claude-home/.claude"), argv.toString());
+    assertFalse(argv.contains("KIMI_CODE_HOME=/claude-home/.kimi-code"), argv.toString());
     assertFalse(argv.contains("qits_shared_pnpm:/caches/pnpm"), argv.toString());
     // ...while the still-configured Maven cache stays.
     assertSequence(argv, "-v", "qits_shared_m2:/caches/m2");
