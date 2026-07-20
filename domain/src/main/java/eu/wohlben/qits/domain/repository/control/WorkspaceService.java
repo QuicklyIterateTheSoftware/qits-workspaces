@@ -16,6 +16,7 @@ import eu.wohlben.qits.domain.repository.entity.WorkspaceStatus;
 import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
 import eu.wohlben.qits.domain.repository.persistence.RepositorySubmoduleRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceEventRepository;
+import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptDraftRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.annotation.PreDestroy;
@@ -48,6 +49,8 @@ public class WorkspaceService {
   @Inject WorkspaceRepository workspaceRepository;
 
   @Inject WorkspaceEventRepository workspaceEventRepository;
+
+  @Inject WorkspacePromptDraftRepository workspacePromptDraftRepository;
 
   @Inject MetadataService metadataService;
 
@@ -955,6 +958,10 @@ public class WorkspaceService {
                 wt.status = WorkspaceStatus.ABANDONED;
                 wt.resolvedAt = Instant.now();
                 wt.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
+                // The second termination path (beside doDiscard): the workspace is only
+                // soft-deleted, so the draft's FK cascade never fires — hard-delete it here too, or
+                // it orphans.
+                workspacePromptDraftRepository.deleteByWorkspaceId(wt.id);
                 recordEvent(wt, WorkspaceEventType.ABANDONED, wt.branch, null, null);
               });
       throw new NotFoundException(
@@ -1429,6 +1436,10 @@ public class WorkspaceService {
           branch,
           null,
           null);
+      // The prompt draft is pure pre-launch composition state, not a durable record like the
+      // history events — so it is hard-deleted with the workspace (its FK cascade never fires
+      // because the workspace row is only soft-deleted).
+      workspacePromptDraftRepository.deleteByWorkspaceId(workspace.id);
       metadataService.deleteWorkspaceMetadata(repoId, workspace.workspaceId);
     } catch (InternalServerErrorException e) {
       throw e;
