@@ -16,6 +16,7 @@ import eu.wohlben.qits.domain.repository.entity.WorkspaceStatus;
 import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
 import eu.wohlben.qits.domain.repository.persistence.RepositorySubmoduleRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceEventRepository;
+import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptDraftRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -51,6 +52,8 @@ public class WorkspaceService {
   @Inject WorkspaceEventRepository workspaceEventRepository;
 
   @Inject WorkspacePromptDraftRepository workspacePromptDraftRepository;
+
+  @Inject WorkspacePromptAttachmentRepository workspacePromptAttachmentRepository;
 
   @Inject MetadataService metadataService;
 
@@ -962,6 +965,7 @@ public class WorkspaceService {
                 // soft-deleted, so the draft's FK cascade never fires — hard-delete it here too, or
                 // it orphans.
                 workspacePromptDraftRepository.deleteByWorkspaceId(wt.id);
+                workspacePromptAttachmentRepository.deleteByWorkspaceId(wt.id);
                 recordEvent(wt, WorkspaceEventType.ABANDONED, wt.branch, null, null);
               });
       throw new NotFoundException(
@@ -1436,10 +1440,11 @@ public class WorkspaceService {
           branch,
           null,
           null);
-      // The prompt draft is pure pre-launch composition state, not a durable record like the
-      // history events — so it is hard-deleted with the workspace (its FK cascade never fires
-      // because the workspace row is only soft-deleted).
+      // The prompt draft (and its attachment rows) is pure pre-launch composition state, not a
+      // durable record like the history events — so it is hard-deleted with the workspace (its FK
+      // cascade never fires because the workspace row is only soft-deleted).
       workspacePromptDraftRepository.deleteByWorkspaceId(workspace.id);
+      workspacePromptAttachmentRepository.deleteByWorkspaceId(workspace.id);
       metadataService.deleteWorkspaceMetadata(repoId, workspace.workspaceId);
     } catch (InternalServerErrorException e) {
       throw e;
