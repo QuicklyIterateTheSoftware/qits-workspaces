@@ -2,6 +2,7 @@ package eu.wohlben.qits.domain.process.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.process.dto.TechnicalProcessFrame;
@@ -130,6 +131,66 @@ class TechnicalProcessTest {
         listener.frames.stream()
             .anyMatch(f -> "line".equals(f.kind()) && f.line().contains("boom")));
     assertEquals("failed", listener.frames.get(listener.frames.size() - 1).status());
+  }
+
+  @Test
+  void aHintedSettleBroadcastsTheHintAndReplaysItToLateSubscribers() {
+    TechnicalProcess process = process();
+    RecordingListener live = new RecordingListener();
+    process.attach(live);
+    process.openSegment("push:repo.git");
+    process.settleSegment(
+        "push:repo.git", false, TechnicalProcessFrame.HINT_REMOTE_AUTH, "child-7");
+
+    TechnicalProcessFrame settle =
+        live.frames.stream()
+            .filter(f -> "segment-settled".equals(f.kind()))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("remote-auth", settle.hint());
+    assertEquals("child-7", settle.hintTarget());
+
+    // The hint (and its target) is stored on the segment, so a late attacher's replay carries it
+    // too.
+    RecordingListener late = new RecordingListener();
+    process.attach(late);
+    TechnicalProcessFrame replayed =
+        late.frames.stream()
+            .filter(f -> "segment-settled".equals(f.kind()))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("remote-auth", replayed.hint());
+    assertEquals("child-7", replayed.hintTarget());
+
+    // An unhinted settle stays hint-free.
+    process.openSegment("other");
+    process.settleSegment("other", false);
+    TechnicalProcessFrame plain =
+        live.frames.stream()
+            .filter(f -> "segment-settled".equals(f.kind()) && "other".equals(f.segment()))
+            .findFirst()
+            .orElseThrow();
+    assertNull(plain.hint());
+    assertNull(plain.hintTarget());
+  }
+
+  @Test
+  void aHintedFailProvisionHintsTheSegmentsItFails() {
+    TechnicalProcess process = process();
+    RecordingListener listener = new RecordingListener();
+    process.attach(listener);
+    process.openSegment("pull:repo.git");
+    process.failProvision(
+        "fatal: Authentication failed for 'x'", TechnicalProcessFrame.HINT_REMOTE_AUTH, "repo-1");
+
+    TechnicalProcessFrame settle =
+        listener.frames.stream()
+            .filter(f -> "segment-settled".equals(f.kind()))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("remote-auth", settle.hint());
+    assertEquals("repo-1", settle.hintTarget());
+    assertTrue(process.isTerminal());
   }
 
   @Test

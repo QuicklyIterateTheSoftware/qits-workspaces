@@ -70,6 +70,8 @@ public final class TechnicalProcess {
     int tailBytes;
     int elidedLines;
     Boolean ok; // null while open
+    String hint; // optional failure classification, set at settle time
+    String hintTarget; // optional UI target for the hint (e.g. the repo id to sign into)
 
     Segment(String name) {
       this.name = name;
@@ -148,7 +150,8 @@ public final class TechnicalProcess {
       }
       if (segment.ok != null) {
         listener.onFrame(
-            TechnicalProcessFrame.segmentSettled(segment.name, seq.getAndIncrement(), segment.ok));
+            TechnicalProcessFrame.segmentSettled(
+                segment.name, seq.getAndIncrement(), segment.ok, segment.hint, segment.hintTarget));
       }
     }
     if (terminal) {
@@ -198,6 +201,17 @@ public final class TechnicalProcess {
 
   /** Settle a segment {@code ok}/{@code failed}. Idempotent — the first verdict wins. */
   public synchronized void settleSegment(String segmentName, boolean ok) {
+    settleSegment(segmentName, ok, null, null);
+  }
+
+  /**
+   * {@link #settleSegment(String, boolean)} with an optional failure-classification {@code hint}
+   * (e.g. {@link TechnicalProcessFrame#HINT_REMOTE_AUTH}) and a {@code hintTarget} the UI acts on
+   * (e.g. the repo id to sign into) — both stored on the segment so a late attacher's replay
+   * carries them too.
+   */
+  public synchronized void settleSegment(
+      String segmentName, boolean ok, String hint, String hintTarget) {
     if (terminal) {
       return;
     }
@@ -207,7 +221,11 @@ public final class TechnicalProcess {
       return;
     }
     segment.ok = ok;
-    broadcast(TechnicalProcessFrame.segmentSettled(segmentName, seq.getAndIncrement(), ok));
+    segment.hint = hint;
+    segment.hintTarget = hintTarget;
+    broadcast(
+        TechnicalProcessFrame.segmentSettled(
+            segmentName, seq.getAndIncrement(), ok, hint, hintTarget));
     maybeFinish();
   }
 
@@ -233,6 +251,15 @@ public final class TechnicalProcess {
    * before the throw), then end the process.
    */
   public synchronized void failProvision(String message) {
+    failProvision(message, null, null);
+  }
+
+  /**
+   * {@link #failProvision(String)} with an optional failure-classification {@code hint} and {@code
+   * hintTarget} riding the settle of every segment this fails (see {@link #settleSegment(String,
+   * boolean, String, String)}).
+   */
+  public synchronized void failProvision(String message, String hint, String hintTarget) {
     if (terminal) {
       return;
     }
@@ -252,7 +279,11 @@ public final class TechnicalProcess {
     for (Segment segment : segments.values()) {
       if (segment.ok == null) {
         segment.ok = false;
-        broadcast(TechnicalProcessFrame.segmentSettled(segment.name, seq.getAndIncrement(), false));
+        segment.hint = hint;
+        segment.hintTarget = hintTarget;
+        broadcast(
+            TechnicalProcessFrame.segmentSettled(
+                segment.name, seq.getAndIncrement(), false, hint, hintTarget));
       }
     }
     finishProvision(false);

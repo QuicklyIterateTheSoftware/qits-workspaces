@@ -55,9 +55,23 @@ public class TechnicalProcessRegistry {
   private final Map<String, RepoActive> activeByRepository = new ConcurrentHashMap<>();
 
   /**
-   * The live repository-scoped process plus its operation kind (e.g. {@code pull}/{@code sync}).
+   * The live repository-scoped occupant plus its operation kind (e.g. {@code pull}/{@code sync}).
+   * Exactly one of {@code processId} (a streamed {@link TechnicalProcess}) or {@code
+   * reservationToken} (a {@link #reserveRepository lightweight lock}) is set.
    */
-  private record RepoActive(String processId, String kind) {}
+  private record RepoActive(String processId, String kind, String reservationToken) {
+    static RepoActive process(String processId, String kind) {
+      return new RepoActive(processId, kind, null);
+    }
+
+    static RepoActive reservation(String token, String kind) {
+      return new RepoActive(null, kind, token);
+    }
+
+    boolean isReservation() {
+      return reservationToken != null;
+    }
+  }
 
   private final ScheduledExecutorService scheduler =
       Executors.newSingleThreadScheduledExecutor(
@@ -104,21 +118,60 @@ public class TechnicalProcessRegistry {
    */
   public synchronized RepoProcessLease beginForRepository(String repoId, String kind) {
     RepoActive current = activeByRepository.get(repoId);
-    if (current != null) {
-      TechnicalProcess existing = byId.get(current.processId());
-      if (existing != null && !existing.isTerminal()) {
-        return kind.equals(current.kind())
-            ? new RepoProcessLease.Reused(current.processId())
-            : new RepoProcessLease.Conflict(current.kind());
+    if (current != null && isLive(current)) {
+      // A reservation (the sign-in lock) is never a reusable process — any streamed op conflicts.
+      if (current.isReservation() || !kind.equals(current.kind())) {
+        return new RepoProcessLease.Conflict(current.kind());
       }
+      return new RepoProcessLease.Reused(current.processId());
     }
     String id = UUID.randomUUID().toString();
     TechnicalProcess process = new TechnicalProcess(id, repoId, null, this::onDone);
     byId.put(id, process);
-    activeByRepository.put(repoId, new RepoActive(id, kind));
+    activeByRepository.put(repoId, RepoActive.process(id, kind));
     scheduleIdleReaper(process);
     changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.PROCESS);
     return new RepoProcessLease.Fresh(process);
+  }
+
+  /**
+   * Reserve a repository for work that runs on its own channel (the interactive sign-in terminal),
+   * not as a streamed process — see {@link RepoReservation}. Shares the {@code activeByRepository}
+   * slot with {@link #beginForRepository} (so a reservation and a pull/sync/push are mutually
+   * exclusive), but registers no {@link TechnicalProcess}: no idle reaper, and invisible to {@link
+   * #activeForRepository} so it opens no empty process dialog. The caller must {@link
+   * #releaseRepository} it with the returned token when the work ends.
+   */
+  public synchronized RepoReservation reserveRepository(String repoId, String kind) {
+    RepoActive current = activeByRepository.get(repoId);
+    if (current != null && isLive(current)) {
+      return new RepoReservation.Conflict(current.kind());
+    }
+    String token = UUID.randomUUID().toString();
+    activeByRepository.put(repoId, RepoActive.reservation(token, kind));
+    return new RepoReservation.Acquired(token);
+  }
+
+  /**
+   * Release a reservation, but only if this exact token still holds the repository (idempotent).
+   */
+  public synchronized void releaseRepository(String repoId, String token) {
+    RepoActive current = activeByRepository.get(repoId);
+    if (current != null && token.equals(current.reservationToken())) {
+      activeByRepository.remove(repoId);
+    }
+  }
+
+  /**
+   * Whether {@code active} still holds the repository — a reservation always does, a process until
+   * terminal.
+   */
+  private boolean isLive(RepoActive active) {
+    if (active.isReservation()) {
+      return true;
+    }
+    TechnicalProcess existing = byId.get(active.processId());
+    return existing != null && !existing.isTerminal();
   }
 
   /**
@@ -151,9 +204,18 @@ public class TechnicalProcessRegistry {
     return Optional.ofNullable(activeByWorkspace.get(workspaceKey(repoId, workspaceId)));
   }
 
-  /** The id of the repository's currently-running process, if any (cleared on done). */
+  /**
+   * The id of the repository's currently-running <em>streamed</em> process, if any (cleared on
+   * done). A bare {@link #reserveRepository reservation} (the sign-in lock) is deliberately
+   * invisible here — it has no frame stream to attach to, so surfacing it would open an empty
+   * process dialog on reload.
+   */
   public Optional<String> activeForRepository(String repoId) {
-    return Optional.ofNullable(activeByRepository.get(repoId)).map(RepoActive::processId);
+    RepoActive active = activeByRepository.get(repoId);
+    if (active == null || active.isReservation()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(active.processId());
   }
 
   private void onDone(TechnicalProcess process) {
@@ -178,7 +240,9 @@ public class TechnicalProcessRegistry {
    */
   private synchronized void clearRepositoryIfCurrent(TechnicalProcess process) {
     RepoActive current = activeByRepository.get(process.repoId());
-    if (current != null && current.processId().equals(process.id())) {
+    // Null-safe: the slot may now hold a reservation (null processId) that must not be cleared
+    // here.
+    if (current != null && process.id().equals(current.processId())) {
       activeByRepository.remove(process.repoId());
     }
   }

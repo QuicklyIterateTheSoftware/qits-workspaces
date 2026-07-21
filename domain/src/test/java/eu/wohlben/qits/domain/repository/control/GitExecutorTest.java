@@ -43,6 +43,14 @@ class GitExecutorTest {
   }
 
   @Test
+  void everySpawnDisablesGitTerminalPrompting() throws Exception {
+    // GIT_TERMINAL_PROMPT=0 rides every spawned process: a transport that would prompt for
+    // credentials fails immediately (classifiable exit 128) instead of blocking waitFor() forever.
+    String value = git.exec(null, "sh", "-c", "printf '%s' \"$GIT_TERMINAL_PROMPT\"");
+    assertEquals("0", value);
+  }
+
+  @Test
   void aNonZeroExitStillThrowsWithTheCapturedOutput() {
     RuntimeException thrown =
         assertThrows(
