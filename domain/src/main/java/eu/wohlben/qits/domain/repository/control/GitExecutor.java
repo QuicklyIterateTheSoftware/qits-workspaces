@@ -55,6 +55,10 @@ public class GitExecutor {
     if (cwd != null) {
       pb.directory(cwd);
     }
+    // Never let a transport prompt: there is no TTY here and waitFor() has no timeout, so a git
+    // that decides to ask for credentials would block forever. With the flag a missing credential
+    // is an immediate, classifiable exit 128 ("could not read Username ...") instead.
+    pb.environment().put("GIT_TERMINAL_PROMPT", "0");
     pb.redirectErrorStream(true);
     Process p = pb.start();
     String output;
