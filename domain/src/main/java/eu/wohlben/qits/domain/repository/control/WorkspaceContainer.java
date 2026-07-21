@@ -8,8 +8,9 @@ import java.util.Map;
 /**
  * A framework-free fluent builder for a workspace container's {@code docker run} argv — the
  * container-creation sibling of {@link eu.wohlben.qits.domain.agent.control.CodingAgent}. It
- * accumulates the run parameters (name, user, labels, host aliases, network, volumes, image,
- * command) and renders them, in a fixed order, into the argv that follows {@code docker run}.
+ * accumulates the run parameters (name, user, labels, host aliases, network, resource limits,
+ * volumes, image, command) and renders them, in a fixed order, into the argv that follows {@code
+ * docker run}.
  *
  * <p>Callers do not construct this directly with the cross-cutting config; they obtain a pre-seeded
  * instance from {@link WorkspaceContainerFactory} (which guarantees the shared credential volume,
@@ -27,6 +28,9 @@ public final class WorkspaceContainer {
   private final Map<String, String> env = new LinkedHashMap<>();
   private final List<String[]> volumes = new ArrayList<>(); // {volumeName, mountPath}
   private String network;
+  private String memory;
+  private String pidsLimit;
+  private String cpus;
   private String image;
   private final List<String> command = new ArrayList<>();
 
@@ -77,6 +81,30 @@ public final class WorkspaceContainer {
     return this;
   }
 
+  /**
+   * Cap the container's memory ({@code --memory <limit>} <em>and</em> {@code --memory-swap} set to
+   * the same value, so the container can neither exceed the cap nor swap-thrash the host past it).
+   * With the cgroup limit in place every JVM inside sizes its default heap against it (container
+   * support is on by default), so no per-tool {@code -Xmx} plumbing is needed. Blank/null adds
+   * nothing (unlimited).
+   */
+  public WorkspaceContainer memory(String limit) {
+    this.memory = limit;
+    return this;
+  }
+
+  /** Cap the container's process/thread count ({@code --pids-limit}). Blank/null adds nothing. */
+  public WorkspaceContainer pidsLimit(String pidsLimit) {
+    this.pidsLimit = pidsLimit;
+    return this;
+  }
+
+  /** Cap the container's CPU share ({@code --cpus}). Blank/null adds nothing. */
+  public WorkspaceContainer cpus(String cpus) {
+    this.cpus = cpus;
+    return this;
+  }
+
   public WorkspaceContainer image(String image) {
     this.image = image;
     return this;
@@ -92,8 +120,9 @@ public final class WorkspaceContainer {
 
   /**
    * The {@code docker run} argv <em>after</em> the runtime binary and the {@code run} verb: {@code
-   * -d --init --name … --user … --label … --add-host=… --network … -e … -v … <image> <command…>},
-   * in that fixed order regardless of the order setters were called in.
+   * -d --init --name … --user … --label … --add-host=… --network … --memory … --memory-swap …
+   * --pids-limit … --cpus … -e … -v … <image> <command…>}, in that fixed order regardless of the
+   * order setters were called in.
    */
   public List<String> toRunArgv() {
     List<String> argv = new ArrayList<>();
@@ -117,6 +146,21 @@ public final class WorkspaceContainer {
     if (network != null && !network.isBlank()) {
       argv.add("--network");
       argv.add(network);
+    }
+    if (memory != null && !memory.isBlank()) {
+      argv.add("--memory");
+      argv.add(memory);
+      // Same value, so the cap is hard: the container can't spill the difference into host swap.
+      argv.add("--memory-swap");
+      argv.add(memory);
+    }
+    if (pidsLimit != null && !pidsLimit.isBlank()) {
+      argv.add("--pids-limit");
+      argv.add(pidsLimit);
+    }
+    if (cpus != null && !cpus.isBlank()) {
+      argv.add("--cpus");
+      argv.add(cpus);
     }
     for (Map.Entry<String, String> variable : env.entrySet()) {
       argv.add("-e");

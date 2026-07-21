@@ -66,6 +66,31 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "qits.workspace.timezone")
   Optional<String> timezone;
 
+  /**
+   * Hard memory cap for every workspace container ({@code --memory} + {@code --memory-swap} set to
+   * the same value, so a container can neither exceed the cap nor swap-thrash the host past it).
+   * Without it a container sees the whole host's RAM and every JVM inside sizes its default heap
+   * against that — a dev daemon (Maven launcher JVM + forked dev JVM + node dev server) can then
+   * OOM the entire host
+   * (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md). With the
+   * cgroup limit in place the JVMs size against it automatically (container support is default-on),
+   * so no per-tool {@code -Xmx} plumbing is needed. Blank/absent disables the cap; the shipped
+   * default is {@code 4g} (service/cli application.properties). Optional because SmallRye treats an
+   * empty property value as "no value".
+   */
+  @ConfigProperty(name = "qits.workspace.memory-limit")
+  Optional<String> memoryLimit;
+
+  /**
+   * Process/thread cap ({@code --pids-limit}, fork-bomb guard). Blank/absent (default) disables.
+   */
+  @ConfigProperty(name = "qits.workspace.pids-limit")
+  Optional<String> pidsLimit;
+
+  /** CPU cap ({@code --cpus}). Blank/absent (default) disables. */
+  @ConfigProperty(name = "qits.workspace.cpus")
+  Optional<String> cpus;
+
   @Inject GitIdentity gitIdentity;
 
   static final String MAVEN_MOUNT = "/caches/m2";
@@ -99,9 +124,10 @@ public class WorkspaceContainerFactory {
    * deterministic name, the host uid, the four {@code qits.*} labels startup reconciliation reads
    * back, the {@code host.docker.internal} alias Linux needs, the shared {@code qits-net} network,
    * the configured git commit identity as {@code GIT_*} env ({@link GitIdentity}), the shared
-   * credential + build-cache volumes (whenever configured), the image, and {@code sleep infinity}
-   * as the command. Everything safety-critical is already in place; the caller may keep chaining
-   * but need not.
+   * credential + build-cache volumes (whenever configured), the configured resource limits (memory
+   * hard cap, pids, cpus — whenever configured), the image, and {@code sleep infinity} as the
+   * command. Everything safety-critical is already in place; the caller may keep chaining but need
+   * not.
    */
   public WorkspaceContainer forWorkspace(
       String repoId, String workspaceId, String branch, String parent) {
@@ -122,6 +148,11 @@ public class WorkspaceContainerFactory {
             // Same timezone as qits (host -> devcontainer -> workspace container), so wall-clock
             // output agrees everywhere. The kernel clock is shared already; TZ is the only delta.
             .env("TZ", timezone());
+    // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
+    // against the whole host's RAM and a dev daemon can OOM the host. Blank config disables a cap.
+    memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
+    pidsLimit.filter(v -> !v.isBlank()).ifPresent(container::pidsLimit);
+    cpus.filter(v -> !v.isBlank()).ifPresent(container::cpus);
     // The commit identity, as container-level env so *every* git process in the container — qits'
     // own verbs, the coding agent, actions, ad-hoc shells — inherits it regardless of cwd or
     // .git/config (identity env beats every git config level).

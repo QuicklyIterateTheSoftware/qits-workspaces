@@ -16,6 +16,9 @@ class WorkspaceContainerTest {
         new WorkspaceContainer()
             .command("sleep", "infinity")
             .image("img:latest")
+            .cpus("2")
+            .pidsLimit("2048")
+            .memory("4g")
             .network("qits-net")
             .volume("vol", "/mnt")
             .addHost("host.docker.internal:host-gateway")
@@ -37,6 +40,14 @@ class WorkspaceContainerTest {
             "--add-host=host.docker.internal:host-gateway",
             "--network",
             "qits-net",
+            "--memory",
+            "4g",
+            "--memory-swap",
+            "4g",
+            "--pids-limit",
+            "2048",
+            "--cpus",
+            "2",
             "-v",
             "vol:/mnt",
             "img:latest",
@@ -46,7 +57,7 @@ class WorkspaceContainerTest {
   }
 
   @Test
-  void omitsVolumeUserAndNetworkWhenNoneSet() {
+  void omitsVolumeUserNetworkAndLimitsWhenNoneSet() {
     List<String> argv =
         new WorkspaceContainer().name("c").image("img").command("sleep", "infinity").toRunArgv();
 
@@ -54,7 +65,20 @@ class WorkspaceContainerTest {
     assertFalse(argv.contains("--network"), argv.toString());
     assertFalse(argv.contains("-p"), argv.toString());
     assertFalse(argv.contains("--user"), argv.toString());
+    assertFalse(argv.contains("--memory"), argv.toString());
+    assertFalse(argv.contains("--pids-limit"), argv.toString());
+    assertFalse(argv.contains("--cpus"), argv.toString());
     assertEquals(List.of("-d", "--init", "--name", "c", "img", "sleep", "infinity"), argv);
+  }
+
+  @Test
+  void memoryRendersAsHardCapWithEqualSwapAndBlankAddsNothing() {
+    List<String> capped = new WorkspaceContainer().image("img").memory("4g").toRunArgv();
+    // --memory-swap equals --memory: the container can't swap-thrash the host past the cap.
+    assertEquals(List.of("-d", "--init", "--memory", "4g", "--memory-swap", "4g", "img"), capped);
+
+    List<String> blank = new WorkspaceContainer().image("img").memory(" ").toRunArgv();
+    assertEquals(List.of("-d", "--init", "img"), blank);
   }
 
   @Test

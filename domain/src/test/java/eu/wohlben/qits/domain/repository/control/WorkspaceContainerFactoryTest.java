@@ -25,6 +25,11 @@ class WorkspaceContainerFactoryTest {
     f.mavenVolume = "qits_shared_m2";
     f.pnpmVolume = "qits_shared_pnpm";
     f.timezone = Optional.empty();
+    // Mirrors the shipped default (service/cli application.properties): a hard memory cap on every
+    // container, pids/cpus off.
+    f.memoryLimit = Optional.of("4g");
+    f.pidsLimit = Optional.empty();
+    f.cpus = Optional.empty();
     f.gitIdentity = identity("qits", "qits@local");
     return f;
   }
@@ -68,6 +73,14 @@ class WorkspaceContainerFactoryTest {
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());
+    // The hard memory cap (--memory-swap equal, so the container can't swap past it either) —
+    // without it a dev daemon's JVMs size against the whole host's RAM and can OOM the host
+    // (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md).
+    assertSequence(argv, "--memory", "4g");
+    assertSequence(argv, "--memory-swap", "4g");
+    // pids/cpus are off by default.
+    assertFalse(argv.contains("--pids-limit"), argv.toString());
+    assertFalse(argv.contains("--cpus"), argv.toString());
     // The blank default timezone inherits qits' own zone, so container wall-clock matches qits'.
     assertSequence(argv, "-e", "TZ=" + ZoneId.systemDefault().getId());
     // The commit identity as container-level env, so every git process in the container (qits'
@@ -99,6 +112,29 @@ class WorkspaceContainerFactoryTest {
     List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
 
     assertSequence(argv, "-e", "TZ=Pacific/Auckland");
+  }
+
+  @Test
+  void aBlankMemoryLimitDisablesTheCap() {
+    WorkspaceContainerFactory f = factory();
+    f.memoryLimit = Optional.of("  ");
+
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+
+    assertFalse(argv.contains("--memory"), argv.toString());
+    assertFalse(argv.contains("--memory-swap"), argv.toString());
+  }
+
+  @Test
+  void configuredPidsAndCpuLimitsFlowIntoTheArgv() {
+    WorkspaceContainerFactory f = factory();
+    f.pidsLimit = Optional.of("2048");
+    f.cpus = Optional.of("2.5");
+
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+
+    assertSequence(argv, "--pids-limit", "2048");
+    assertSequence(argv, "--cpus", "2.5");
   }
 
   @Test
