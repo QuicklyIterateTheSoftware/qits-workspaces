@@ -4,6 +4,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -59,6 +61,11 @@ public class GitExecutor {
     // that decides to ask for credentials would block forever. With the flag a missing credential
     // is an immediate, classifiable exit 128 ("could not read Username ...") instead.
     pb.environment().put("GIT_TERMINAL_PROMPT", "0");
+    // Force English output regardless of the host locale: callers classify failures (e.g.
+    // non-fast-forward rejection, auth failure) by matching substrings in git's message, which
+    // would silently miss a localized translation.
+    pb.environment().put("LC_ALL", "C");
+    pb.environment().put("LANG", "C");
     pb.redirectErrorStream(true);
     Process p = pb.start();
     String output;
@@ -97,6 +104,23 @@ public class GitExecutor {
    */
   public ExecResult showFile(java.io.File bareRepo, String rev, String path) throws Exception {
     return execAllowNonZero(bareRepo, "git", "show", "--end-of-options", rev + ":" + path);
+  }
+
+  /**
+   * The conflicting paths out of a conflicted {@code merge-tree --write-tree --name-only} output:
+   * the lines between the written tree OID and the blank separator before the informational
+   * messages.
+   */
+  public static List<String> conflictedFiles(String mergeTreeOutput) {
+    List<String> files = new ArrayList<>();
+    String[] lines = mergeTreeOutput.split("\n", -1);
+    for (int i = 1; i < lines.length; i++) {
+      if (lines[i].isBlank()) {
+        break;
+      }
+      files.add(lines[i].trim());
+    }
+    return files;
   }
 
   public String getCurrentBranch(Path workspacePath) {
