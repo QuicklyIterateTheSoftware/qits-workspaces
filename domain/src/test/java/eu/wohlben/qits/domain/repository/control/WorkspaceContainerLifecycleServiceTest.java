@@ -246,7 +246,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
-  public void stopContainerRemovesTheContainerButKeepsTheWorkspaceActive() throws Exception {
+  public void stopContainerPausesInPlaceKeepingTheWorkspaceActive() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
@@ -254,14 +254,39 @@ public class WorkspaceContainerLifecycleServiceTest {
 
     workspaceService.stopContainer(repoId, "feat");
 
-    assertFalse(containers.exists(container), "graceful stop removes the container");
+    // A graceful stop PAUSES in place (docker stop), it does not remove the container: the
+    // container
+    // survives (present but not running) so its /workspace clone is kept for a lossless resume.
+    assertTrue(containers.exists(container), "graceful stop keeps the container present");
+    assertFalse(containers.isRunning(container), "graceful stop leaves it not running");
     WorkspaceDto dto = workspaceDto(repoId, "feat");
     assertEquals(WorkspaceStatus.ACTIVE, dto.status(), "the workspace stays active");
     assertEquals(WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus());
 
-    // ...and it can be brought straight back.
+    // ...and it can be brought straight back — resumed in place (start), not re-provisioned.
     workspaceService.ensureContainer(repoId, "feat");
-    assertTrue(containers.exists(container));
+    assertTrue(containers.isRunning(container));
+  }
+
+  @Test
+  public void stopContainerPreservesUncommittedWorkingTreeChanges() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    String container = containers.containerName("feat", repoId);
+
+    // Working-tree state that is NOT a pushed commit — the exact thing the old stop (docker rm -f +
+    // re-clone) silently destroyed: an untracked file. A real pause must keep it.
+    containers.exec(container, "/workspace", Map.of(), "bash", "-lc", "echo draft > scratch.txt");
+
+    workspaceService.stopContainer(repoId, "feat");
+    // Resumed in place (same container, not a fresh clone).
+    workspaceService.ensureContainer(repoId, "feat");
+
+    assertEquals(
+        "draft",
+        containers.exec(container, "/workspace", Map.of(), "cat", "scratch.txt").output().trim(),
+        "an untracked working-tree file survives stop -> resume");
   }
 
   @Test
@@ -353,7 +378,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
-  public void stopContainerFiresStoppingBeforeRm() throws Exception {
+  public void stopContainerFiresStoppingWhileTheContainerIsStillRunning() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
@@ -366,8 +391,8 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertTrue(seen.get(0).event().graceful(), "a graceful stop asks for a graceful settle");
     assertTrue(
         seen.get(0).containerExistedWhenObserved(),
-        "the stopping event fires before containers.rm — the container is still present when"
-            + " observed");
+        "the stopping event fires before containers.stop — daemons settle while the container is"
+            + " still present");
   }
 
   @Test

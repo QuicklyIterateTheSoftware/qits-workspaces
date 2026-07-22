@@ -401,6 +401,9 @@ public class WorkspaceService {
     // out-of-band; the persisted column carries the STOPPED/PROVISIONING/FAILED signal otherwise.
     Set<String> runningIds =
         containers.listWorkspaceContainers(repoId).stream()
+            // ps -a lists stopped containers too; only genuinely-running ones count as RUNNING (a
+            // deliberately stopped or Exited container is present but must read as STOPPED).
+            .filter(ContainerRuntime.ContainerInfo::running)
             .map(ContainerRuntime.ContainerInfo::workspaceId)
             .collect(Collectors.toSet());
     // The branch tree shows only live workspaces; resolved ones live in the history view.
@@ -1085,11 +1088,13 @@ public class WorkspaceService {
   }
 
   /**
-   * Gracefully stops a workspace's container: pushes its branch to origin first (so committed work
-   * is durable), removes the container, and marks the workspace {@code STOPPED} while leaving it
-   * ACTIVE. The container is re-provisioned on next access via {@link #ensureContainer}. This is
-   * the lossless counterpart to an unexpected container death — the one path that guarantees
-   * unpushed commits are preserved before the container goes away.
+   * Gracefully pauses a workspace's container: pushes its branch to origin first (a durability
+   * backstop for committed work), {@code docker stop}s the container <em>in place</em> — keeping it
+   * and its {@code /workspace} clone — and marks the workspace {@code STOPPED} while leaving it
+   * ACTIVE. On next access {@link #ensureContainer} resumes the same container via {@code
+   * containers.start} (its {@code exists()} → {@code start()} branch), so the working tree survives
+   * intact: uncommitted/untracked files and unpushed commits alike. This is a true pause, not a
+   * teardown — the lossy {@link #rm} is reserved for discard (which deletes the branch afterward).
    */
   @Transactional
   public void stopContainer(String repoId, String workspaceId) {
@@ -1098,11 +1103,12 @@ public class WorkspaceService {
             .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
     pushBranch(repoId, workspaceId, workspace.branch);
-    // Settle the workspace's daemons before the container goes away, so a live daemon's
-    // disappearance reads as a deliberate STOPPED (graceful: signal + grace) instead of a crash the
-    // restart policy would resurrect. Synchronous — completes while the container still exists.
+    // Settle the workspace's daemons before the container stops, so a live daemon's disappearance
+    // reads as a deliberate STOPPED (graceful: signal + grace) instead of a crash the restart
+    // policy
+    // would resurrect. Synchronous — completes while the container is still running.
     containerEvents.fireStopping(repoId, workspaceId, true);
-    containers.rm(containers.containerName(workspaceId, repoId));
+    containers.stop(containers.containerName(workspaceId, repoId));
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
   }
 
@@ -1445,9 +1451,10 @@ public class WorkspaceService {
       String branch = workspace.branch;
 
       // Remove the workspace's container. Discard is intentionally lossy: unlike the graceful
-      // stopContainer (which pushes first so recreation is lossless), here we delete the branch
-      // right after, so pushing unpushed /workspace commits would be pointless — the operator asked
-      // to throw this work away. Settle any live daemons first (immediate — no graceful signal, the
+      // stopContainer (which docker-stops in place so the container and its /workspace survive),
+      // here we delete the container AND the branch right after, so preserving /workspace would be
+      // pointless — the operator asked to throw this work away. Settle any live daemons first
+      // (immediate — no graceful signal, the
       // work is being discarded) so their disappearance doesn't read as a crash to be resurrected.
       containerEvents.fireStopping(repoId, workspace.workspaceId, false);
       containers.rm(containers.containerName(workspace.workspaceId, repoId));

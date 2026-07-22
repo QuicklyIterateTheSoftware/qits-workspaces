@@ -186,6 +186,15 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
+  public void stop(String container) {
+    // Pause in place: keep the container present (in byName) and its /workspace clone on disk, just
+    // mark it Exited — so a subsequent start() is verifiably lossless, mirroring `docker stop`.
+    if (byName.containsKey(container)) {
+      stopped.add(container);
+    }
+  }
+
+  @Override
   public void rm(String container) {
     stopped.remove(container);
     Info info = byName.remove(container);
@@ -217,12 +226,10 @@ public class FakeContainerRuntime implements ContainerRuntime {
     List<ContainerInfo> infos = new ArrayList<>();
     for (Info info : byName.values()) {
       if (info.repoId().equals(repoId)) {
+        String name = containerName(info.workspaceId(), repoId);
         infos.add(
             new ContainerInfo(
-                containerName(info.workspaceId(), repoId),
-                info.workspaceId(),
-                info.branch(),
-                info.parent()));
+                name, info.workspaceId(), info.branch(), info.parent(), !stopped.contains(name)));
       }
     }
     return infos;

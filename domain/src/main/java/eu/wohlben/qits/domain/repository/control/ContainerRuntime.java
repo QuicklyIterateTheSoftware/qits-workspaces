@@ -19,8 +19,15 @@ public interface ContainerRuntime {
   /** The exit code and combined stdout/stderr of a finished container command. */
   record ExecResult(int exitCode, String output) {}
 
-  /** A discovered workspace container, read back from its {@code qits.*} labels. */
-  record ContainerInfo(String name, String workspaceId, String branch, String parent) {}
+  /**
+   * A discovered workspace container, read back from its {@code qits.*} labels. {@code running}
+   * distinguishes a live container from a present-but-{@code Exited} one (a deliberate {@link
+   * #stop} or an out-of-band death): the listing includes both (it drives reconcile/adoption, which
+   * must see stopped containers), so callers that mean "actually running" — e.g. the workspace
+   * runtime status — must filter on this flag rather than mere presence.
+   */
+  record ContainerInfo(
+      String name, String workspaceId, String branch, String parent, boolean running) {}
 
   /** The deterministic container name for a workspace — no {@code inspect} round-trip needed. */
   String containerName(String workspaceId, String repoId);
@@ -114,7 +121,20 @@ public interface ContainerRuntime {
    */
   void start(String container);
 
-  /** Force-removes the container ({@code docker rm -f}); best-effort, never throws. */
+  /**
+   * Gracefully stops a running container ({@code docker stop} — SIGTERM + grace) <em>without</em>
+   * removing it, so the container and its {@code /workspace} clone survive for a later lossless
+   * {@link #start}. This is the pause half of a deliberate workspace stop: unlike {@link #rm} it
+   * preserves the working tree (uncommitted/untracked files and unpushed commits alike).
+   * Best-effort, never throws.
+   */
+  void stop(String container);
+
+  /**
+   * Force-removes the container ({@code docker rm -f}); best-effort, never throws. Destroys the
+   * container's writable layer / {@code /workspace} clone — use only when the work is being
+   * discarded, not to pause a workspace (that is {@link #stop}).
+   */
   void rm(String container);
 
   /**

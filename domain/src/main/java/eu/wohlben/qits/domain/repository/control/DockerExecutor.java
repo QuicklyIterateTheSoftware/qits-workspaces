@@ -237,6 +237,14 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
+  public void stop(String container) {
+    ExecResult result = runCapturing(null, List.of(runtime, "stop", container));
+    if (result.exitCode() != 0) {
+      LOG.debugf("Failed to stop container %s: %s", container, result.output());
+    }
+  }
+
+  @Override
   public void rm(String container) {
     ExecResult result = runCapturing(null, List.of(runtime, "rm", "-f", container));
     if (result.exitCode() != 0) {
@@ -266,7 +274,7 @@ public class DockerExecutor implements ContainerRuntime {
                 // reconcile can still adopt them instead of forcing a recreate. Remove once no
                 // pre-rename containers remain.
                 "{{.Names}}\t{{.Label \"qits.workspace\"}}\t{{.Label \"qits.branch\"}}\t{{.Label"
-                    + " \"qits.parent\"}}\t{{.Label \"qits.worktree\"}}"));
+                    + " \"qits.parent\"}}\t{{.Label \"qits.worktree\"}}\t{{.State}}"));
     if (result.exitCode() != 0) {
       LOG.warnf("Failed to list containers for repo %s: %s", repoId, result.output());
       return List.of();
@@ -282,11 +290,14 @@ public class DockerExecutor implements ContainerRuntime {
       String branch = parts.length > 2 ? emptyToNull(parts[2]) : null;
       String parent = parts.length > 3 ? emptyToNull(parts[3]) : null;
       String legacyWorkspaceId = parts.length > 4 ? parts[4] : "";
+      // `docker ps -a` lists stopped containers too (reconcile/adoption need them); {{.State}} is
+      // "running" only when the container is actually up — a deliberate stop leaves it "exited".
+      boolean running = parts.length > 5 && "running".equals(parts[5]);
       if (workspaceId.isBlank()) {
         workspaceId = legacyWorkspaceId; // pre-rename container labelled qits.worktree
       }
       if (!workspaceId.isBlank()) {
-        infos.add(new ContainerInfo(name, workspaceId, branch, parent));
+        infos.add(new ContainerInfo(name, workspaceId, branch, parent, running));
       }
     }
     return infos;
