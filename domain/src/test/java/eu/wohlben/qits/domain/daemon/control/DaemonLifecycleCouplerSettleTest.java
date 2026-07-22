@@ -2,6 +2,7 @@ package eu.wohlben.qits.domain.daemon.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
 import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
@@ -149,12 +150,17 @@ public class DaemonLifecycleCouplerSettleTest {
 
     // The regression: a deliberate stop under a live ON_FAILURE daemon used to be misread as a
     // crash
-    // and the just-stopped container re-provisioned. The synchronous settle prevents it.
+    // and the just-stopped container re-provisioned/restarted. The synchronous settle prevents it.
     workspaceService.stopContainer(repoId, "work");
 
     Thread.sleep(600); // several liveness intervals
+    // A graceful stop now PAUSES in place (docker stop, lossless) rather than removing the
+    // container, so "not resurrected" means it stays stopped — present but never restarted by the
+    // liveness poll.
+    assertTrue(containers.exists(container), "the paused container is kept, not removed");
     assertFalse(
-        containers.exists(container), "the deliberately stopped container is not resurrected");
+        containers.isRunning(container),
+        "the deliberately stopped container is not resurrected by the liveness poll");
     WorkspaceDto dto =
         workspaceService.listWorkspaces(repoId).stream()
             .filter(w -> "work".equals(w.workspaceId()))
