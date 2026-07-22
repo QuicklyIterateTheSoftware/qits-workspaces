@@ -1243,14 +1243,18 @@ public class WorkspaceService {
     }
 
     try {
-      // The one host-spawned synthetic commit: identity via -c (not host env) so it stays explicit
-      // at this call site and can't leak into other host git invocations.
+      // The one host-spawned synthetic commit. Identity is delivered both as -c (explicit at the
+      // call site) AND as GIT_AUTHOR_*/GIT_COMMITTER_* env scoped to this invocation — the env form
+      // is what actually guarantees attribution, because an ambient identity env inherited from the
+      // host would otherwise outrank the -c config. The env is per-invocation, so it doesn't leak
+      // into other host git calls.
       List<String> merge = new ArrayList<>(List.of("git"));
       merge.addAll(gitIdentity.inlineArgs());
       merge.addAll(
           List.of(
               "merge", sourceBranch, "-m", "Merge " + sourceBranch + " into " + resolvedTarget));
-      String output = git.exec(mergeCwd.toFile(), merge.toArray(String[]::new));
+      String output =
+          git.exec(mergeCwd.toFile(), gitIdentity.envMap(), merge.toArray(String[]::new));
       String commitHash = git.exec(mergeCwd.toFile(), "git", "rev-parse", "HEAD").trim();
       boolean hasConflicts = output.toLowerCase().contains("conflict");
       if (isTemp) {

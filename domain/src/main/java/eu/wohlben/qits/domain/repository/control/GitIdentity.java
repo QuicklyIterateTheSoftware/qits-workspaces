@@ -17,13 +17,15 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * commit path follows. Two delivery forms:
  *
  * <ul>
- *   <li>{@link #envMap()} — container-level env ({@code GIT_AUTHOR_*} + {@code GIT_COMMITTER_*}),
- *       set by {@link WorkspaceContainerFactory} on every workspace container, so every git process
- *       in the container inherits it regardless of cwd or {@code .git/config} (identity env beats
- *       every git config level, {@code -c} included).
- *   <li>{@link #inlineArgs()} — {@code -c} overrides spliced into the one host {@code git merge}
- *       qits spawns directly, keeping the identity explicit at the single synthetic-commit call
- *       site instead of leaking env into every host git invocation.
+ *   <li>{@link #envMap()} — the {@code GIT_AUTHOR_*} + {@code GIT_COMMITTER_*} identity env. Set by
+ *       {@link WorkspaceContainerFactory} on every workspace container (so every git process in the
+ *       container inherits it regardless of cwd or {@code .git/config}) AND applied per-invocation
+ *       to the host synthetic-commit calls, scoped to just that {@code git} process — identity env
+ *       beats every git config level ({@code -c} included), so it is what actually guarantees
+ *       attribution even against an ambient {@code GIT_AUTHOR_*} inherited from the host.
+ *   <li>{@link #inlineArgs()} — the {@code -c} form of the same identity, spliced into those host
+ *       commit/merge argv to keep it explicit at the call site; a belt-and-suspenders companion to
+ *       the env overlay (env is the authoritative one when both are present).
  * </ul>
  */
 @ApplicationScoped

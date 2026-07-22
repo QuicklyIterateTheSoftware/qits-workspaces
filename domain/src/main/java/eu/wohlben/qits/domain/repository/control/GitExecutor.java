@@ -6,6 +6,7 @@ import java.io.InputStreamReader;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -17,6 +18,27 @@ public class GitExecutor {
 
   public String exec(java.io.File cwd, String... command) throws Exception {
     return exec(cwd, (Consumer<String>) null, command);
+  }
+
+  /**
+   * {@link #exec(java.io.File, String...)} with an environment overlay applied to the git process —
+   * used for the synthetic-commit call sites, which set the {@code GIT_AUTHOR_*}/{@code
+   * GIT_COMMITTER_*} identity here so it beats any ambient identity env inherited from the host
+   * (env outranks {@code -c} config, so the inline args alone can't guarantee attribution).
+   */
+  public String exec(java.io.File cwd, Map<String, String> env, String... command)
+      throws Exception {
+    ExecResult result = execAllowNonZero(cwd, env, (Consumer<String>) null, command);
+    if (result.exitCode() != 0) {
+      throw new RuntimeException(
+          "Command failed ["
+              + result.exitCode()
+              + "]: "
+              + String.join(" ", command)
+              + "\n"
+              + result.output());
+    }
+    return result.output();
   }
 
   /**
@@ -53,6 +75,13 @@ public class GitExecutor {
   /** {@link #execAllowNonZero(java.io.File, String...)} with the per-line tap of {@link #exec}. */
   public ExecResult execAllowNonZero(java.io.File cwd, Consumer<String> onLine, String... command)
       throws Exception {
+    return execAllowNonZero(cwd, Map.of(), onLine, command);
+  }
+
+  /** {@link #execAllowNonZero(java.io.File, Consumer, String...)} with an environment overlay. */
+  public ExecResult execAllowNonZero(
+      java.io.File cwd, Map<String, String> env, Consumer<String> onLine, String... command)
+      throws Exception {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd);
@@ -66,6 +95,9 @@ public class GitExecutor {
     // would silently miss a localized translation.
     pb.environment().put("LC_ALL", "C");
     pb.environment().put("LANG", "C");
+    // The caller's overlay last, so a supplied GIT_AUTHOR_*/GIT_COMMITTER_* replaces any ambient
+    // identity env inherited from the host (env outranks the -c config the caller also passes).
+    env.forEach(pb.environment()::put);
     pb.redirectErrorStream(true);
     Process p = pb.start();
     String output;
