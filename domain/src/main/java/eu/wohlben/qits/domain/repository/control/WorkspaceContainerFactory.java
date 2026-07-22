@@ -93,6 +93,21 @@ public class WorkspaceContainerFactory {
 
   @Inject GitIdentity gitIdentity;
 
+  /**
+   * Resolves the address a container uses to reach qits — the same host {@code workspace-daemon}
+   * dials for its control socket that git/OTLP/MCP already use ({@link QitsHostResolver}). Injected
+   * here so {@code forWorkspace} can compose the dial-home URL as container env, since {@code
+   * workspace-daemon} runs in-container and cannot call the resolver itself.
+   */
+  @Inject QitsHostResolver qitsHostResolver;
+
+  /**
+   * The qits HTTP port containers connect to (git/OTLP/MCP and now the workspace-daemon control
+   * socket).
+   */
+  @ConfigProperty(name = "qits.workspace.qits-port", defaultValue = "8080")
+  String qitsPort;
+
   static final String MAVEN_MOUNT = "/caches/m2";
   static final String PNPM_MOUNT = "/caches/pnpm";
 
@@ -125,9 +140,12 @@ public class WorkspaceContainerFactory {
    * back, the {@code host.docker.internal} alias Linux needs, the shared {@code qits-net} network,
    * the configured git commit identity as {@code GIT_*} env ({@link GitIdentity}), the shared
    * credential + build-cache volumes (whenever configured), the configured resource limits (memory
-   * hard cap, pids, cpus — whenever configured), the image, and {@code sleep infinity} as the
-   * command. Everything safety-critical is already in place; the caller may keep chaining but need
-   * not.
+   * hard cap, pids, cpus — whenever configured), the image, and the {@code qits-workspace-daemon}
+   * dial-home env. The container's process is {@code qits-workspace-daemon} via the image
+   * ENTRYPOINT (no {@code docker run} command is appended) — with no {@code sleep infinity}
+   * fallback, so a container that can't run the daemon fails to start rather than lingering
+   * unmanaged. Everything safety-critical is already in place; the caller may keep chaining but
+   * need not.
    */
   public WorkspaceContainer forWorkspace(
       String repoId, String workspaceId, String branch, String parent) {
@@ -148,6 +166,31 @@ public class WorkspaceContainerFactory {
             // Same timezone as qits (host -> devcontainer -> workspace container), so wall-clock
             // output agrees everywhere. The kernel clock is shared already; TZ is the only delta.
             .env("TZ", timezone());
+    // workspace-daemon's dial-home coordinates + identity, as container env
+    // (QITS_WORKSPACE_DAEMON_* -> the binary's
+    // qits.workspace-daemon.* config). workspace-daemon is the container's process (below) and runs
+    // in-container, so
+    // it can't call QitsHostResolver — the URL is composed here from the same host/port
+    // git/OTLP/MCP
+    // use. Labels carry the same identity for host-side reconciliation, but labels aren't env, so
+    // we
+    // set it explicitly. A container whose workspace-daemon can't reach qits stays alive and idle
+    // (the
+    // binary
+    // never exits on a failed dial), so this is behaviour-neutral: the docker exec paths are
+    // untouched (docs/epics/qits-workspace-daemon/).
+    container.env(
+        "QITS_WORKSPACE_DAEMON_URL",
+        "ws://"
+            + qitsHostResolver.qitsHost()
+            + ":"
+            + qitsPort
+            + "/api/workspace-daemon/"
+            + workspaceId);
+    container.env("QITS_WORKSPACE_DAEMON_WORKSPACE_ID", workspaceId);
+    container.env("QITS_WORKSPACE_DAEMON_REPOSITORY_ID", repoId);
+    container.env("QITS_WORKSPACE_DAEMON_BRANCH", branch == null ? "" : branch);
+    container.env("QITS_WORKSPACE_DAEMON_PARENT", parent == null ? "" : parent);
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev daemon can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
@@ -195,7 +238,22 @@ public class WorkspaceContainerFactory {
       container.volume(pnpmVolume, PNPM_MOUNT);
       container.env("npm_config_store_dir", PNPM_MOUNT + "/store");
     }
-    return container.image(image).command("sleep", "infinity");
+    // The container runs ONLY the workspace-daemon, via the image ENTRYPOINT
+    // (docker/qits/Dockerfile),
+    // so qits appends no `docker run` command and a bare `docker run <image>` boots the control
+    // plane.
+    // There is deliberately NO `sleep infinity` fallback: a container that can't run the daemon
+    // must
+    // FAIL to start rather than linger. A daemon-less container never sends HELLO, so qits has no
+    // control plane to it — after the epic it would be an unmanaged shadow holding qits' uid,
+    // mounts
+    // and network. So "no daemon ⇒ no workspace": a stale image (built before this change) exits
+    // loudly, surfacing that the image must be rebuilt. `--init` (WorkspaceContainer.toRunArgv)
+    // puts
+    // tini at PID 1, so the daemon is tini's child (tini reaps zombies + forwards signals); the
+    // daemon
+    // holds the socket open and is otherwise idle in Part 1, and `docker exec` is unaffected.
+    return container.image(image);
   }
 
   /**

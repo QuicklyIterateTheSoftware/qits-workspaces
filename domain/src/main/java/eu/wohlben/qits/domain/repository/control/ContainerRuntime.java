@@ -26,7 +26,8 @@ public interface ContainerRuntime {
   String containerName(String workspaceId, String repoId);
 
   /**
-   * Creates and starts the workspace's container ({@code docker run -d … sleep infinity}) on the
+   * Creates and starts the workspace's container ({@code docker run -d …}, whose process is the
+   * image's {@code qits-workspace-daemon} ENTRYPOINT — no {@code sleep infinity} keep-alive) on the
    * shared {@code qits-net} with the {@code qits.repository}/{@code qits.workspace}/{@code
    * qits.branch}/{@code qits.parent} labels that startup reconciliation reads back. Returns the
    * container name. Throws on failure.

@@ -22,6 +22,7 @@ import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.nio.file.Files;
@@ -64,6 +65,15 @@ public class WorkspaceService {
   @Inject WorkspaceContainerEventPublisher containerEvents;
 
   @Inject TechnicalProcessRegistry processes;
+
+  /**
+   * The in-container workspace-daemon's liveness, observed alongside the docker reconciliation
+   * ladder (docs/epics/qits-workspace-daemon/). {@code Instance<>} because apps without the backend
+   * impl (cli, tests) have no {@link WorkspaceDaemonLiveness} bean — there it is simply empty.
+   * <b>Part 1 is observational only</b>: {@link #ensureContainer} logs this signal but never
+   * branches on it.
+   */
+  @Inject Instance<WorkspaceDaemonLiveness> clientLiveness;
 
   /**
    * Runs {@link #beginEnsureContainer}'s provision work off the request thread — the HTTP call
@@ -896,6 +906,7 @@ public class WorkspaceService {
                   return new BranchParent(wt.branch, wt.parent);
                 });
     if (snapshot == null) {
+      observeClientLiveness(repoId, workspaceId);
       if (process != null) {
         process.completeNoOp("container-start", "Container is already running — nothing to do.");
       }
@@ -931,6 +942,7 @@ public class WorkspaceService {
         // so the bootstrap runner passes straight through to daemon auto-start (async).
         containerEvents.fireStarted(
             repoId, workspaceId, process == null ? null : process.id(), false);
+        observeClientLiveness(repoId, workspaceId);
         return;
       } catch (RuntimeException e) {
         QuarkusTransaction.requiringNew()
@@ -984,6 +996,7 @@ public class WorkspaceService {
       // Cold -> RUNNING off a fresh provision (bare clone): run the bootstrap chain, then daemon
       // auto-start (async; the runner passes straight through when the chain is empty).
       containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id(), true);
+      observeClientLiveness(repoId, workspaceId);
     } catch (RuntimeException e) {
       QuarkusTransaction.requiringNew()
           .run(
@@ -994,6 +1007,22 @@ public class WorkspaceService {
                       WorkspaceRuntimeStatus.FAILED,
                       truncate(e.getMessage())));
       throw e;
+    }
+  }
+
+  /**
+   * Record the in-container workspace-daemon's handshake liveness alongside the reconciliation
+   * ladder (docs/epics/qits-workspace-daemon/) — <b>informational only</b>. It never gates a status
+   * transition: a running container is decided by docker run-state and the branch ref exactly as
+   * before, so a missing/broken socket (older images, a crashed binary, cli/tests with no backend
+   * impl) degrades to today's behaviour. Later parts consult this once the socket drives behaviour.
+   */
+  private void observeClientLiveness(String repoId, String workspaceId) {
+    if (clientLiveness.isResolvable()) {
+      boolean live = clientLiveness.get().isDaemonLive(workspaceId);
+      LOG.debugf(
+          "workspace-daemon control socket for %s/%s: %s (informational; reconciliation unaffected)",
+          repoId, workspaceId, live ? "present" : "not yet observed");
     }
   }
 

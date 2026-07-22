@@ -1,5 +1,6 @@
 package eu.wohlben.qits.domain.repository.control;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -31,6 +32,11 @@ class WorkspaceContainerFactoryTest {
     f.pidsLimit = Optional.empty();
     f.cpus = Optional.empty();
     f.gitIdentity = identity("qits", "qits@local");
+    // An explicit git-host so qitsHost() is deterministic (no WSL/host.docker.internal detection),
+    // the same way the devcontainer pins the `qits` alias — this is what workspace-daemon dials
+    // home to.
+    f.qitsHostResolver = resolver("qits");
+    f.qitsPort = "8080";
     return f;
   }
 
@@ -39,6 +45,12 @@ class WorkspaceContainerFactoryTest {
     identity.name = name;
     identity.email = email;
     return identity;
+  }
+
+  private static QitsHostResolver resolver(String host) {
+    QitsHostResolver r = new QitsHostResolver();
+    r.configured = host;
+    return r;
   }
 
   @Test
@@ -69,7 +81,26 @@ class WorkspaceContainerFactoryTest {
     assertTrue(argv.contains("--user"), argv.toString());
     assertSequence(argv, "--name", "qits-ws-work-repo1234");
     assertTrue(argv.contains("qits/workspace:latest"), argv.toString());
-    assertSequence(argv, "sleep", "infinity");
+    // The container runs qits-workspace-daemon via the image ENTRYPOINT (docker/qits/Dockerfile),
+    // with no `docker run` command and — deliberately — no `sleep infinity` fallback: the image is
+    // the LAST token (no trailing command), the run argv carries no daemon path, and a container
+    // that can't run the daemon fails to start rather than lingering
+    // (docs/epics/qits-workspace-daemon/).
+    assertEquals("qits/workspace:latest", argv.get(argv.size() - 1), argv.toString());
+    assertFalse(argv.contains("sleep"), argv.toString());
+    assertFalse(argv.contains("infinity"), argv.toString());
+    assertFalse(argv.contains("/usr/local/bin/qits-workspace-daemon"), argv.toString());
+    // workspace-daemon's dial-home coordinates + identity, injected as env (QITS_WORKSPACE_DAEMON_*
+    // ->
+    // qits.workspace-daemon.*)
+    // — workspace-daemon runs in-container so it can't call QitsHostResolver; the URL is composed
+    // here.
+    assertSequence(
+        argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/api/workspace-daemon/work");
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=work");
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PARENT=0parent");
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());

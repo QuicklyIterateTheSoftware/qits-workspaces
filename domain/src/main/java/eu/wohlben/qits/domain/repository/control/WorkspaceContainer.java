@@ -110,7 +110,7 @@ public final class WorkspaceContainer {
     return this;
   }
 
-  /** The container entrypoint command (e.g. {@code sleep infinity}), appended last. */
+  /** The container command (e.g. {@code sleep infinity}), appended after the image. */
   public WorkspaceContainer command(String... command) {
     for (String c : command) {
       this.command.add(c);
