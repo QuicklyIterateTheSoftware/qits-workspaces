@@ -175,7 +175,7 @@ public class WorkspaceContainerFactory {
       // remembering the HOME overlay.
       container.env("CLAUDE_CONFIG_DIR", claudeMount + "/.claude");
       // Same for Kimi Code (the second harness —
-      // docs/epics/qits-coding-agents/feature-ideas/kimi-code-harness.md):
+      // docs/epics/qits-coding-agents/features/2026-07-20_kimi-code-harness.md):
       // KIMI_CODE_HOME relocates its entire data root (config.toml, credentials, sessions) onto the
       // volume. Without it an in-container kimi would default to ~/.kimi-code =
       // /workspace/.kimi-code
