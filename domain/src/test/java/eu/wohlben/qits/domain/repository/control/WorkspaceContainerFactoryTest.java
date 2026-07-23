@@ -37,7 +37,22 @@ class WorkspaceContainerFactoryTest {
     // home to.
     f.qitsHostResolver = resolver("qits");
     f.qitsPort = "8080";
+    // A live project scope, so the daemon self-clones name-addressed. Stubbed (the real resolver
+    // needs a tx + DB); the no-scope fallback has its own test.
+    f.nameResolver =
+        nameResolver(
+            Optional.of(new RepositoryNameResolver.ProjectScopedName("proj-1", "my-repo")));
     return f;
+  }
+
+  private static RepositoryNameResolver nameResolver(
+      Optional<RepositoryNameResolver.ProjectScopedName> scopedName) {
+    return new RepositoryNameResolver() {
+      @Override
+      public Optional<ProjectScopedName> resolve(String repoId) {
+        return scopedName;
+      }
+    };
   }
 
   private static GitIdentity identity(String name, String email) {
@@ -101,6 +116,11 @@ class WorkspaceContainerFactoryTest {
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PARENT=0parent");
+    // The project-scoped name the daemon self-clones under (/git/<projectId>/<repoName>), so
+    // committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part
+    // 1).
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=proj-1");
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=my-repo");
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());
@@ -120,6 +140,19 @@ class WorkspaceContainerFactoryTest {
     assertSequence(argv, "-e", "GIT_AUTHOR_EMAIL=qits@local");
     assertSequence(argv, "-e", "GIT_COMMITTER_NAME=qits");
     assertSequence(argv, "-e", "GIT_COMMITTER_EMAIL=qits@local");
+  }
+
+  @Test
+  void aRepoWithoutAProjectScopeInjectsBlankNameEnvSoTheDaemonIdAddresses() {
+    WorkspaceContainerFactory f = factory();
+    f.nameResolver = nameResolver(Optional.empty());
+
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+
+    // Blank scope ⇒ the Provisioner clones id-addressed (/git/<repositoryId>), mirroring cloneUrl's
+    // fallback.
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=");
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=");
   }
 
   @Test

@@ -134,6 +134,78 @@ class DaemonControlSocketTest {
   }
 
   @Test
+  void awaitProvisionCompletesOnProvisionedAndStreamsOutput() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
+      var awaiting =
+          java.util.concurrent.CompletableFuture.supplyAsync(
+              () ->
+                  registry.awaitProvision(
+                      WORKSPACE_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), lines::add));
+
+      // Wait until the awaiter's line sink is registered, so the streamed chunk is routed rather
+      // than
+      // dropped (chunk routing is best-effort before an awaiter exists). The terminal Provisioned
+      // itself is race-proof via complete-or-retain.
+      await(() -> registry.isAwaitingProvision(WORKSPACE_ID));
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new CommandChunk(
+                      eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol
+                          .PROVISION_CORRELATION_ID,
+                      Stream.STDOUT,
+                      "Cloning into /workspace...\n")));
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new eu.wohlben.qits.workspacedaemon.protocol.Provisioned(
+                      WORKSPACE_ID, "cafebabe")));
+
+      var result = awaiting.get(5, TimeUnit.SECONDS);
+      assertTrue(result.isPresent());
+      assertTrue(result.get().ok());
+      assertEquals("cafebabe", result.get().head());
+      await(() -> lines.contains("Cloning into /workspace..."));
+      assertTrue(lines.contains("Cloning into /workspace..."), lines.toString());
+    }
+  }
+
+  @Test
+  void awaitProvisionFailsOnProvisionFailed() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      var awaiting =
+          java.util.concurrent.CompletableFuture.supplyAsync(
+              () ->
+                  registry.awaitProvision(
+                      WORKSPACE_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), null));
+
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed(
+                      WORKSPACE_ID, "git clone exited 128")));
+
+      var result = awaiting.get(5, TimeUnit.SECONDS);
+      assertTrue(result.isPresent());
+      assertFalse(result.get().ok());
+      assertEquals("git clone exited 128", result.get().message());
+    }
+  }
+
+  @Test
+  void awaitProvisionReturnsEmptyWhenNoDaemonConnects() {
+    // No peer: the connect window lapses and awaitProvision reports "no daemon" so the host falls
+    // back to its own clone (the degradation contract).
+    var result =
+        registry.awaitProvision(
+            "ws-never-connects", Duration.ofMillis(200), Duration.ofSeconds(1), null);
+    assertTrue(result.isEmpty());
+  }
+
+  @Test
   void closingTheSocketPrunesTheRegistry() throws Exception {
     FakePeer peer = connect();
     await(() -> registry.isDaemonLive(WORKSPACE_ID));

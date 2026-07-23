@@ -94,6 +94,14 @@ public class WorkspaceContainerFactory {
   @Inject GitIdentity gitIdentity;
 
   /**
+   * Resolves the repository's project-scoped git-host name so the in-container workspace-daemon can
+   * self-clone name-addressed ({@code /git/<projectId>/<name>}) — the addressing that lets
+   * committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part 1).
+   * Injected as {@code QITS_WORKSPACE_DAEMON_PROJECT_ID}/{@code …_REPO_NAME}.
+   */
+  @Inject RepositoryNameResolver nameResolver;
+
+  /**
    * Resolves the address a container uses to reach qits — the same host {@code workspace-daemon}
    * dials for its control socket that git/OTLP/MCP already use ({@link QitsHostResolver}). Injected
    * here so {@code forWorkspace} can compose the dial-home URL as container env, since {@code
@@ -191,6 +199,17 @@ public class WorkspaceContainerFactory {
     container.env("QITS_WORKSPACE_DAEMON_REPOSITORY_ID", repoId);
     container.env("QITS_WORKSPACE_DAEMON_BRANCH", branch == null ? "" : branch);
     container.env("QITS_WORKSPACE_DAEMON_PARENT", parent == null ? "" : parent);
+    // The project-scoped name the daemon self-clones under (/git/<projectId>/<name>), so committed
+    // relative submodule urls resolve natively in-container. Blank when the repo has no project —
+    // the
+    // daemon then id-addresses (/git/<repositoryId>), mirroring cloneUrl's fallback.
+    Optional<RepositoryNameResolver.ProjectScopedName> scopedName = nameResolver.resolve(repoId);
+    container.env(
+        "QITS_WORKSPACE_DAEMON_PROJECT_ID",
+        scopedName.map(RepositoryNameResolver.ProjectScopedName::projectId).orElse(""));
+    container.env(
+        "QITS_WORKSPACE_DAEMON_REPO_NAME",
+        scopedName.map(RepositoryNameResolver.ProjectScopedName::name).orElse(""));
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev daemon can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
