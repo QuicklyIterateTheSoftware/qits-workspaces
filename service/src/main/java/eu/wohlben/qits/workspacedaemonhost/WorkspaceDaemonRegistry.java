@@ -1,15 +1,21 @@
 package eu.wohlben.qits.workspacedaemonhost;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.domain.repository.control.ProvisionResult;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonProvisioner;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandExit;
+import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
+import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
@@ -31,6 +37,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -39,22 +46,29 @@ import org.jboss.logging.Logger;
  * request/reply traffic over it. It is the in-JVM half of the control plane — {@link
  * DaemonControlSocket} owns the WebSocket lifecycle and forwards frames here.
  *
- * <p>It implements two framework-free {@code domain} SPIs so {@code WorkspaceService} can reach
- * across the module boundary without depending on websockets: {@link WorkspaceDaemonLiveness}
- * (observational) and {@link WorkspaceDaemonProvisioner} — the latter the first production caller,
- * awaiting the daemon's <b>autonomous self-provision</b> (clone + submodules on boot) and streaming
- * its output to the {@code clone} process segment (docs/epics/qits-workspace-daemon/ Part 1).
+ * <p>It implements framework-free {@code domain} SPIs so {@code WorkspaceService} (and other read
+ * paths) can reach across the module boundary without depending on websockets: {@link
+ * WorkspaceDaemonLiveness} (observational), {@link WorkspaceDaemonProvisioner} (awaits the daemon's
+ * <b>autonomous self-provision</b> — clone + submodules on boot — streaming its output to the
+ * {@code clone} process segment), and {@link WorkspaceConfigReader} (Part 2 — reads the workspace's
+ * in-container {@code .qits-config.yml} on demand, so config becomes the branch's config).
  *
  * <p>{@link #runCommand}/{@link #describe} remain Part-1 demonstration seams (backend → {@code
  * workspace-daemon} → backend); no existing {@code docker exec} path routes through them yet.
  */
 @ApplicationScoped
 public class WorkspaceDaemonRegistry
-    implements WorkspaceDaemonLiveness, WorkspaceDaemonProvisioner {
+    implements WorkspaceDaemonLiveness, WorkspaceDaemonProvisioner, WorkspaceConfigReader {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceDaemonRegistry.class);
 
   @Inject DaemonMessageCodec codec;
+
+  @Inject ObjectMapper objectMapper;
+
+  /** How long a {@link #readConfig} waits for the live daemon's {@link ConfigView} reply. */
+  @ConfigProperty(name = "qits.workspace.config.describe-timeout-ms", defaultValue = "10000")
+  long configDescribeTimeoutMs;
 
   private final ConcurrentHashMap<String, DaemonConnection> clients = new ConcurrentHashMap<>();
 
@@ -129,6 +143,11 @@ public class WorkspaceDaemonRegistry
           client.completeDescribe(info);
         }
       }
+      case ConfigView view -> {
+        if (client != null) {
+          client.completeConfig(view);
+        }
+      }
       case Provisioned provisioned ->
           completeProvision(workspaceId, ProvisionResult.ok(provisioned.head()));
       case ProvisionFailed failed ->
@@ -137,6 +156,7 @@ public class WorkspaceDaemonRegistry
       case Ack ignored -> {}
       case RunCommand ignored -> {}
       case Describe ignored -> {}
+      case DescribeConfig ignored -> {}
     }
   }
 
@@ -209,8 +229,59 @@ public class WorkspaceDaemonRegistry
     return future;
   }
 
+  /**
+   * Send a {@link DescribeConfig} to the workspace's client and complete with its {@link
+   * ConfigView} — the workspace's in-container {@code .qits-config.yml}, correlated by id (unlike
+   * the FIFO {@link #describe}). Fails fast if no client is connected.
+   */
+  public CompletableFuture<ConfigView> describeConfig(String workspaceId) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null) {
+      return CompletableFuture.failedFuture(
+          new IllegalStateException("No workspace-daemon connected for workspace " + workspaceId));
+    }
+    String correlationId = UUID.randomUUID().toString();
+    CompletableFuture<ConfigView> future = client.expectConfig(correlationId);
+    client.connection.sendTextAndAwait(codec.encode(new DescribeConfig(correlationId)));
+    return future;
+  }
+
+  @Override
+  public Optional<WorkspaceConfigView> readConfig(String workspaceId) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      return Optional.empty(); // no daemon live to read the checkout — caller uses its default view
+    }
+    try {
+      ConfigView view =
+          describeConfig(workspaceId).get(configDescribeTimeoutMs, TimeUnit.MILLISECONDS);
+      String warning = view.warning();
+      QitsConfig config;
+      try {
+        config = objectMapper.readValue(view.configJson(), QitsConfig.class);
+      } catch (Exception e) {
+        // The daemon reported the file valid but its JSON doesn't map to a QitsConfig (e.g. an
+        // unknown enum, which the daemon normalizes but does not validate): surface it as the
+        // degrade-loudly warning and fall back to the empty config, same end state as a structural
+        // parse error in-container.
+        config = QitsConfig.EMPTY;
+        warning = warning != null ? warning : "invalid .qits-config.yml: " + e.getMessage();
+      }
+      return Optional.of(new WorkspaceConfigView(config, warning));
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return Optional.empty();
+    } catch (TimeoutException | ExecutionException e) {
+      // A live daemon that didn't answer in time (or the socket dropped mid-read): treat as "no
+      // config available right now" rather than a hard failure — the read path shows its default.
+      LOG.debugf("workspace-daemon config read failed for %s: %s", workspaceId, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
   @Override
   public Optional<ProvisionResult> awaitProvision(
+      String repoId, // the daemon self-identifies over the socket; awaits are keyed by workspaceId
       String workspaceId,
       Duration connectTimeout,
       Duration provisionTimeout,
@@ -288,6 +359,10 @@ public class WorkspaceDaemonRegistry
     // correlation.
     private final Queue<CompletableFuture<WorkspaceInfo>> pendingDescribes =
         new ConcurrentLinkedQueue<>();
+    // ConfigView DOES echo the request's correlation id, so config reads are matched by id (an
+    // improvement over the FIFO pendingDescribes stub) — concurrent readConfig calls never cross.
+    private final ConcurrentHashMap<String, CompletableFuture<ConfigView>> pendingConfigs =
+        new ConcurrentHashMap<>();
 
     DaemonConnection(WebSocketConnection connection) {
       this.connection = connection;
@@ -325,6 +400,19 @@ public class WorkspaceDaemonRegistry
       CompletableFuture<WorkspaceInfo> future = pendingDescribes.poll();
       if (future != null) {
         future.complete(info);
+      }
+    }
+
+    CompletableFuture<ConfigView> expectConfig(String correlationId) {
+      CompletableFuture<ConfigView> future = new CompletableFuture<>();
+      pendingConfigs.put(correlationId, future);
+      return future;
+    }
+
+    void completeConfig(ConfigView view) {
+      CompletableFuture<ConfigView> future = pendingConfigs.remove(view.correlationId());
+      if (future != null) {
+        future.complete(view);
       }
     }
   }

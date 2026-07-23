@@ -1,7 +1,6 @@
 package eu.wohlben.qits.domain.repository.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
@@ -22,11 +21,15 @@ import org.junit.jupiter.api.Test;
  * Offline proof that a provisioned workspace materializes its <b>full submodule closure
  * natively</b> — the depth-2 {@code submodule-super.git} diamond ({@code super → child-a → {shared,
  * grandchild}} plus {@code super → shared}) — with <b>no {@code submodule.<name>.url} override</b>.
- * Driven through {@link FakeContainerRuntime}: importing the closure registers a project name alias
- * per repository, the fake's name farm serves them as siblings, and {@link
- * WorkspaceService#materializeSubmodules}'s bounded walk lets git's committed relative urls ({@code
- * ../<name>.git}) resolve to the right sibling at every level — the offline analogue of the real
- * name-addressed HTTP host. No docker.
+ * Provisioning is the daemon's job now (docs/epics/qits-workspace-daemon/ Part 2): {@link
+ * FakeWorkspaceDaemonProvisioner} plays the daemon's clone + bounded {@code .gitmodules} walk, and
+ * {@link FakeContainerRuntime}'s name farm serves the project's repositories as siblings so git's
+ * committed relative urls ({@code ../<name>.git}) resolve at every level — the offline analogue of
+ * the real name-addressed HTTP host. No docker.
+ *
+ * <p>Because the daemon walks the checkout's own {@code .gitmodules} (it has no DB), there is <b>no
+ * import-scoping</b>: see {@link #collidingUnimportedSubmoduleMaterializesWithoutImportScoping} for
+ * the accepted-limitation counterpart the old host-side, DB-scoped walk used to prevent.
  */
 @QuarkusTest
 @TestProfile(WorkspaceSubmoduleProvisionTest.TestProfile.class)
@@ -95,15 +98,26 @@ public class WorkspaceSubmoduleProvisionTest {
         "child-a's nested 'grandchild' submodule materialized (depth 2)");
   }
 
+  /**
+   * The accepted trade-off of the autonomous model: the daemon materializes what the branch's
+   * {@code .gitmodules} names (it has no DB import list), so an un-imported submodule whose
+   * basename collides with a <em>different</em> served sibling now resolves to that sibling and
+   * materializes — the content leak the old host-side, DB-scoped walk prevented. Bounded by the
+   * project model (a naming mistake inside the maintainer's own curated repo set, not an outside
+   * threat) and documented on {@code Provisioner.materializeSubmodules}. This test pins that
+   * behaviour so a future re-introduction of import-scoping (a closure hand-off) is a conscious,
+   * test-updating change.
+   */
   @Test
-  public void unimportedSubmoduleIsNotMaterializedEvenWhenASiblingNameCollides() throws Exception {
+  public void collidingUnimportedSubmoduleMaterializesWithoutImportScoping() throws Exception {
     var project = projectService.create("Scope Guard", null);
 
     // An unrelated standalone repo in the project whose self-name ('submodule-child-a') collides
     // with the superproject's committed submodule url basename (../submodule-child-a.git).
     repositoryService.cloneRepository(fixture("submodule-child-a.git"), null, project);
 
-    // The superproject imported WITHOUT its submodules — so no submodule edges exist.
+    // The superproject imported WITHOUT its submodules — but the daemon ignores that (no DB): it
+    // walks the checkout's own .gitmodules, so the colliding sibling is still resolved.
     var superRepo =
         repositoryService.cloneRepository(fixture("submodule-super.git"), null, project, false);
     workspaceService.createWorkspace(superRepo.id, "scoped", superRepo.mainBranch, "scoped");
@@ -111,13 +125,13 @@ public class WorkspaceSubmoduleProvisionTest {
     assertEquals(
         WorkspaceRuntimeStatus.RUNNING,
         workspaceService.getWorkspace(superRepo.id, "scoped").runtimeStatus(),
-        "the workspace still provisions (submodules simply aren't materialized)");
+        "the workspace still provisions");
 
-    // The walk is scoped to IMPORTED edges (none here), so child-a stays an uninitialized gitlink —
-    // it must NOT be populated from the unrelated sibling that happens to share the name.
+    // No import-scoping: child-a's committed relative url resolves to the colliding served sibling
+    // and its content IS materialized (the accepted limitation).
     Path ws = Path.of(dataDir, superRepo.id, "workspaces", "scoped");
-    assertFalse(
+    assertTrue(
         Files.exists(ws.resolve("child-a/.git")),
-        "an un-imported submodule must not materialize (no name-collision content leak)");
+        "without import-scoping the colliding submodule materializes from its name sibling");
   }
 }

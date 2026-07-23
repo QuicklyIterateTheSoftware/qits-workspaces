@@ -7,14 +7,12 @@ import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.entity.Repository;
-import eu.wohlben.qits.domain.repository.entity.RepositorySubmodule;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceEvent;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceEventType;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceStatus;
 import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
-import eu.wohlben.qits.domain.repository.persistence.RepositorySubmoduleRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspaceEventRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptAttachmentRepository;
 import eu.wohlben.qits.domain.repository.persistence.WorkspacePromptDraftRepository;
@@ -47,8 +45,6 @@ public class WorkspaceService {
 
   @Inject RepositoryRepository repositoryRepository;
 
-  @Inject RepositorySubmoduleRepository repositorySubmoduleRepository;
-
   @Inject WorkspaceRepository workspaceRepository;
 
   @Inject WorkspaceEventRepository workspaceEventRepository;
@@ -78,23 +74,20 @@ public class WorkspaceService {
 
   /**
    * Awaits the in-container workspace-daemon's autonomous self-provision (clone + submodules on
-   * boot). {@code Instance<>} for the same reason as {@link #clientLiveness}: apps without the
-   * backend impl (cli, tests with no daemon) have none, and {@link #provisionContainer} then falls
-   * back to the host-driven clone — the "socket down ⇒ exactly today's behaviour" contract
-   * (docs/epics/qits-workspace-daemon/ Part 1).
+   * boot) — the <b>sole</b> provisioning path (docs/epics/qits-workspace-daemon/ Part 2). {@code
+   * Instance<>} because the real backend impl lives in {@code service}; apps without it (cli,
+   * tests) supply a {@link WorkspaceDaemonProvisioner} test double that clones through the {@code
+   * ContainerRuntime}. An empty {@code Instance<>} (or a daemon that never connects) fails the
+   * provision — there is no host-driven fallback.
    */
   @Inject Instance<WorkspaceDaemonProvisioner> daemonProvisioner;
 
-  @Inject RepositoryNameResolver nameResolver;
-
   /**
-   * How long a fresh provision waits for a daemon to dial home before falling back to the host
-   * clone. This is the stale-image discriminator: a modern image's daemon connects within ~a
-   * second, so a generous default reliably means "no daemon here (rebuild)" rather than "slow
-   * daemon". If a modern daemon somehow connects only <em>after</em> this window, the host fallback
-   * and the daemon can both clone {@code /workspace}; the host clone into the now-non-empty dir
-   * fails cleanly (→ FAILED, recoverable on retry) rather than corrupting — so the window is sized
-   * for safety, not raced.
+   * How long a fresh provision waits for a daemon to dial home before declaring the provision
+   * FAILED. The daemon is the sole provisioner (there is no host-clone fallback), so this is the
+   * stale-image discriminator: a modern image's daemon connects within ~a second, so a generous
+   * default reliably distinguishes "no daemon here (rebuild the image)" from "slow daemon" — and
+   * the former now fails loudly rather than degrading.
    */
   @ConfigProperty(name = "qits.workspace.provision.connect-timeout-ms", defaultValue = "30000")
   long provisionConnectTimeoutMs;
@@ -123,40 +116,7 @@ public class WorkspaceService {
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
-  @Inject QitsHostResolver qitsHostResolver;
-
   @Inject GitIdentity gitIdentity;
-
-  @ConfigProperty(name = "qits.workspace.qits-port", defaultValue = "8080")
-  String qitsPort;
-
-  /**
-   * The cycle backstop for the bounded submodule materialization walk: a cyclic submodule import
-   * would otherwise recurse forever (git's own {@code --recursive} has no such cap, which is
-   * exactly why the walk is manual).
-   */
-  private static final int MAX_SUBMODULE_DEPTH = 10;
-
-  /**
-   * The URL a workspace container clones/pushes its branch (or an imported submodule child) over:
-   * the in-process git host addressed by the repository's <b>project-scoped name</b> ({@code
-   * /git/<projectId>/<name>}). Serving a project's repositories as siblings is what lets committed
-   * relative submodule urls ({@code ../<name>.git}) resolve natively during {@link
-   * #materializeSubmodules}; an absolute submodule url is redirected here explicitly. Resolved in
-   * its own transaction (this runs on the provision worker thread, off any request context); falls
-   * back to the id-addressed route if the repository or its name is somehow absent.
-   *
-   * <p>Retries once on a unique-constraint violation: two workspaces of the same still-alias-less
-   * repository (e.g. a migration-backfill collision loser) can race to {@code registerSelfName},
-   * and the retry lets the loser's {@code nameFor} read the winner's just-committed alias.
-   */
-  private String cloneUrl(String repoId) {
-    String base = "http://" + qitsHostResolver.qitsHost() + ":" + qitsPort + "/git/";
-    return nameResolver
-        .resolve(repoId)
-        .map(psn -> base + psn.projectId() + "/" + psn.name())
-        .orElse(base + repoId);
-  }
 
   /**
    * Runs a git command inside a workspace's container under {@code /workspace}, throwing on a
@@ -228,27 +188,26 @@ public class WorkspaceService {
    * must already exist in the origin — this is the on-demand half of workspace creation, invoked
    * lazily by {@link #ensureContainer} for never-provisioned and pruned workspaces alike.
    *
-   * <p>The clone itself is <b>autonomous</b>: the in-container workspace-daemon clones {@code
-   * /workspace} and materializes submodules from its own boot-time env and reports the outcome up
-   * the control socket; qits only {@link #awaitDaemonProvision awaits} it (streaming the daemon's
-   * output into the {@code clone} segment) and drives no git step. When no daemon is live — a stale
-   * image, or cli/tests with no backend impl — qits falls back to the {@link #hostDrivenClone
-   * host-driven clone}, exactly today's behaviour (docs/epics/qits-workspace-daemon/ Part 1).
+   * <p>The clone is <b>autonomous and daemon-only</b>: the in-container workspace-daemon clones
+   * {@code /workspace} and materializes submodules from its own boot-time env, then reports the
+   * outcome up the control socket; qits only {@link #awaitDaemonProvision awaits} it (streaming the
+   * daemon's output into the {@code clone} segment) and drives no git step. There is <b>no
+   * host-driven fallback</b> (docs/epics/qits-workspace-daemon/ Part 2): a container with no live
+   * daemon — a stale, pre-daemon image — fails to provision (rm + FAILED) rather than degrading.
    *
    * <p>A non-null {@code process} receives the provision as streamed segments: {@code docker-run}
-   * (container create/start) and {@code clone} (the clone plus the submodule materialization) —
-   * lines arrive live (from the daemon over the socket, or the container runtime's exec tap on the
-   * fallback), and each segment settles when its step completes. A failure leaves the open segment
-   * for the caller to settle {@code failed}.
+   * (container create/start) and {@code clone} (the clone plus the daemon's submodule
+   * materialization) — lines arrive live from the daemon over the socket, and each segment settles
+   * when its step completes. A failure leaves the open segment for the caller to settle {@code
+   * failed}.
    *
-   * <p>Submodules resolve <b>natively</b> for the common case: with the repository addressed by its
-   * project-scoped name ({@link #cloneUrl}), a project's repos are siblings and a committed
-   * relative submodule url ({@code ../<name>.git}) resolves against the origin to a served sibling
-   * with no override (an absolute committed url is redirected explicitly). On the fallback path,
-   * materialization runs as a {@link #materializeSubmodules bounded, depth-capped walk} over the
-   * <b>imported</b> submodule-edge closure — not git's own {@code --recurse-submodules} (the cap is
-   * the cycle backstop). The daemon reproduces the same bounded walk in-container, sourced from the
-   * checkout's {@code .gitmodules} (it has no DB), skipping any submodule it can't resolve.
+   * <p>Submodules resolve <b>natively</b> in the daemon's bounded {@code .gitmodules} walk: with
+   * the repository addressed by its project-scoped name, a project's repos are siblings and a
+   * committed relative submodule url ({@code ../<name>.git}) resolves against the origin to a
+   * served sibling with no override (an absolute committed url is redirected explicitly). The
+   * daemon sources the walk from the checkout's own {@code .gitmodules} (it has no DB), skipping
+   * any submodule it can't resolve — so there is no import-scoping (an accepted trade-off; see
+   * {@code Provisioner.materializeSubmodules}).
    */
   private void provisionContainer(
       String repoId,
@@ -269,25 +228,20 @@ public class WorkspaceService {
     Consumer<String> cloneLines =
         process == null ? null : line -> process.appendLine("clone", line);
 
-    // Fresh provisioning is autonomous: the in-container workspace-daemon clones /workspace and
-    // materializes submodules from its own boot-time env, then reports Provisioned/ProvisionFailed
-    // over the control socket. Here qits only AWAITS that outcome, feeding the clone segment from
-    // the
-    // daemon's streamed output — it drives no git step. If no daemon becomes live within the
-    // connect
-    // window (a stale image built before the daemon, or cli/tests with no backend impl), fall back
-    // to
-    // the host-driven clone: exactly today's behaviour (docs/epics/qits-workspace-daemon/ Part 1).
-    Optional<ProvisionResult> daemonOutcome = awaitDaemonProvision(workspaceId, cloneLines);
-    if (daemonOutcome.isEmpty()) {
-      hostDrivenClone(repoId, workspaceId, container, branch, cloneLines);
-    } else if (!daemonOutcome.get().ok()) {
-      // The daemon took ownership and then failed/timed out: it may have left a half-populated
-      // /workspace, so a host `git clone` into it would fail anyway. Remove + fail loudly, parity
-      // with the host clone's own failure path.
+    // Provisioning is the daemon's job (docs/epics/qits-workspace-daemon/ Part 2): the in-container
+    // workspace-daemon clones /workspace and materializes submodules from its own boot-time env,
+    // then
+    // reports Provisioned/ProvisionFailed over the control socket. qits only AWAITS that outcome,
+    // feeding the clone segment from the daemon's streamed output — it drives no git step and no
+    // longer falls back to a host-driven clone. A container with no live daemon (a stale,
+    // pre-daemon
+    // image) therefore cannot be provisioned: it fails loudly (rm + FAILED), recoverable by
+    // rebuilding the image so the daemon is present.
+    ProvisionResult outcome = awaitDaemonProvision(repoId, workspaceId, cloneLines);
+    if (!outcome.ok()) {
       containers.rm(container);
       throw new InternalServerErrorException(
-          "workspace-daemon self-provision failed: " + daemonOutcome.get().message());
+          "workspace-daemon self-provision failed: " + outcome.message());
     }
     if (process != null) {
       process.settleSegment("clone", true);
@@ -295,196 +249,32 @@ public class WorkspaceService {
   }
 
   /**
-   * Await the in-container daemon's autonomous self-provision, or {@link Optional#empty()} when no
-   * daemon is live (cli/tests without the backend impl, or a stale image) — the caller then falls
-   * back to {@link #hostDrivenClone}.
+   * Await the in-container daemon's autonomous self-provision. The daemon is the <b>sole</b>
+   * provisioner (docs/epics/qits-workspace-daemon/ Part 2) — there is no host-driven fallback — so
+   * a missing provisioner bean or a daemon that never dials home within the connect window is a
+   * provision FAILURE, not a degradation. In apps without the backend impl (cli, tests with no real
+   * container), a {@link WorkspaceDaemonProvisioner} test double stands in for the daemon and
+   * clones the checkout through the {@code ContainerRuntime}.
    */
-  private Optional<ProvisionResult> awaitDaemonProvision(
-      String workspaceId, Consumer<String> onLine) {
+  private ProvisionResult awaitDaemonProvision(
+      String repoId, String workspaceId, Consumer<String> onLine) {
     if (!daemonProvisioner.isResolvable()) {
-      return Optional.empty();
+      return ProvisionResult.failed("no workspace-daemon provisioner is available");
     }
     return daemonProvisioner
         .get()
         .awaitProvision(
+            repoId,
             workspaceId,
             Duration.ofMillis(provisionConnectTimeoutMs),
             Duration.ofMillis(provisionTimeoutMs),
-            onLine);
-  }
-
-  /**
-   * The host-driven clone + submodule materialization — the pre-daemon path, now the degradation
-   * fallback when no workspace-daemon is live. Byte-for-byte the historical behaviour: {@code
-   * docker exec git clone --branch <branch> <cloneUrl> /workspace} then the {@link
-   * #materializeSubmodules bounded imported-edge submodule walk}. Removes the container and throws
-   * on a clone failure so a retry can succeed.
-   */
-  private void hostDrivenClone(
-      String repoId,
-      String workspaceId,
-      String container,
-      String branch,
-      Consumer<String> cloneLines) {
-    ContainerRuntime.ExecResult clone =
-        containers.exec(
-            container,
-            null,
-            java.util.Map.of(),
-            cloneLines,
-            "git",
-            "clone",
-            "--branch",
-            branch,
-            cloneUrl(repoId),
-            "/workspace");
-    if (clone.exitCode() != 0) {
-      containers.rm(container);
-      throw new InternalServerErrorException("Clone into container failed: " + clone.output());
-    }
-    // Materialize the IMPORTED submodule closure (natively; override only where a committed url is
-    // absolute). Scoped to the DB's imported edges so a submodule that was not imported never
-    // materializes (which could otherwise resolve a colliding name to an unrelated repo). A
-    // submodule-free / no-imports repo is a no-op (empty edge list).
-    materializeSubmodules(repoId, workspaceId, repoId, ".", 0, cloneLines);
-  }
-
-  /**
-   * Materializes one level of a superproject's IMPORTED submodules — the DB submodule-edge closure
-   * — then descends into each checked-out child that has edges of its own. Scoped to imported edges
-   * (never the raw {@code .gitmodules}) so exactly the imported subtree materializes and an
-   * un-imported entry can't be pulled in — critically, can't resolve a colliding sibling name to an
-   * unrelated repo. {@code levelRepoId} is the repository whose edges drive this level; {@code rel}
-   * is its mount path relative to {@code /workspace} ({@code "."} at the root).
-   *
-   * <p>Submodules resolve <b>natively</b>: a committed relative url ({@code ../<name>.git}) folds
-   * against this container's name-addressed origin to the served sibling, so no override is needed.
-   * The one exception is a committed <b>absolute</b> url (e.g. {@code https://github.com/…}), which
-   * native resolution would send to the external host — for those we override {@code
-   * submodule.<name>.url} to the child's name-addressed git-host url so the fetch stays offline.
-   * The update runs through {@code containerGit}, which <b>throws</b> on failure, so an imported
-   * but unreachable submodule fails the provision loudly rather than leaving a silently-empty
-   * gitlink.
-   *
-   * <p>Guards mirror the import contract: edges parsed from the default branch may lack a gitlink
-   * on this workspace's branch — those are filtered per level ({@code ls-files --error-unmatch}) —
-   * and a non-root level is only wired if its own path checked out ({@code <path>/.git} exists).
-   * The depth cap is the cycle backstop.
-   */
-  private void materializeSubmodules(
-      String repoId,
-      String workspaceId,
-      String levelRepoId,
-      String rel,
-      int depth,
-      Consumer<String> onLine) {
-    if (depth >= MAX_SUBMODULE_DEPTH) {
-      return;
-    }
-    // Own transaction: this runs on the provision worker thread, which has no request context to
-    // lazily open a session from; the edges + eagerly-fetched child repos detach for the git work.
-    List<RepositorySubmodule> edges =
-        QuarkusTransaction.requiringNew()
-            .call(() -> repositorySubmoduleRepository.findByParentId(levelRepoId));
-    if (edges.isEmpty()) {
-      return;
-    }
-    if (!".".equals(rel) && !submoduleCheckedOut(repoId, workspaceId, rel)) {
-      return;
-    }
-    List<RepositorySubmodule> present =
-        edges.stream()
-            .filter(edge -> gitlinkOnBranch(repoId, workspaceId, rel, edge.path))
-            .toList();
-    for (RepositorySubmodule edge : present) {
-      // Relative urls resolve natively; only an absolute committed url needs redirecting at the
-      // (now name-addressed) local sibling to stay offline.
-      if (!committedUrlIsRelative(repoId, workspaceId, rel, edge.name)) {
-        containerGit(
-            repoId,
-            workspaceId,
-            onLine,
-            "-C",
-            rel,
-            "config",
-            "submodule." + edge.name + ".url",
-            cloneUrl(edge.child.id));
-      }
-      containerGit(
-          repoId, workspaceId, onLine, "-C", rel, "submodule", "update", "--init", "--", edge.path);
-    }
-    for (RepositorySubmodule edge : present) {
-      String childRel = ".".equals(rel) ? edge.path : rel + "/" + edge.path;
-      materializeSubmodules(repoId, workspaceId, edge.child.id, childRel, depth + 1, onLine);
-    }
-  }
-
-  /**
-   * Whether the committed {@code .gitmodules} url for {@code submodule.<name>} at {@code rel} is a
-   * relative url ({@code ./} or {@code ../}) — the case native resolution handles without an
-   * override. A read that fails (missing key) is treated as relative: the update then attempts
-   * native resolution and, if that url is unreachable, {@code containerGit} surfaces it as a real
-   * failure.
-   */
-  private boolean committedUrlIsRelative(
-      String repoId, String workspaceId, String rel, String name) {
-    String container = containers.containerName(workspaceId, repoId);
-    String gitmodules = ".".equals(rel) ? ".gitmodules" : rel + "/.gitmodules";
-    ContainerRuntime.ExecResult result =
-        containers.exec(
-            container,
-            "/workspace",
-            java.util.Map.of(),
-            "git",
-            "config",
-            "--file",
-            gitmodules,
-            "--get",
-            "submodule." + name + ".url");
-    if (result.exitCode() != 0) {
-      return true;
-    }
-    String url = result.output().trim();
-    return url.startsWith("./") || url.startsWith("../");
-  }
-
-  /**
-   * Whether the checked-out tree at {@code levelPath} actually tracks a gitlink at {@code
-   * edgePath}: {@code ls-files --error-unmatch} exits non-zero for an unknown pathspec — the
-   * mismatch case when this workspace's branch predates a submodule imported from the default
-   * branch.
-   */
-  private boolean gitlinkOnBranch(
-      String repoId, String workspaceId, String levelPath, String edgePath) {
-    String container = containers.containerName(workspaceId, repoId);
-    return containers
-            .exec(
-                container,
-                "/workspace",
-                java.util.Map.of(),
-                "git",
-                "-C",
-                levelPath,
-                "ls-files",
-                "--error-unmatch",
-                "--",
-                edgePath)
-            .exitCode()
-        == 0;
-  }
-
-  /**
-   * Whether a submodule working tree was actually populated at {@code path} (relative to {@code
-   * /workspace}): a checked-out submodule carries a {@code .git} file. Plain {@code test -e}, not a
-   * git verb — {@code git -C <uninitialized-gitlink-dir>} would resolve to the ENCLOSING
-   * superproject.
-   */
-  private boolean submoduleCheckedOut(String repoId, String workspaceId, String path) {
-    String container = containers.containerName(workspaceId, repoId);
-    return containers
-            .exec(container, "/workspace", java.util.Map.of(), "test", "-e", path + "/.git")
-            .exitCode()
-        == 0;
+            onLine)
+        .orElseGet(
+            () ->
+                ProvisionResult.failed(
+                    "no workspace-daemon dialed home within "
+                        + provisionConnectTimeoutMs
+                        + "ms — is the container running an image with the daemon?"));
   }
 
   /** Appends a history event to a workspace's timeline. */

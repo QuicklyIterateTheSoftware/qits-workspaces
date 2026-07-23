@@ -20,21 +20,26 @@ import java.util.function.Consumer;
 public interface WorkspaceDaemonProvisioner {
 
   /**
-   * Wait for workspace {@code workspaceId}'s daemon to self-provision.
+   * Wait for the workspace's daemon to self-provision.
    *
+   * @param repoId the repository whose branch the workspace tracks — carried so an implementation
+   *     can address the workspace's container unambiguously ({@code workspaceId} alone is unique
+   *     only within a repository); the socket-backed backend impl awaits purely by {@code
+   *     workspaceId} and ignores it
    * @param connectTimeout how long to wait for a daemon to become live at all; if none does,
-   *     returns {@link Optional#empty()} and the caller falls back to the host-driven clone (the
-   *     "socket down ⇒ exactly today's behaviour" degradation contract)
+   *     returns {@link Optional#empty()} and the caller fails the provision (the daemon is the sole
+   *     provisioner — there is no host-driven fallback)
    * @param provisionTimeout how long, once a daemon is live, to wait for the terminal outcome; a
    *     timeout resolves to a failed {@link ProvisionResult} (the caller then removes the container
    *     + marks FAILED — a daemon that took ownership may have left a half-populated {@code
-   *     /workspace}, so falling back to a host clone would fail anyway)
+   *     /workspace})
    * @param onLine receives streamed clone/submodule output for the {@code clone} process segment;
    *     may be {@code null}
    * @return the provision outcome, or empty when no daemon became live within {@code
    *     connectTimeout}
    */
   Optional<ProvisionResult> awaitProvision(
+      String repoId,
       String workspaceId,
       Duration connectTimeout,
       Duration provisionTimeout,

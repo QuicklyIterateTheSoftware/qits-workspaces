@@ -5,12 +5,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandExit;
+import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
+import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
@@ -26,6 +30,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +57,11 @@ class DaemonControlSocketTest {
 
   @TestHTTPResource("/api/workspace-daemon/" + WORKSPACE_ID)
   URI endpoint;
+
+  /** The {@code configJson}/{@code warning} the fake peer answers a {@link DescribeConfig} with. */
+  private volatile String configJson = "{}";
+
+  private volatile String configWarning = null;
 
   /**
    * A fake workspace-daemon: connects, echoes Hello, and answers RunCommand/Describe like the real
@@ -84,6 +94,11 @@ class DaemonControlSocketTest {
                     codec.encode(
                         new WorkspaceInfo(
                             WORKSPACE_ID, "repo-1", "feature", "main", "deadbeef", true)));
+            case DescribeConfig request ->
+                ws.writeTextMessage(
+                    codec.encode(
+                        new ConfigView(
+                            WORKSPACE_ID, request.correlationId(), configJson, configWarning)));
             default -> {
               /* Ack and others: just recorded in `inbound` */
             }
@@ -134,6 +149,58 @@ class DaemonControlSocketTest {
   }
 
   @Test
+  void readConfigDeserializesTheDaemonsConfigViewIntoQitsConfig() throws Exception {
+    // A QitsConfig-shaped JSON as the daemon's ConfigJson emits it (camelCase keys, empty
+    // collections present) — readConfig must map it straight into a QitsConfig over the socket.
+    configJson =
+        "{\"repository\":{\"mainBranch\":\"main\",\"archetype\":\"SERVICE\"},"
+            + "\"frameworks\":[],"
+            + "\"actions\":[{\"name\":\"build\",\"execute\":\"mvn -B verify\",\"interactive\":false,"
+            + "\"environment\":{\"CI\":\"true\"}}],"
+            + "\"daemons\":[{\"name\":\"dev\",\"start\":\"mvn quarkus:dev\",\"readyPattern\":\"Listening\","
+            + "\"environment\":{},\"webView\":{\"port\":8080,\"entryPath\":\"/\"},"
+            + "\"observers\":[],\"sources\":[],\"healthChecks\":[]}],"
+            + "\"bootstrap\":[]}";
+    configWarning = null;
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+
+      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ID);
+
+      assertTrue(read.isPresent());
+      WorkspaceConfigView view = read.get();
+      assertEquals(null, view.warning());
+      QitsConfig config = view.config();
+      assertEquals("main", config.repository().mainBranch());
+      assertEquals(1, config.actions().size());
+      assertEquals("build", config.actions().get(0).name());
+      assertEquals(Map.of("CI", "true"), config.actions().get(0).environment());
+      assertEquals(1, config.daemons().size());
+      assertEquals(8080, config.daemons().get(0).webView().port());
+    }
+  }
+
+  @Test
+  void readConfigSurfacesTheDaemonsWarningWithEmptyConfig() throws Exception {
+    configJson = "{\"frameworks\":[],\"actions\":[],\"daemons\":[],\"bootstrap\":[]}";
+    configWarning = "Unsupported or missing 'version' (expected 1): null";
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+
+      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ID);
+
+      assertTrue(read.isPresent());
+      assertEquals("Unsupported or missing 'version' (expected 1): null", read.get().warning());
+      assertTrue(read.get().config().isEmpty());
+    }
+  }
+
+  @Test
+  void readConfigIsEmptyWhenNoDaemonIsLive() {
+    assertTrue(registry.readConfig("ws-no-daemon-here").isEmpty());
+  }
+
+  @Test
   void awaitProvisionCompletesOnProvisionedAndStreamsOutput() throws Exception {
     try (FakePeer peer = connect()) {
       await(() -> registry.isDaemonLive(WORKSPACE_ID));
@@ -142,7 +209,11 @@ class DaemonControlSocketTest {
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitProvision(
-                      WORKSPACE_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), lines::add));
+                      "repo-1",
+                      WORKSPACE_ID,
+                      Duration.ofSeconds(5),
+                      Duration.ofSeconds(5),
+                      lines::add));
 
       // Wait until the awaiter's line sink is registered, so the streamed chunk is routed rather
       // than
@@ -180,7 +251,7 @@ class DaemonControlSocketTest {
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitProvision(
-                      WORKSPACE_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), null));
+                      "repo-1", WORKSPACE_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), null));
 
       peer.ws()
           .writeTextMessage(
@@ -197,11 +268,13 @@ class DaemonControlSocketTest {
 
   @Test
   void awaitProvisionReturnsEmptyWhenNoDaemonConnects() {
-    // No peer: the connect window lapses and awaitProvision reports "no daemon" so the host falls
-    // back to its own clone (the degradation contract).
+    // No peer: the connect window lapses and awaitProvision reports "no daemon" (empty). The daemon
+    // is the sole provisioner now, so the caller (WorkspaceService) turns this empty into a
+    // provision
+    // FAILURE — there is no host-driven fallback.
     var result =
         registry.awaitProvision(
-            "ws-never-connects", Duration.ofMillis(200), Duration.ofSeconds(1), null);
+            "repo-none", "ws-never-connects", Duration.ofMillis(200), Duration.ofSeconds(1), null);
     assertTrue(result.isEmpty());
   }
 
