@@ -91,6 +91,14 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "qits.workspace.cpus")
   Optional<String> cpus;
 
+  /**
+   * The provision-time bootstrap kill switch, forwarded to the in-container daemon (which self-runs
+   * the chain on boot — docs/epics/qits-workspace-daemon/ Part 3). Mirrors the host-side {@code
+   * qits.bootstrap.autorun-enabled} default; when false the daemon skips the chain.
+   */
+  @ConfigProperty(name = "qits.bootstrap.autorun-enabled", defaultValue = "true")
+  boolean bootstrapAutorunEnabled;
+
   @Inject GitIdentity gitIdentity;
 
   /**
@@ -210,6 +218,9 @@ public class WorkspaceContainerFactory {
     container.env(
         "QITS_WORKSPACE_DAEMON_REPO_NAME",
         scopedName.map(RepositoryNameResolver.ProjectScopedName::name).orElse(""));
+    // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
+    container.env(
+        "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN", String.valueOf(bootstrapAutorunEnabled));
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev daemon can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);

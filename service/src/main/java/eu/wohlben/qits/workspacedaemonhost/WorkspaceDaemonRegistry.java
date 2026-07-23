@@ -3,11 +3,15 @@ package eu.wohlben.qits.workspacedaemonhost;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.domain.repository.control.ProvisionResult;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonProvisioner;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
+import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
+import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
+import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandExit;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
@@ -20,6 +24,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
+import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
@@ -27,6 +32,8 @@ import io.quarkus.websockets.next.WebSocketConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
@@ -50,15 +57,20 @@ import org.jboss.logging.Logger;
  * paths) can reach across the module boundary without depending on websockets: {@link
  * WorkspaceDaemonLiveness} (observational), {@link WorkspaceDaemonProvisioner} (awaits the daemon's
  * <b>autonomous self-provision</b> — clone + submodules on boot — streaming its output to the
- * {@code clone} process segment), and {@link WorkspaceConfigReader} (Part 2 — reads the workspace's
- * in-container {@code .qits-config.yml} on demand, so config becomes the branch's config).
+ * {@code clone} process segment), {@link WorkspaceConfigReader} (Part 2 — reads the workspace's
+ * in-container {@code .qits-config.yml} on demand, so config becomes the branch's config), and
+ * {@link WorkspaceBootstrapDriver} (Part 3 — awaits the daemon's autonomous boot-time bootstrap
+ * chain and re-triggers it on demand, streaming each step's progress to the host).
  *
  * <p>{@link #runCommand}/{@link #describe} remain Part-1 demonstration seams (backend → {@code
  * workspace-daemon} → backend); no existing {@code docker exec} path routes through them yet.
  */
 @ApplicationScoped
 public class WorkspaceDaemonRegistry
-    implements WorkspaceDaemonLiveness, WorkspaceDaemonProvisioner, WorkspaceConfigReader {
+    implements WorkspaceDaemonLiveness,
+        WorkspaceDaemonProvisioner,
+        WorkspaceConfigReader,
+        WorkspaceBootstrapDriver {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceDaemonRegistry.class);
 
@@ -80,6 +92,18 @@ public class WorkspaceDaemonRegistry
    * #unregister}.
    */
   private final ConcurrentHashMap<String, PendingProvision> provisions = new ConcurrentHashMap<>();
+
+  /**
+   * In-flight bootstrap chains, keyed by {@code workspaceId} — like {@link #provisions}, on the
+   * registry (a chain, a long {@code mvn install}, outlives a socket bounce). Unlike provisioning,
+   * the boot-time chain is <b>autonomous</b>: the daemon runs it right after the self-clone, so it
+   * can begin — and a fast/empty chain can finish — before the host's async observer registers its
+   * await. So a {@link PendingBootstrap} buffers step events until a sink registers, and {@link
+   * #completeBootstrap} retains the terminal (creating the slot if absent) rather than dropping it.
+   * {@link #awaitProvision} clears any stale slot at the start of each provision cycle so a boot
+   * awaiter never picks up a previous cycle's retained terminal.
+   */
+  private final ConcurrentHashMap<String, PendingBootstrap> bootstraps = new ConcurrentHashMap<>();
 
   /** The terminal outcome of a {@link #runCommand} round-trip. */
   public record CommandResult(int exitCode, String stdout, String stderr) {}
@@ -129,6 +153,9 @@ public class WorkspaceDaemonRegistry
       case CommandChunk chunk -> {
         if (DaemonProtocol.PROVISION_CORRELATION_ID.equals(chunk.correlationId())) {
           streamProvisionOutput(workspaceId, chunk);
+        } else if (chunk.correlationId() != null
+            && chunk.correlationId().startsWith(DaemonProtocol.BOOTSTRAP_CORRELATION_PREFIX)) {
+          streamBootstrapOutput(workspaceId, chunk);
         } else if (client != null) {
           client.appendChunk(chunk);
         }
@@ -152,11 +179,15 @@ public class WorkspaceDaemonRegistry
           completeProvision(workspaceId, ProvisionResult.ok(provisioned.head()));
       case ProvisionFailed failed ->
           completeProvision(workspaceId, ProvisionResult.failed(failed.message()));
+      case BootstrapStep step -> routeBootstrapStep(workspaceId, step);
+      case BootstrapOutcome outcome -> routeBootstrapOutcome(workspaceId, outcome);
+      case Bootstrapped done -> completeBootstrap(workspaceId, done.ok());
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
       case RunCommand ignored -> {}
       case Describe ignored -> {}
       case DescribeConfig ignored -> {}
+      case RunBootstrap ignored -> {}
     }
   }
 
@@ -190,6 +221,48 @@ public class WorkspaceDaemonRegistry
     if (pending != null) {
       pending.future.complete(result);
     }
+  }
+
+  /** Route one bootstrap step's phase change to the awaiting sink (buffered until it registers). */
+  private void routeBootstrapStep(String workspaceId, BootstrapStep step) {
+    bootstraps
+        .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
+        .deliver(sink -> sink.onStep(step.name(), step.phase()));
+  }
+
+  /**
+   * Route one bootstrap step's terminal outcome to the awaiting sink (buffered until it registers).
+   */
+  private void routeBootstrapOutcome(String workspaceId, BootstrapOutcome outcome) {
+    bootstraps
+        .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
+        .deliver(sink -> sink.onOutcome(outcome.name(), outcome.outcome(), outcome.exitCode()));
+  }
+
+  /** Feed a bootstrap step's streamed output (correlation {@code bootstrap:<name>}) to the sink. */
+  private void streamBootstrapOutput(String workspaceId, CommandChunk chunk) {
+    String name =
+        chunk.correlationId().substring(DaemonProtocol.BOOTSTRAP_CORRELATION_PREFIX.length());
+    PendingBootstrap pending =
+        bootstraps.computeIfAbsent(workspaceId, id -> new PendingBootstrap());
+    for (String line : chunk.text().split("\n", -1)) {
+      if (!line.isEmpty()) {
+        pending.deliver(sink -> sink.onLine(name, line));
+      }
+    }
+  }
+
+  /**
+   * Complete the workspace's bootstrap chain — <b>complete-or-retain</b>: unlike {@link
+   * #completeProvision}, the autonomous boot chain can finish before the host's async observer
+   * registers its await, so a terminal with no slot creates one (retaining the result) rather than
+   * dropping it. The awaiter (or {@link #awaitProvision}'s next-cycle clear) removes it.
+   */
+  private void completeBootstrap(String workspaceId, boolean ok) {
+    bootstraps
+        .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
+        .future
+        .complete(new Result(ok));
   }
 
   /**
@@ -286,6 +359,11 @@ public class WorkspaceDaemonRegistry
       Duration connectTimeout,
       Duration provisionTimeout,
       Consumer<String> onLine) {
+    // A new provision cycle: drop any stale bootstrap slot from a previous cycle (e.g. a
+    // kill-switch
+    // run whose retained terminal was never awaited), so this cycle's boot awaiter can't pick it
+    // up.
+    bootstraps.remove(workspaceId);
     // Register the pending slot BEFORE waiting, so streamed chunks and the terminal event that
     // arrive during the wait land on it (and survive a socket reconnect — the slot lives on the
     // registry, not the connection).
@@ -329,6 +407,72 @@ public class WorkspaceDaemonRegistry
   boolean isAwaitingProvision(String workspaceId) {
     PendingProvision pending = provisions.get(workspaceId);
     return pending != null && pending.onLine != null;
+  }
+
+  /**
+   * Test hook: whether a {@link PendingBootstrap} slot exists for {@code workspaceId} — lets a test
+   * confirm the daemon's autonomous chain events have landed on the registry before it registers
+   * its await (the retain/buffer race the autonomous model must survive).
+   */
+  boolean isBootstrapPending(String workspaceId) {
+    return bootstraps.containsKey(workspaceId);
+  }
+
+  @Override
+  public Optional<Result> awaitBootstrap(
+      String repoId,
+      String workspaceId,
+      StepSink sink,
+      Duration connectTimeout,
+      Duration chainTimeout) {
+    // Register the sink so buffered events (steps that beat this await, since the daemon runs the
+    // chain autonomously) replay onto it, and a terminal that already arrived is picked up.
+    PendingBootstrap pending =
+        bootstraps.computeIfAbsent(workspaceId, id -> new PendingBootstrap());
+    pending.setSink(sink);
+    return awaitBootstrapFuture(workspaceId, pending, connectTimeout, chainTimeout);
+  }
+
+  @Override
+  public Optional<Result> runBootstrap(
+      String repoId, String workspaceId, String name, StepSink sink, Duration chainTimeout) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      return Optional.empty(); // no daemon live to run it
+    }
+    // A manual re-run only starts when the daemon receives RunBootstrap, so the awaiter always
+    // registers first: replace any stale slot with a fresh one, set the sink, then send.
+    PendingBootstrap pending = new PendingBootstrap();
+    pending.setSink(sink);
+    bootstraps.put(workspaceId, pending);
+    String correlationId = UUID.randomUUID().toString();
+    client.connection.sendTextAndAwait(codec.encode(new RunBootstrap(correlationId, name)));
+    // The daemon is already live (we just sent to it), so no connect wait.
+    return awaitBootstrapFuture(workspaceId, pending, Duration.ZERO, chainTimeout);
+  }
+
+  private Optional<Result> awaitBootstrapFuture(
+      String workspaceId,
+      PendingBootstrap pending,
+      Duration connectTimeout,
+      Duration chainTimeout) {
+    try {
+      if (!pending.future.isDone()
+          && !connectTimeout.isZero()
+          && !awaitLive(workspaceId, connectTimeout)) {
+        return Optional.empty(); // no daemon became live — the chain never ran
+      }
+      return Optional.of(pending.future.get(chainTimeout.toMillis(), TimeUnit.MILLISECONDS));
+    } catch (TimeoutException e) {
+      return Optional.of(new Result(false)); // live but silent past the deadline ⇒ treat as failed
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return Optional.of(new Result(false));
+    } catch (ExecutionException e) {
+      return Optional.of(new Result(false));
+    } finally {
+      bootstraps.remove(workspaceId, pending);
+    }
   }
 
   /** Poll for a live daemon up to {@code timeout}; true once one is connected. */
@@ -432,5 +576,51 @@ public class WorkspaceDaemonRegistry
   private static final class PendingProvision {
     private final CompletableFuture<ProvisionResult> future = new CompletableFuture<>();
     private volatile Consumer<String> onLine;
+  }
+
+  /**
+   * One in-flight bootstrap chain: the future the awaiting host blocks on, plus a buffer of step
+   * events delivered before a sink registered (the autonomous boot chain can start streaming before
+   * the host's async observer awaits). {@link #setSink} replays the buffer and thereafter delivers
+   * live; {@link #deliver} buffers until then. Keyed by {@code workspaceId} so it survives a socket
+   * reconnect mid-chain.
+   */
+  private static final class PendingBootstrap {
+    private final CompletableFuture<WorkspaceBootstrapDriver.Result> future =
+        new CompletableFuture<>();
+    private final List<Consumer<WorkspaceBootstrapDriver.StepSink>> buffered = new ArrayList<>();
+    private WorkspaceBootstrapDriver.StepSink sink;
+
+    synchronized void setSink(WorkspaceBootstrapDriver.StepSink sink) {
+      this.sink = sink;
+      for (Consumer<WorkspaceBootstrapDriver.StepSink> event : buffered) {
+        dispatch(event);
+      }
+      buffered.clear();
+    }
+
+    synchronized void deliver(Consumer<WorkspaceBootstrapDriver.StepSink> event) {
+      if (sink != null) {
+        dispatch(event);
+      } else {
+        buffered.add(event);
+      }
+    }
+
+    /**
+     * Run a sink callback, swallowing any exception. The callbacks run on the websockets-next
+     * onMessage thread (which does not guard the dispatch), and the host sink writes to the DB
+     * (e.g. {@code recordOutcome} throws {@code NotFoundException} for a workspace deleted
+     * mid-chain) — an escape would close the control socket, so the daemon's terminal {@code
+     * Bootstrapped} never arrives and the host await hangs to timeout. A dropped per-step callback
+     * is harmless; {@link #completeBootstrap} resolves the future directly, not through the sink.
+     */
+    private void dispatch(Consumer<WorkspaceBootstrapDriver.StepSink> event) {
+      try {
+        event.accept(sink);
+      } catch (RuntimeException e) {
+        LOG.debugf("workspace-daemon bootstrap sink callback failed (dropped): %s", e.getMessage());
+      }
+    }
   }
 }

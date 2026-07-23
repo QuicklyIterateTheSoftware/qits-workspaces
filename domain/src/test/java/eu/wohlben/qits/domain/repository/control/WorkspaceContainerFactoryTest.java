@@ -37,6 +37,8 @@ class WorkspaceContainerFactoryTest {
     // home to.
     f.qitsHostResolver = resolver("qits");
     f.qitsPort = "8080";
+    // Mirrors the shipped default (qits.bootstrap.autorun-enabled): the daemon self-runs bootstrap.
+    f.bootstrapAutorunEnabled = true;
     // A live project scope, so the daemon self-clones name-addressed. Stubbed (the real resolver
     // needs a tx + DB); the no-scope fallback has its own test.
     f.nameResolver =
@@ -121,6 +123,8 @@ class WorkspaceContainerFactoryTest {
     // 1).
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=proj-1");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=my-repo");
+    // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN=true");
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());

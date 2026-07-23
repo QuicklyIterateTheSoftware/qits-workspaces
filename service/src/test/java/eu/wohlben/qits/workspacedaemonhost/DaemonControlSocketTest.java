@@ -6,16 +6,22 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
+import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
+import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
+import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandExit;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
+import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
@@ -99,6 +105,17 @@ class DaemonControlSocketTest {
                     codec.encode(
                         new ConfigView(
                             WORKSPACE_ID, request.correlationId(), configJson, configWarning)));
+            case RunBootstrap ignored -> {
+              // Manual re-run: reply with a one-step chain + terminal, as the daemon would.
+              ws.writeTextMessage(
+                  codec.encode(
+                      new BootstrapStep(WORKSPACE_ID, "install", BootstrapStep.Phase.EXECUTE)));
+              ws.writeTextMessage(
+                  codec.encode(
+                      new BootstrapOutcome(
+                          WORKSPACE_ID, "install", BootstrapOutcome.Result.SUCCEEDED, 0)));
+              ws.writeTextMessage(codec.encode(new Bootstrapped(WORKSPACE_ID, true)));
+            }
             default -> {
               /* Ack and others: just recorded in `inbound` */
             }
@@ -279,6 +296,168 @@ class DaemonControlSocketTest {
   }
 
   @Test
+  void awaitBootstrapStreamsStepsAndCompletesOk() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      CapturingSink sink = new CapturingSink();
+      var awaiting =
+          java.util.concurrent.CompletableFuture.supplyAsync(
+              () ->
+                  registry.awaitBootstrap(
+                      "repo-1", WORKSPACE_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5)));
+
+      // The daemon streams the chain autonomously, then the terminal.
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new BootstrapStep(WORKSPACE_ID, "install", BootstrapStep.Phase.EXECUTE)));
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new CommandChunk(
+                      DaemonProtocol.bootstrapCorrelationId("install"),
+                      Stream.STDOUT,
+                      "building\n")));
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new BootstrapOutcome(
+                      WORKSPACE_ID, "install", BootstrapOutcome.Result.SUCCEEDED, 0)));
+      peer.ws().writeTextMessage(codec.encode(new Bootstrapped(WORKSPACE_ID, true)));
+
+      var result = awaiting.get(5, TimeUnit.SECONDS);
+      assertTrue(result.isPresent());
+      assertTrue(result.get().ok());
+      assertTrue(sink.steps.contains("install:EXECUTE"), sink.steps.toString());
+      assertTrue(sink.lines.contains("building"), sink.lines.toString());
+      assertTrue(sink.outcomes.contains("install:SUCCEEDED:0"), sink.outcomes.toString());
+    }
+  }
+
+  @Test
+  void awaitBootstrapReportsFailedChain() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      CapturingSink sink = new CapturingSink();
+      var awaiting =
+          java.util.concurrent.CompletableFuture.supplyAsync(
+              () ->
+                  registry.awaitBootstrap(
+                      "repo-1", WORKSPACE_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5)));
+
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new BootstrapOutcome(
+                      WORKSPACE_ID, "install", BootstrapOutcome.Result.FAILED, 7)));
+      peer.ws().writeTextMessage(codec.encode(new Bootstrapped(WORKSPACE_ID, false)));
+
+      var result = awaiting.get(5, TimeUnit.SECONDS);
+      assertTrue(result.isPresent());
+      assertFalse(result.get().ok(), "a failed chain gates daemons off");
+      assertTrue(sink.outcomes.contains("install:FAILED:7"), sink.outcomes.toString());
+    }
+  }
+
+  @Test
+  void awaitBootstrapPicksUpATerminalThatArrivedBeforeTheAwait() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      // The autonomous chain finishes before the host's observer registers its await: the terminal
+      // (and the step events) must be buffered/retained and replayed when the sink registers.
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(new BootstrapStep(WORKSPACE_ID, "seed", BootstrapStep.Phase.EXECUTE)));
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new BootstrapOutcome(
+                      WORKSPACE_ID, "seed", BootstrapOutcome.Result.SUCCEEDED, 0)));
+      peer.ws().writeTextMessage(codec.encode(new Bootstrapped(WORKSPACE_ID, true)));
+
+      // Give the frames time to land on the registry ahead of the await.
+      await(() -> registry.isBootstrapPending(WORKSPACE_ID));
+      CapturingSink sink = new CapturingSink();
+      var result =
+          registry.awaitBootstrap(
+              "repo-1", WORKSPACE_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5));
+
+      assertTrue(result.isPresent());
+      assertTrue(result.get().ok());
+      assertTrue(sink.outcomes.contains("seed:SUCCEEDED:0"), "buffered step replayed on the sink");
+    }
+  }
+
+  @Test
+  void runBootstrapSendsRunBootstrapAndAwaitsTheReply() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      CapturingSink sink = new CapturingSink();
+
+      var result = registry.runBootstrap("repo-1", WORKSPACE_ID, null, sink, Duration.ofSeconds(5));
+
+      assertTrue(result.isPresent());
+      assertTrue(result.get().ok());
+      assertTrue(sink.outcomes.contains("install:SUCCEEDED:0"), sink.outcomes.toString());
+    }
+  }
+
+  @Test
+  void awaitBootstrapCompletesEvenWhenASinkCallbackThrows() throws Exception {
+    // A sink whose onOutcome throws (the recordOutcome-on-deleted-workspace case) must not escape
+    // onMessage and tear down the socket — the terminal Bootstrapped must still complete the await.
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      WorkspaceBootstrapDriver.StepSink throwingSink =
+          new WorkspaceBootstrapDriver.StepSink() {
+            @Override
+            public void onStep(String name, String phase) {}
+
+            @Override
+            public void onLine(String name, String line) {}
+
+            @Override
+            public void onOutcome(String name, String outcome, Integer exitCode) {
+              throw new RuntimeException("simulated recordOutcome failure");
+            }
+          };
+      var awaiting =
+          java.util.concurrent.CompletableFuture.supplyAsync(
+              () ->
+                  registry.awaitBootstrap(
+                      "repo-1",
+                      WORKSPACE_ID,
+                      throwingSink,
+                      Duration.ofSeconds(5),
+                      Duration.ofSeconds(5)));
+
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new BootstrapOutcome(
+                      WORKSPACE_ID, "install", BootstrapOutcome.Result.SUCCEEDED, 0)));
+      peer.ws().writeTextMessage(codec.encode(new Bootstrapped(WORKSPACE_ID, true)));
+
+      var result = awaiting.get(5, TimeUnit.SECONDS);
+      assertTrue(
+          result.isPresent(), "the throwing sink must not prevent the terminal from resolving");
+      assertTrue(result.get().ok());
+    }
+  }
+
+  @Test
+  void runBootstrapIsEmptyWhenNoDaemonIsLive() {
+    var result =
+        registry.runBootstrap(
+            "repo-none",
+            "ws-no-daemon-bootstrap",
+            null,
+            new CapturingSink(),
+            Duration.ofSeconds(1));
+    assertTrue(result.isEmpty());
+  }
+
+  @Test
   void closingTheSocketPrunesTheRegistry() throws Exception {
     FakePeer peer = connect();
     await(() -> registry.isDaemonLive(WORKSPACE_ID));
@@ -295,6 +474,28 @@ class DaemonControlSocketTest {
         return; // let the caller's assertion report the failure
       }
       TimeUnit.MILLISECONDS.sleep(25);
+    }
+  }
+
+  /** Captures the {@link WorkspaceBootstrapDriver.StepSink} callbacks for assertion. */
+  private static final class CapturingSink implements WorkspaceBootstrapDriver.StepSink {
+    private final List<String> steps = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final List<String> outcomes = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    @Override
+    public void onStep(String name, String phase) {
+      steps.add(name + ":" + phase);
+    }
+
+    @Override
+    public void onLine(String name, String line) {
+      lines.add(line);
+    }
+
+    @Override
+    public void onOutcome(String name, String outcome, Integer exitCode) {
+      outcomes.add(name + ":" + outcome + ":" + exitCode);
     }
   }
 
