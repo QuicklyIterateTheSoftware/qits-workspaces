@@ -1,11 +1,15 @@
 package eu.wohlben.qits.domain.repository.control;
 
+import eu.wohlben.qits.domain.repository.entity.RepositoryName;
+import eu.wohlben.qits.domain.repository.persistence.RepositoryNameRepository;
+import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.Mock;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -47,10 +51,26 @@ public class FakeContainerRuntime implements ContainerRuntime {
 
   private static final Pattern CLONE_URL = Pattern.compile("^https?://[^/]+/git/([^/]+)$");
 
+  /** The name-addressed scheme: {@code http://host/git/<projectId>/<name>[.git]}. */
+  private static final Pattern CLONE_URL_NAMED =
+      Pattern.compile("^https?://[^/]+/git/([^/]+)/([^/]+?)(?:\\.git)?$");
+
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
   @Inject GitIdentity gitIdentity;
+
+  @Inject RepositoryNameRepository repositoryNames;
+
+  // The fake serves submodules over LOCAL paths (the name farm below), which git blocks by default
+  // (CVE-2022-39253); the real container fetches over HTTP and needs no such relaxation. Enable the
+  // file transport via git's env-config so it applies to every git invocation without touching
+  // argv.
+  private static final Map<String, String> FAKE_GIT_CONFIG =
+      Map.of(
+          "GIT_CONFIG_COUNT", "1",
+          "GIT_CONFIG_KEY_0", "protocol.file.allow",
+          "GIT_CONFIG_VALUE_0", "always");
 
   private record Info(String repoId, String workspaceId, String branch, String parent, Path dir) {}
 
@@ -123,6 +143,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
     // Container-level identity env first, per-call env after — later `env K=V` assignments win,
     // mirroring docker where a per-exec -e overrides container-creation env.
     gitIdentity.envMap().forEach((k, v) -> cmd.add(k + "=" + v));
+    FAKE_GIT_CONFIG.forEach((k, v) -> cmd.add(k + "=" + v));
     if (env != null) {
       env.forEach((k, v) -> cmd.add(k + "=" + (v == null ? "" : v)));
     }
@@ -151,6 +172,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
     }
     // Container-level identity env first, per-call env after (later assignments win, like docker).
     gitIdentity.envMap().forEach((k, v) -> argv.add(k + "=" + v));
+    FAKE_GIT_CONFIG.forEach((k, v) -> argv.add(k + "=" + v));
     if (env != null) {
       env.forEach((k, v) -> argv.add(k + "=" + (v == null ? "" : v)));
     }
@@ -411,11 +433,57 @@ public class FakeContainerRuntime implements ContainerRuntime {
     if ("/workspace".equals(arg) && dir != null) {
       return dir.toString();
     }
+    // Name-addressed clone url (/git/<projectId>/<name>): resolve against an on-disk name farm that
+    // mirrors the real git host's project namespace, so git's own `--recurse-submodules` resolves
+    // committed relative submodule urls (../<name>.git) to the right sibling bare — offline, no
+    // config override, exactly as the real name-addressed host does over HTTP.
+    Matcher named = CLONE_URL_NAMED.matcher(arg);
+    if (named.matches()) {
+      String projectId = named.group(1);
+      String name = named.group(2);
+      ensureNameFarm(projectId);
+      return Path.of(dataDir, ".git-names", projectId, name + ".git").toAbsolutePath().toString();
+    }
     Matcher m = CLONE_URL.matcher(arg);
     if (m.matches()) {
       return Path.of(dataDir, m.group(1), "origin").toAbsolutePath().toString();
     }
     return arg;
+  }
+
+  /**
+   * Materialize (idempotently) the name farm for a project: a directory of symlinks {@code
+   * <data-dir>/.git-names/<projectId>/<name>[.git]} → {@code <data-dir>/<repoId>/origin}, one pair
+   * per {@link RepositoryName} alias in the project. This is the on-disk analogue of the real git
+   * host resolving {@code /git/<projectId>/<name>} to a repo id: a native recursive clone from a
+   * superproject symlink resolves each {@code ../<child>.git} to a sibling symlink here.
+   */
+  private void ensureNameFarm(String projectId) {
+    Path farm = Path.of(dataDir, ".git-names", projectId).toAbsolutePath();
+    try {
+      Files.createDirectories(farm);
+      QuarkusTransaction.requiringNew()
+          .run(
+              () -> {
+                for (RepositoryName alias : repositoryNames.list("project.id", projectId)) {
+                  Path origin = Path.of(dataDir, alias.repository.id, "origin").toAbsolutePath();
+                  linkTo(farm.resolve(alias.name + ".git"), origin);
+                  linkTo(farm.resolve(alias.name), origin);
+                }
+              });
+    } catch (Exception e) {
+      throw new RuntimeException("fake name-farm failed for project " + projectId, e);
+    }
+  }
+
+  private void linkTo(Path link, Path target) {
+    try {
+      if (!Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
+        Files.createSymbolicLink(link, target);
+      }
+    } catch (Exception ignored) {
+      // best effort — a missing target simply 404s the fetch, mirroring the real host
+    }
   }
 
   private ExecResult runCapturing(List<String> command) {
