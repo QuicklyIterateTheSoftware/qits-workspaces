@@ -2,16 +2,11 @@ package eu.wohlben.qits.domain.bootstrap.control;
 
 import eu.wohlben.qits.domain.bootstrap.dto.BootstrapCommandDto;
 import eu.wohlben.qits.domain.bootstrap.entity.BootstrapOutcome;
-import eu.wohlben.qits.domain.command.control.CommandOutputSink;
-import eu.wohlben.qits.domain.command.control.CommandRegistry;
-import eu.wohlben.qits.domain.command.control.CommandService;
-import eu.wohlben.qits.domain.command.control.CommandService.RunOutcome;
 import eu.wohlben.qits.domain.error.BadRequestException;
-import eu.wohlben.qits.domain.process.control.SegmentLineSink;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
-import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStarted;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -20,8 +15,15 @@ import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.ObservesAsync;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,41 +31,34 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * Runs a repository's bootstrap chain inside a workspace container: sequentially, in {@code
- * orderIndex} order, at {@code /workspace}, through the ordinary command machinery (every execute
- * is a persisted, log-streamed {@code Command} row). Two triggers:
+ * Surfaces the in-container workspace-daemon's bootstrap chain on the host: the daemon runs the
+ * chain itself (from its own {@code .qits-config.yml}, between the self-clone and daemon start —
+ * docs/epics/qits-workspace-daemon/ Part 3); this runner <b>awaits</b> it over the control socket
+ * ({@link WorkspaceBootstrapDriver}), records each step's outcome ({@link BootstrapRunService}),
+ * settles the {@code bootstrap:<name>} process segments, and gates daemon auto-start on the result.
+ * The chain execution that used to live here (host {@code docker exec} of each command) moved into
+ * the daemon; the host no longer touches the container to run bootstrap.
  *
  * <ul>
  *   <li><b>Fresh provision</b> — observes {@link WorkspaceContainerStarted} (async, the {@code
- *       DaemonLifecycleCoupler} precedent) and runs the chain only for {@code freshProvision}
- *       transitions: a bare clone needs bootstrapping, a restarted container kept its state. When
- *       there is nothing to run (plain restart, empty chain, kill switch) the event passes straight
- *       through to daemon auto-start.
- *   <li><b>Manual re-run</b> — {@link #runChainAsync}/{@link #runSingleAsync} from the workspace
- *       surface; also the recovery path after a failed provision-time chain and the path for
- *       configs that gained commands after provisioning.
+ *       DaemonLifecycleCoupler} precedent) and awaits the daemon's chain only for {@code
+ *       freshProvision} transitions (a bare clone was just bootstrapped; a restarted container kept
+ *       its state, and the daemon does not re-run). A plain restart, or the autorun kill switch,
+ *       passes straight through to daemon auto-start.
+ *   <li><b>Manual re-run</b> — {@link #runChainAsync}/{@link #runSingleAsync} send the daemon a
+ *       re-run request; the recovery path after a failed provision-time chain.
  * </ul>
  *
  * <p>Sequencing vs daemon auto-start is structural: this runner is the only firer of {@link
- * WorkspaceContainerEventPublisher#fireReadyForDaemons} — on pass-through immediately, after a
- * successful chain, and after a successful manual full-chain run (recovery; the coupler tolerates
- * already-running daemons). A <b>failed chain never fires it</b>: the remaining commands are
- * aborted and daemon auto-start is skipped — a dev server on an unbootstrapped checkout would just
- * burn its restart budget crash-looping (and qits' own dogfood build guard would fail the moment
- * something listens on the dev port). The workspace stays usable; the failure surfaces on the
- * workspace surface (BOOTSTRAP hints over SSE) and in the failed command's log.
- *
- * <p>Per command: the optional {@code check} script runs first ({@code bash -lc} via {@code docker
- * exec}); non-zero means "not needed" — recorded SKIPPED, no command row, chain continues. The
- * execute script then runs via {@link CommandService#launchScriptAndAwait} with a generous await
- * timeout ({@code qits.bootstrap.await-timeout-ms}); on timeout the process is <b>terminated</b>
- * and the chain fails — unlike {@code launchAndAwait}'s leave-running policy, a straggling install
- * whose successors were aborted is pure waste and would fight the manual re-run.
+ * WorkspaceContainerEventPublisher#fireReadyForDaemons} — on pass-through immediately, and after a
+ * successful chain (or manual full-chain run). A <b>failed chain never fires it</b>: daemon
+ * auto-start is skipped — a dev server on an unbootstrapped checkout would only burn its restart
+ * budget crash-looping (and qits' own dogfood build guard would fail the moment something listens
+ * on the dev port). The failure surfaces on the workspace surface (BOOTSTRAP hints over SSE).
  *
  * <p>Reentrancy: a manual run's {@code ensureContainer} may itself fresh-provision and fire {@link
- * WorkspaceContainerStarted} — the per-workspace in-flight guard makes the event-triggered chain
- * yield to the already-running manual one (which fires ready itself on success). The guard also
- * backs the surface's "chain running" indicator and the manual-trigger conflict error.
+ * WorkspaceContainerStarted} — the per-workspace in-flight guard makes the event-triggered await
+ * yield to the already-running manual one (which fires ready itself on success).
  */
 @ApplicationScoped
 public class WorkspaceBootstrapRunner {
@@ -74,12 +69,6 @@ public class WorkspaceBootstrapRunner {
 
   @Inject BootstrapRunService bootstrapRunService;
 
-  @Inject CommandService commandService;
-
-  @Inject CommandRegistry commandRegistry;
-
-  @Inject ContainerRuntime containers;
-
   @Inject WorkspaceService workspaceService;
 
   @Inject WorkspaceContainerEventPublisher containerEvents;
@@ -88,16 +77,36 @@ public class WorkspaceBootstrapRunner {
 
   @Inject TechnicalProcessRegistry processRegistry;
 
-  /** Kill switch for the provision-time trigger (manual runs stay available). */
+  /**
+   * The socket-backed driver that awaits (and re-triggers) the daemon's chain. Optional — apps
+   * without the backend (cli) have no bean; when it is absent there is no daemon to run bootstrap,
+   * so the workspace passes straight through to daemons (the checkout still exists).
+   */
+  @Inject Instance<WorkspaceBootstrapDriver> driver;
+
+  /**
+   * Kill switch for the provision-time trigger (also forwarded to the daemon so it skips the run).
+   */
   @ConfigProperty(name = "qits.bootstrap.autorun-enabled", defaultValue = "true")
   boolean autorunEnabled;
 
   /**
-   * How long one execute script may run before the chain gives up on it. Generous by design — a
-   * cold {@code mvn install} takes long — and a timeout terminates the process (see class doc).
+   * How long the host waits for the daemon's terminal {@code Bootstrapped} once a daemon is live.
+   * This bounds the <b>whole chain</b>, so it must comfortably exceed the daemon's <b>per-step</b>
+   * budget ({@code qits.workspace-daemon.bootstrap-timeout-ms}, default 1h) times the step count —
+   * otherwise a legitimate multi-step chain the daemon is still running (and would finish
+   * successfully) trips this host timeout and is falsely recorded as failed. Default 6h covers a
+   * chain of several maxed-out steps; raise it for pathologically long chains. It is a dead-daemon
+   * backstop, not a per-step bound — the daemon terminates each overrunning step itself.
    */
-  @ConfigProperty(name = "qits.bootstrap.await-timeout-ms", defaultValue = "3600000")
-  long awaitTimeoutMillis;
+  @ConfigProperty(name = "qits.bootstrap.await-timeout-ms", defaultValue = "21600000")
+  long chainAwaitMillis;
+
+  /**
+   * How long to wait for a live daemon before giving up (the daemon just provisioned, so short).
+   */
+  @ConfigProperty(name = "qits.bootstrap.connect-timeout-ms", defaultValue = "30000")
+  long connectMillis;
 
   /** Workspaces with a chain (or single command) in flight; also the "chain running" surface. */
   private final ConcurrentHashMap<String, Boolean> inFlight = new ConcurrentHashMap<>();
@@ -123,12 +132,9 @@ public class WorkspaceBootstrapRunner {
 
   void onContainerStarted(@ObservesAsync WorkspaceContainerStarted evt) {
     TechnicalProcess process = processRegistry.find(evt.technicalProcessId()).orElse(null);
-    List<BootstrapCommandDto> chain =
-        evt.freshProvision() && autorunEnabled
-            ? bootstrapCommandService.resolveAll(evt.repoId())
-            : List.of();
-    if (chain.isEmpty()) {
-      // Plain restart, empty chain, or kill switch: nothing between the container and its daemons.
+    if (!evt.freshProvision() || !autorunEnabled || driver.isUnsatisfied()) {
+      // Plain restart, kill switch, or no daemon control plane: nothing between the container and
+      // its daemons — the daemon didn't (re)run the chain, so go straight to auto-start.
       containerEvents.fireReadyForDaemons(
           evt.repoId(), evt.workspaceId(), evt.technicalProcessId());
       return;
@@ -136,9 +142,9 @@ public class WorkspaceBootstrapRunner {
     if (inFlight.putIfAbsent(key(evt.repoId(), evt.workspaceId()), Boolean.TRUE) != null) {
       // A manual run provisioned this container and owns the chain; it fires ready on success. This
       // start's process can't observe that run (its ready event carries no process id), so close
-      // its stream cleanly rather than hang it. Its verdict covers only the provision it watched —
-      // the delegated chain's real outcome and the daemon phase are on the workspace Bootstrap tab.
-      // (Residual limitation: a green Start here does not vouch for the delegated chain — see
+      // its
+      // stream cleanly rather than hang it. (Residual limitation: a green Start here does not vouch
+      // for the delegated chain — see
       // docs/issues/2026-07-19_streamed-start-verdict-delegated-bootstrap.md.)
       if (process != null) {
         process.appendLine(
@@ -151,22 +157,21 @@ public class WorkspaceBootstrapRunner {
       return;
     }
     try {
-      boolean ok = runChain(evt.repoId(), evt.workspaceId(), chain, process);
+      Optional<WorkspaceBootstrapDriver.Result> result =
+          awaitChain(evt.repoId(), evt.workspaceId(), process);
+      boolean ok = result.map(WorkspaceBootstrapDriver.Result::ok).orElse(false);
       if (ok) {
         containerEvents.fireReadyForDaemons(
             evt.repoId(), evt.workspaceId(), evt.technicalProcessId());
       } else if (process != null) {
-        // Failed chain: no daemon phase. Declaring the empty set ends the process now — its
-        // verdict is already `failed` via the failed bootstrap segment.
+        // Failed chain (or no daemon answered): no daemon phase. Declaring the empty set ends the
+        // process now — its verdict is already `failed` via the failed bootstrap segment.
         process.expectDaemons(List.of());
       }
     } catch (RuntimeException e) {
-      // runChain guards each command, but a failure *between* commands (e.g. the opening BOOTSTRAP
-      // hint fire) would otherwise skip both fireReadyForDaemons and expectDaemons and leave the
-      // start's stream hanging until the idle backstop. End it as failed instead.
       LOG.errorf(
           e,
-          "Bootstrap chain failed unexpectedly for workspace %s/%s",
+          "Bootstrap await failed unexpectedly for workspace %s/%s",
           evt.workspaceId(),
           evt.repoId());
       if (process != null) {
@@ -176,10 +181,8 @@ public class WorkspaceBootstrapRunner {
       }
     } finally {
       inFlight.remove(key(evt.repoId(), evt.workspaceId()));
-      // Mirror submitManual's finally: a final BOOTSTRAP hint after the guard is released so the
-      // surface's "chain running" indicator clears even when the chain aborted (runChain's failure
-      // paths record no outcome, so no other hint follows) — and the success path is no longer racy
-      // (its last recordOutcome hint fires while the guard is still held).
+      // A final BOOTSTRAP hint after the guard is released so the surface's "chain running"
+      // indicator clears even when the chain aborted.
       changePublisher.fire(evt.repoId(), evt.workspaceId(), WorkspaceChangeHint.Topic.BOOTSTRAP);
     }
   }
@@ -193,9 +196,10 @@ public class WorkspaceBootstrapRunner {
         repoId,
         workspaceId,
         () -> {
-          List<BootstrapCommandDto> chain = bootstrapCommandService.resolveAll(repoId);
           workspaceService.ensureContainer(repoId, workspaceId);
-          if (runChain(repoId, workspaceId, chain, null)) {
+          Optional<WorkspaceBootstrapDriver.Result> result =
+              runDaemon(repoId, workspaceId, null, null);
+          if (result.map(WorkspaceBootstrapDriver.Result::ok).orElse(false)) {
             containerEvents.fireReadyForDaemons(repoId, workspaceId, null);
           }
         });
@@ -209,12 +213,16 @@ public class WorkspaceBootstrapRunner {
         workspaceId,
         () -> {
           workspaceService.ensureContainer(repoId, workspaceId);
-          runCommand(repoId, workspaceId, command, null);
+          runDaemon(repoId, workspaceId, QitsConfig.baseName(command.name()), null);
         });
   }
 
   /** Enter the in-flight guard and hand the work to the manual-run executor. */
   private void submitManual(String repoId, String workspaceId, Runnable work) {
+    if (driver.isUnsatisfied()) {
+      throw new BadRequestException(
+          "No workspace-daemon control plane is available to run bootstrap for this workspace");
+    }
     if (inFlight.putIfAbsent(key(repoId, workspaceId), Boolean.TRUE) != null) {
       throw new BadRequestException("A bootstrap run is already in flight for this workspace");
     }
@@ -232,126 +240,102 @@ public class WorkspaceBootstrapRunner {
         });
   }
 
-  /**
-   * The chain proper: every command in order, aborting on the first failure. Returns whether the
-   * whole chain passed (skips count as passed). Caller holds the in-flight guard.
-   */
-  private boolean runChain(
-      String repoId,
-      String workspaceId,
-      List<BootstrapCommandDto> chain,
-      TechnicalProcess process) {
+  /** Await the daemon's autonomous boot-time chain, recording each step through {@code sink}. */
+  private Optional<WorkspaceBootstrapDriver.Result> awaitChain(
+      String repoId, String workspaceId, TechnicalProcess process) {
     changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
-    for (int i = 0; i < chain.size(); i++) {
-      BootstrapCommandDto command = chain.get(i);
-      boolean ok;
-      try {
-        ok = runCommand(repoId, workspaceId, command, process);
-      } catch (RuntimeException e) {
-        LOG.warnf(
-            e,
-            "Bootstrap command '%s' failed to launch in workspace %s/%s",
-            command.name(),
+    return driver
+        .get()
+        .awaitBootstrap(
+            repoId,
             workspaceId,
-            repoId);
-        // Record FAILED for the throwing command — parity with runCommand's non-zero-exit path.
-        // Without this the surface keeps showing this command's previous (green) run after a chain
-        // that actually aborted, and the tab's failed-warning indicator never lights.
-        bootstrapRunService.recordOutcome(
-            repoId, workspaceId, command.id(), command.name(), BootstrapOutcome.FAILED, null, null);
-        if (process != null) {
-          String segment = bootstrapSegment(command.name());
-          process.appendLine(segment, "Launch failed: " + e.getMessage());
-          process.settleSegment(segment, false);
-        }
-        ok = false;
-      }
-      if (!ok) {
-        // Abort the rest loudly: their segments show up as failed instead of silently missing.
-        for (BootstrapCommandDto remaining : chain.subList(i + 1, chain.size())) {
-          if (process != null) {
-            String segment = bootstrapSegment(remaining.name());
-            process.appendLine(segment, "Skipped — an earlier bootstrap command failed.");
-            process.settleSegment(segment, false);
-          }
-        }
-        return false;
-      }
-    }
-    return true;
+            new RecordingSink(repoId, workspaceId, process),
+            Duration.ofMillis(connectMillis),
+            Duration.ofMillis(chainAwaitMillis));
   }
 
   /**
-   * One command: consult {@code check} (non-zero → SKIPPED, no command row), then run the execute
-   * script to completion and record the outcome. Returns whether the chain may continue.
+   * Ask the daemon to re-run the chain (or one step) and await it, recording through {@code sink}.
    */
-  private boolean runCommand(
-      String repoId, String workspaceId, BootstrapCommandDto command, TechnicalProcess process) {
-    String segment = bootstrapSegment(command.name());
-    if (process != null) {
-      process.openSegment(segment);
-    }
-
-    if (command.checkScript() != null) {
-      ContainerRuntime.ExecResult check =
-          containers.exec(
-              containers.containerName(workspaceId, repoId),
-              "/workspace",
-              command.environment(),
-              "bash",
-              "-lc",
-              command.checkScript());
-      if (check.exitCode() != 0) {
-        bootstrapRunService.recordOutcome(
+  private Optional<WorkspaceBootstrapDriver.Result> runDaemon(
+      String repoId, String workspaceId, String onlyName, TechnicalProcess process) {
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+    return driver
+        .get()
+        .runBootstrap(
             repoId,
             workspaceId,
-            command.id(),
-            command.name(),
-            BootstrapOutcome.SKIPPED,
-            null,
-            null);
-        if (process != null) {
-          process.appendLine(
-              segment, "Skipped — check script exited " + check.exitCode() + " (not needed).");
-          process.settleSegment(segment, true);
-        }
-        return true;
+            onlyName,
+            new RecordingSink(repoId, workspaceId, process),
+            Duration.ofMillis(chainAwaitMillis));
+  }
+
+  /**
+   * Turns the daemon's streamed step events into host state: {@code bootstrap:<name>} process
+   * segments, {@link BootstrapRun} outcome rows (keyed to the matching DB command when one exists),
+   * and BOOTSTRAP UI hints (fired by {@link BootstrapRunService#recordOutcome}). The daemon reports
+   * the raw config name; the DB config-origin row carries the {@code @qits-config} suffix, so
+   * matching is by {@linkplain QitsConfig#baseName base name}.
+   */
+  private final class RecordingSink implements WorkspaceBootstrapDriver.StepSink {
+    private final String repoId;
+    private final String workspaceId;
+    private final TechnicalProcess process;
+    private final Map<String, BootstrapCommandDto> byBaseName;
+    private final Set<String> openedSegments = new HashSet<>();
+
+    private RecordingSink(String repoId, String workspaceId, TechnicalProcess process) {
+      this.repoId = repoId;
+      this.workspaceId = workspaceId;
+      this.process = process;
+      this.byBaseName = new HashMap<>();
+      for (BootstrapCommandDto command : bootstrapCommandService.resolveAll(repoId)) {
+        byBaseName.put(QitsConfig.baseName(command.name()), command);
       }
     }
 
-    RunOutcome outcome =
-        commandService.launchScriptAndAwait(
-            repoId,
-            workspaceId,
-            command.name(),
-            command.executeScript(),
-            command.environment(),
-            awaitTimeoutMillis,
-            process != null
-                ? new CommandOutputSink[] {new SegmentLineSink(process, segment)}
-                : new CommandOutputSink[0]);
-    boolean timedOut = outcome.exitCode() < 0;
-    if (timedOut) {
-      // A straggling execute whose successors are aborted anyway would only fight the re-run.
-      commandRegistry.terminate(outcome.commandId());
+    @Override
+    public void onStep(String name, String phase) {
+      if (process == null) {
+        return;
+      }
+      String segment = bootstrapSegment(name);
+      if (openedSegments.add(segment)) {
+        process.openSegment(segment);
+      }
+    }
+
+    @Override
+    public void onLine(String name, String line) {
       if (process != null) {
-        process.appendLine(
-            segment, "Timed out after " + awaitTimeoutMillis + " ms — terminated (chain aborted).");
+        process.appendLine(bootstrapSegment(name), line);
       }
     }
-    boolean ok = outcome.exitCode() == 0;
-    bootstrapRunService.recordOutcome(
-        repoId,
-        workspaceId,
-        command.id(),
-        command.name(),
-        ok ? BootstrapOutcome.SUCCEEDED : BootstrapOutcome.FAILED,
-        outcome.commandId(),
-        timedOut ? null : outcome.exitCode());
-    if (process != null) {
-      process.settleSegment(segment, ok);
+
+    @Override
+    public void onOutcome(String name, String outcome, Integer exitCode) {
+      BootstrapOutcome resolved = BootstrapOutcome.valueOf(outcome);
+      BootstrapCommandDto command = byBaseName.get(QitsConfig.baseName(name));
+      // Snapshot key: the DB command id when the step maps to a declared row, else the step name (a
+      // branch-divergent step with no host row still gets a stable last-run row).
+      String bootstrapCommandId = command != null ? command.id() : name;
+      String recordName = command != null ? command.name() : name;
+      // A skip has no run of its own — record no exit code (the check's non-zero is the skip
+      // reason,
+      // not a run outcome). commandId is always null now: the step ran in the container, not via a
+      // host Command row (its live output is the bootstrap:<name> process segment, not a Command
+      // log).
+      Integer recordedExit = resolved == BootstrapOutcome.SKIPPED ? null : exitCode;
+      bootstrapRunService.recordOutcome(
+          repoId, workspaceId, bootstrapCommandId, recordName, resolved, null, recordedExit);
+      if (process != null) {
+        String segment = bootstrapSegment(name);
+        if (openedSegments.add(segment)) {
+          process.openSegment(segment); // a SKIP with no prior CHECK step still needs a segment
+        }
+        process.settleSegment(segment, resolved != BootstrapOutcome.FAILED);
+      }
     }
-    return ok;
   }
 
   /** The technical-process segment for one bootstrap command: {@code bootstrap:<base name>}. */

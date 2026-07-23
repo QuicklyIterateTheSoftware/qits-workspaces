@@ -2,14 +2,11 @@ package eu.wohlben.qits.domain.bootstrap.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import eu.wohlben.qits.domain.bootstrap.dto.BootstrapRunDto;
 import eu.wohlben.qits.domain.bootstrap.entity.BootstrapOutcome;
-import eu.wohlben.qits.domain.command.entity.Command;
-import eu.wohlben.qits.domain.command.entity.CommandStatus;
 import eu.wohlben.qits.domain.daemon.control.DaemonSupervisor;
 import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
@@ -21,7 +18,6 @@ import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForDaemonsRecorder;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
-import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -35,12 +31,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The bootstrap chain end-to-end against the {@code FakeContainerRuntime} (real host processes, no
- * docker): a fresh provision runs the commands strictly in order before daemon auto-start; the
- * check script skips without a command row; a failure aborts the rest AND withholds {@code
+ * The host bootstrap <b>wiring</b> against the {@link FakeWorkspaceBootstrapDriver} (which plays
+ * the daemon, running each step through {@code FakeContainerRuntime} — real host processes, no
+ * docker): a fresh provision awaits the daemon's chain and records outcomes strictly in order
+ * before daemon auto-start; the check script skips; a failure aborts the rest AND withholds {@code
  * WorkspaceReadyForDaemons} (auto-start daemons stay down); a restart-shaped event passes straight
  * through without re-running; and the manual chain re-run is the recovery path that releases
- * auto-start on success. Kill-switch coverage is {@link WorkspaceBootstrapKillSwitchTest}.
+ * auto-start on success. The chain <b>semantics</b> (order, check-skip, fail-fast,
+ * timeout-terminate) are the daemon module's {@code BootstrapRunnerTest}; bootstrap steps run in
+ * the container now, so they no longer leave host {@code Command} audit rows (their live output is
+ * the {@code bootstrap:<name>} process segment). Kill-switch coverage is {@link
+ * WorkspaceBootstrapKillSwitchTest}.
  */
 @QuarkusTest
 @TestProfile(WorkspaceBootstrapRunnerTest.TestProfile.class)
@@ -56,8 +57,8 @@ public class WorkspaceBootstrapRunnerTest {
             "qits.daemons.autostart-enabled", "true",
             "qits.daemons.ready-grace-ms", "300",
             "qits.daemons.liveness-poll-ms", "150",
-            // Generous enough for a PTY spawn, tight enough that the sleep-forever timeout test
-            // finishes fast.
+            // The host's chain-await timeout (the fake driver runs the chain synchronously, so this
+            // only bounds a hung await).
             "qits.bootstrap.await-timeout-ms", "8000");
       } catch (Exception e) {
         throw new RuntimeException(e);
@@ -168,11 +169,6 @@ public class WorkspaceBootstrapRunnerTest {
         expected + " for daemon " + daemonId);
   }
 
-  private Command commandRow(String commandId) {
-    return QuarkusTransaction.requiringNew()
-        .call(() -> Command.<Command>findByIdOptional(commandId).orElse(null));
-  }
-
   @Test
   public void freshProvisionRunsChainInOrderBeforeDaemonAutoStart() throws Exception {
     String repoId = repoWithWorkspace("Bootstrap Fresh");
@@ -193,13 +189,8 @@ public class WorkspaceBootstrapRunnerTest {
         Files.readAllLines(orderLog),
         "commands ran strictly in orderIndex order");
     assertEquals(0, first.exitCode());
-    assertNotNull(first.commandId(), "each execute leaves a Command audit row");
-    Command audit = commandRow(first.commandId());
-    assertNotNull(audit);
-    assertEquals(CommandStatus.EXITED, audit.status);
-    assertNull(audit.actionId, "bootstrap runs are not backed by an action");
-    assertEquals("first", audit.actionName);
-    assertNotNull(second.commandId());
+    assertNull(first.commandId(), "bootstrap steps run in-container — no host Command audit row");
+    assertEquals(0, second.exitCode());
     assertEquals(1, readyRecorder.countFor(repoId, "work"), "chain success released auto-start");
   }
 
@@ -233,7 +224,6 @@ public class WorkspaceBootstrapRunnerTest {
 
     BootstrapRunDto failed = awaitOutcome(repoId, failingId, BootstrapOutcome.FAILED);
     assertEquals(7, failed.exitCode());
-    assertNotNull(failed.commandId(), "the failed run's log is linked for debugging");
 
     // The rest of the chain was aborted and auto-start withheld. Give the async pipeline a
     // moment to prove the negative.
@@ -314,27 +304,6 @@ public class WorkspaceBootstrapRunnerTest {
         BadRequestException.class,
         () -> runner.runChainAsync(repoId, "work"),
         "a second run while one is in flight is rejected");
-  }
-
-  @Test
-  public void timedOutExecuteIsTerminatedAndFailsTheChain() throws Exception {
-    String repoId = repoWithWorkspace("Bootstrap Timeout");
-    // Sleeps far past qits.bootstrap.await-timeout-ms (8s in this profile).
-    String hungId = command(repoId, "hung", "sleep 300", null);
-
-    workspaceService.ensureContainer(repoId, "work");
-
-    BootstrapRunDto run = awaitOutcome(repoId, hungId, BootstrapOutcome.FAILED);
-    assertNull(run.exitCode(), "a timeout has no real exit code");
-    assertNotNull(run.commandId());
-    // The straggler is terminated (unlike launchAndAwait's leave-running policy).
-    await(
-        () -> {
-          Command audit = commandRow(run.commandId());
-          return audit != null && audit.status == CommandStatus.TERMINATED ? audit : null;
-        },
-        "the timed-out command to be terminated");
-    assertEquals(0, readyRecorder.countFor(repoId, "work"), "a timed-out chain withholds ready");
   }
 
   @Test

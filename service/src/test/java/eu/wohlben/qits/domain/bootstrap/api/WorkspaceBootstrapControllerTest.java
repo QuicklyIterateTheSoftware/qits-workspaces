@@ -142,19 +142,15 @@ public class WorkspaceBootstrapControllerTest {
         .body("started", equalTo(true));
 
     assertEquals("SUCCEEDED", awaitOutcome(repoId, 0, "SUCCEEDED"));
-    String commandId =
-        given()
-            .get(surface(repoId))
-            .then()
-            .statusCode(200)
-            .extract()
-            .path("entries[0].lastRun.commandId");
-    // The execute left an ordinary command audit row with its log.
+    // The step ran in the container (the daemon's chain), not via a host Command row, so there is
+    // no
+    // linked command audit row — its live output is the bootstrap:<name> process segment.
     given()
-        .get("/api/commands/" + commandId)
+        .get(surface(repoId))
         .then()
         .statusCode(200)
-        .body("command.actionName", equalTo("install"));
+        .body("entries[0].lastRun.outcome", equalTo("SUCCEEDED"))
+        .body("entries[0].lastRun.commandId", nullValue());
   }
 
   @Test
