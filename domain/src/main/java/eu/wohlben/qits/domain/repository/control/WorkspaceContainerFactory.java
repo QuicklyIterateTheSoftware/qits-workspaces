@@ -99,6 +99,27 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "qits.bootstrap.autorun-enabled", defaultValue = "true")
   boolean bootstrapAutorunEnabled;
 
+  /**
+   * Service (dev-server) supervision knobs, forwarded to the in-container daemon which supervises
+   * them itself (docs/epics/qits-workspace-daemon/ Part 4). Mirror the host-side {@code
+   * qits.services.*} so host projection and container supervision agree: the auto-start kill
+   * switch, the ready grace (no readyPattern), the restart backoff bounds, and the stop grace.
+   */
+  @ConfigProperty(name = "qits.services.autostart-enabled", defaultValue = "true")
+  boolean servicesAutostartEnabled;
+
+  @ConfigProperty(name = "qits.services.ready-grace-ms", defaultValue = "10000")
+  long serviceReadyGraceMs;
+
+  @ConfigProperty(name = "qits.services.restart-backoff-initial-ms", defaultValue = "1000")
+  long serviceBackoffInitialMs;
+
+  @ConfigProperty(name = "qits.services.restart-backoff-max-ms", defaultValue = "30000")
+  long serviceBackoffMaxMs;
+
+  @ConfigProperty(name = "qits.services.stop-grace-ms", defaultValue = "5000")
+  long serviceStopGraceMs;
+
   @Inject GitIdentity gitIdentity;
 
   /**
@@ -221,6 +242,20 @@ public class WorkspaceContainerFactory {
     // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
     container.env(
         "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN", String.valueOf(bootstrapAutorunEnabled));
+    // Service (dev-server) supervision, self-run by the daemon as the boot-sequence tail (Part 4):
+    // the auto-start kill switch + the knobs the in-container ServiceSupervisor honours.
+    container.env(
+        "QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART", String.valueOf(servicesAutostartEnabled));
+    container.env(
+        "QITS_WORKSPACE_DAEMON_SERVICE_READY_GRACE_MS", String.valueOf(serviceReadyGraceMs));
+    container.env(
+        "QITS_WORKSPACE_DAEMON_SERVICE_RESTART_BACKOFF_INITIAL_MS",
+        String.valueOf(serviceBackoffInitialMs));
+    container.env(
+        "QITS_WORKSPACE_DAEMON_SERVICE_RESTART_BACKOFF_MAX_MS",
+        String.valueOf(serviceBackoffMaxMs));
+    container.env(
+        "QITS_WORKSPACE_DAEMON_SERVICE_STOP_GRACE_MS", String.valueOf(serviceStopGraceMs));
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev daemon can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);

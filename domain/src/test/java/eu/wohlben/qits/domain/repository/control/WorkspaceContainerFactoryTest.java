@@ -125,6 +125,8 @@ class WorkspaceContainerFactoryTest {
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=my-repo");
     // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN=true");
+    // Part 4: the service (dev-server) auto-start kill switch the daemon honours as its boot tail.
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART=true");
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());
