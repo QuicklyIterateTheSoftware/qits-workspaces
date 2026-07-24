@@ -3,21 +3,22 @@ package eu.wohlben.qits.domain.service.control;
 import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 import eu.wohlben.qits.domain.command.control.CommandRegistry;
 import eu.wohlben.qits.domain.command.control.CommandService;
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
-import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.process.control.SegmentLineSink;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
+import eu.wohlben.qits.domain.service.dto.ServiceDefinitionDto;
 import eu.wohlben.qits.domain.service.dto.ServiceEventDto;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
 import eu.wohlben.qits.domain.service.entity.ServiceEventKind;
 import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
+import eu.wohlben.qits.domain.service.mapper.ServiceDefinitionMapper;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import jakarta.annotation.PostConstruct;
@@ -73,7 +74,7 @@ public class ServiceSupervisor {
   private static final class Instance {
     final String repoId;
     final String workspaceId;
-    RepositoryDaemonDto daemon;
+    ServiceDefinitionDto daemon;
     ServiceStatus status = ServiceStatus.STOPPED;
     int restartCount;
     String commandId;
@@ -114,7 +115,7 @@ public class ServiceSupervisor {
      */
     TechnicalProcess process;
 
-    Instance(String repoId, String workspaceId, RepositoryDaemonDto daemon) {
+    Instance(String repoId, String workspaceId, ServiceDefinitionDto daemon) {
       this.repoId = repoId;
       this.workspaceId = workspaceId;
       this.daemon = daemon;
@@ -138,7 +139,14 @@ public class ServiceSupervisor {
 
   @Inject CommandRegistry registry;
 
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  /**
+   * The in-container config read (Part 2) — the only source of service definitions since Part 5
+   * removed the DB store. Absent in cli/tests without the backend (empty {@code Instance<>} ⇒ no
+   * definitions, both supervision modes).
+   */
+  @Inject jakarta.enterprise.inject.Instance<WorkspaceConfigReader> configReader;
+
+  @Inject ServiceDefinitionMapper definitions;
 
   @Inject ServiceEventService events;
 
@@ -209,8 +217,24 @@ public class ServiceSupervisor {
   }
 
   /**
-   * Start {@code daemonId} in the workspace. One running instance per (workspace, daemon) is
-   * enforced — "restart" beats two dev servers fighting over a port.
+   * The workspace's config-declared service definitions — the in-container {@code .qits-config.yml}
+   * read via {@link WorkspaceConfigReader}, mapped to flat DTOs. Empty when no daemon is live (no
+   * control socket ⇒ no config) or the file declares no services, in both supervision modes.
+   */
+  private List<ServiceDefinitionDto> resolveDefinitions(String workspaceId) {
+    if (configReader.isUnsatisfied()) {
+      return List.of();
+    }
+    return configReader
+        .get()
+        .readConfig(workspaceId)
+        .map(view -> view.config().services().stream().map(definitions::toDto).toList())
+        .orElse(List.of());
+  }
+
+  /**
+   * Start {@code daemonId} (the config-declared {@code id:}) in the workspace. One running instance
+   * per (workspace, daemon) is enforced — "restart" beats two dev servers fighting over a port.
    */
   public synchronized ServiceInstanceDto start(String repoId, String workspaceId, String daemonId) {
     return start(repoId, workspaceId, daemonId, null);
@@ -223,7 +247,13 @@ public class ServiceSupervisor {
    */
   public synchronized ServiceInstanceDto start(
       String repoId, String workspaceId, String daemonId, TechnicalProcess process) {
-    RepositoryDaemonDto daemon = repositoryDaemonService.resolve(repoId, daemonId);
+    ServiceDefinitionDto daemon =
+        resolveDefinitions(workspaceId).stream()
+            .filter(d -> d.id().equals(daemonId))
+            .findFirst()
+            .orElseThrow(
+                () ->
+                    new NotFoundException("Service not declared in .qits-config.yml: " + daemonId));
     Key key = new Key(repoId, workspaceId, daemonId);
     Instance existing = instances.get(key);
     if (existing != null && isLive(existing.status)) {
@@ -428,19 +458,19 @@ public class ServiceSupervisor {
     }
   }
 
-  /** Every daemon of the repository with its runtime state in this workspace. */
+  /** Every config-declared service of the workspace with its runtime state. */
   public List<ServiceInstanceDto> effectiveDaemons(String repoId, String workspaceId) {
-    List<RepositoryDaemonDto> definitions = repositoryDaemonService.resolveAll(repoId);
+    List<ServiceDefinitionDto> definitions = resolveDefinitions(workspaceId);
     // Lazily reconcile a daemon still running from before a qits restart: its supervisor state was
     // lost, but its detached session lives on. Probe each untracked daemon once — if its session is
     // alive, re-adopt it (resume the log follow + liveness poll) so it reads RUNNING again with
     // logs, instead of the blanket "STOPPED, command INTERRUPTED" the old in-memory model produced.
-    for (RepositoryDaemonDto definition : definitions) {
+    for (ServiceDefinitionDto definition : definitions) {
       adoptIfRunning(repoId, workspaceId, definition);
     }
     synchronized (this) {
       List<ServiceInstanceDto> result = new ArrayList<>(definitions.size());
-      for (RepositoryDaemonDto definition : definitions) {
+      for (ServiceDefinitionDto definition : definitions) {
         Instance instance = instances.get(new Key(repoId, workspaceId, definition.id()));
         result.add(toInstanceDto(instance, definition, workspaceId));
       }
@@ -454,7 +484,7 @@ public class ServiceSupervisor {
    * most once per key so a UI poll doesn't hammer the container runtime; a session that isn't
    * running when first probed is simply left settled.
    */
-  private void adoptIfRunning(String repoId, String workspaceId, RepositoryDaemonDto definition) {
+  private void adoptIfRunning(String repoId, String workspaceId, ServiceDefinitionDto definition) {
     if (daemonBacked(workspaceId)) {
       return; // daemon-backed adoption is event-driven (the daemon re-reports on socket reconnect)
     }
@@ -514,7 +544,7 @@ public class ServiceSupervisor {
    *     re-emitted), and consider the live daemon READY.
    */
   private void launch(Instance instance, boolean adopt) {
-    RepositoryDaemonDto daemon = instance.daemon;
+    ServiceDefinitionDto daemon = instance.daemon;
     String container = containers.containerName(instance.workspaceId, instance.repoId);
 
     List<CommandOutputSink> sinks = new ArrayList<>();
@@ -698,10 +728,10 @@ public class ServiceSupervisor {
    * a stop's {@code kill -- -pgid} misses it), keeps binding the http port, and would wedge this
    * start ("Port 8080 seems to be in use"). Every daemon process is tagged {@link
    * #SERVICE_MARKER_ENV}={@code <id>} (inherited by its forks), so the escaped child is found via
-   * {@code /proc/<pid>/environ} regardless of process group. The per-daemon UUID keeps the scan off
-   * any other process (crucial: with the test fake this runs on the host, so a broader match could
-   * kill unrelated host processes), and the scanning shell carries no marker so it can't kill
-   * itself.
+   * {@code /proc/<pid>/environ} regardless of process group. The per-daemon id (the config-declared
+   * {@code id:}) keeps the scan off any other process (crucial: with the test fake this runs on the
+   * host, so a broader match could kill unrelated host processes), and the scanning shell carries
+   * no marker so it can't kill itself.
    *
    * <p>A holder the marker can't reach — one predating this mechanism, or a session qits otherwise
    * lost track of — is handled instead by {@link #adoptIfRunning} re-adopting it, not by killing
@@ -711,10 +741,10 @@ public class ServiceSupervisor {
    */
   private void reapStragglers(Instance instance) {
     String container = containers.containerName(instance.workspaceId, instance.repoId);
-    // The daemon id is a server-generated UUID (hex + hyphens) — safe to interpolate. -z: environ
-    // is
-    // NUL-separated, so each KEY=VALUE is one record; -F: fixed string, exact match.
-    String marker = SERVICE_MARKER_ENV + "=" + instance.daemon.id();
+    // The id is config-declared (was a server UUID) — single-quote-escape it for the shell
+    // interpolation. -z: environ is NUL-separated, so each KEY=VALUE is one record; -F: fixed
+    // string, exact match.
+    String marker = SERVICE_MARKER_ENV + "=" + instance.daemon.id().replace("'", "'\\''");
     String script =
         "for p in /proc/[0-9]*; do grep -qzF '"
             + marker
@@ -841,22 +871,28 @@ public class ServiceSupervisor {
   }
 
   /**
-   * Re-read the daemon definition from the repository before an automatic relaunch, so a mid-run
-   * edit (webView added, startScript changed, env updated) takes effect on the fresh process
-   * instead of the supervisor resurrecting the launch-time snapshot. Falls back to the pinned copy
-   * if the definition was deleted mid-flight — {@link #launch} still needs something to start, and
-   * the next liveness/settle cycle will clean it up. Without this, the proxy's {@link #proxyTarget}
-   * (which reads {@code instance.daemon.webView()}) and the REST list (which prefers the database
-   * definition) answer from two different snapshots after an {@code ON_FAILURE} restart — see
-   * docs/issues resolved/2026-07-06_daemon-relaunch-uses-stale-definition-after-webview-update.
+   * Re-read the daemon definition from the workspace's config before an automatic relaunch, so a
+   * mid-run edit (webView added, startScript changed, env updated) takes effect on the fresh
+   * process instead of the supervisor resurrecting the launch-time snapshot. Falls back to the
+   * pinned copy if the definition was removed from the file mid-flight — {@link #launch} still
+   * needs something to start, and the next liveness/settle cycle will clean it up. Without this,
+   * the proxy's {@link #proxyTarget} (which reads {@code instance.daemon.webView()}) and the REST
+   * list (which prefers the config definition) answer from two different snapshots after an {@code
+   * ON_FAILURE} restart — see docs/issues
+   * resolved/2026-07-06_daemon-relaunch-uses-stale-definition-after-webview-update.
    */
   private void refreshDefinition(Instance instance) {
-    try {
-      instance.daemon = repositoryDaemonService.resolve(instance.repoId, instance.daemon.id());
-    } catch (NotFoundException e) {
-      LOG.debugf(
-          "Daemon '%s' definition gone at relaunch; keeping the pinned copy", instance.daemon.id());
-    }
+    instance.daemon =
+        resolveDefinitions(instance.workspaceId).stream()
+            .filter(d -> d.id().equals(instance.daemon.id()))
+            .findFirst()
+            .orElseGet(
+                () -> {
+                  LOG.debugf(
+                      "Daemon '%s' definition gone at relaunch; keeping the pinned copy",
+                      instance.daemon.id());
+                  return instance.daemon;
+                });
   }
 
   private void transition(
@@ -937,11 +973,11 @@ public class ServiceSupervisor {
 
   /**
    * The live proxy target for a (workspaceId, daemonId) pair — the daemon web-view proxy's only
-   * lookup. The pair is unambiguous even though workspace slugs repeat across repositories, because
-   * a daemon id is a UUID owned by exactly one repository. The port comes exclusively from
-   * supervisor state (never from any request component) and targets localhost — the SSRF
-   * constraint. A present target with a null {@code origin} means the daemon isn't reachable (e.g.
-   * the container is gone) — the proxy 502s.
+   * lookup. {@code daemonId} is the config-declared service id, unique within the workspace's
+   * config; scoped to the workspace by the pair lookup. The port comes exclusively from supervisor
+   * state (never from any request component) and targets localhost — the SSRF constraint. A present
+   * target with a null {@code origin} means the daemon isn't reachable (e.g. the container is gone)
+   * — the proxy 502s.
    */
   public synchronized Optional<ProxyTarget> proxyTarget(String workspaceId, String daemonId) {
     for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
@@ -974,8 +1010,8 @@ public class ServiceSupervisor {
   }
 
   private ServiceInstanceDto toInstanceDto(
-      Instance instance, RepositoryDaemonDto definition, String workspaceId) {
-    RepositoryDaemonDto daemon = definition != null ? definition : instance.daemon;
+      Instance instance, ServiceDefinitionDto definition, String workspaceId) {
+    ServiceDefinitionDto daemon = definition != null ? definition : instance.daemon;
     String proxyPath =
         daemon.webView() != null
             ? ServiceProxyPath.servedBase(workspaceId, daemon.id(), daemon.webView().basePath())
@@ -1029,11 +1065,11 @@ public class ServiceSupervisor {
           // a
           // qits restart, or a config-declared service with no coupler run) — event-driven
           // adoption.
-          RepositoryDaemonDto definition = resolveDefinition(repoId, serviceName);
+          ServiceDefinitionDto definition = resolveDefinition(workspaceId, serviceName);
           if (definition == null) {
             LOG.debugf(
-                "Ignoring event for service '%s' with no repository definition in %s",
-                serviceName, repoId);
+                "Ignoring event for service '%s' with no config definition in workspace %s",
+                serviceName, workspaceId);
             return;
           }
           instance = new Instance(repoId, workspaceId, definition);
@@ -1090,17 +1126,19 @@ public class ServiceSupervisor {
   }
 
   /**
-   * Resolve a repository's daemon definition by service name (a DB read; the orphan case is null).
+   * Resolve a workspace's config-declared service definition by service name (the orphan case is
+   * null).
    */
-  private RepositoryDaemonDto resolveDefinition(String repoId, String serviceName) {
+  private ServiceDefinitionDto resolveDefinition(String workspaceId, String serviceName) {
     try {
-      for (RepositoryDaemonDto definition : repositoryDaemonService.resolveAll(repoId)) {
+      for (ServiceDefinitionDto definition : resolveDefinitions(workspaceId)) {
         if (definition.name().equals(serviceName)) {
           return definition;
         }
       }
     } catch (RuntimeException e) {
-      LOG.debugf(e, "service definition lookup failed for '%s' in repo %s", serviceName, repoId);
+      LOG.debugf(
+          e, "service definition lookup failed for '%s' in workspace %s", serviceName, workspaceId);
     }
     return null;
   }

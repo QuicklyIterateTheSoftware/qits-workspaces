@@ -3,7 +3,7 @@ package eu.wohlben.qits.domain.bootstrap.control;
 import eu.wohlben.qits.domain.bootstrap.dto.BootstrapRunDto;
 import eu.wohlben.qits.domain.bootstrap.entity.BootstrapOutcome;
 import eu.wohlben.qits.domain.bootstrap.entity.BootstrapRun;
-import eu.wohlben.qits.domain.bootstrap.mapper.BootstrapCommandMapper;
+import eu.wohlben.qits.domain.bootstrap.mapper.BootstrapRunMapper;
 import eu.wohlben.qits.domain.bootstrap.persistence.BootstrapRunRepository;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.repository.entity.Workspace;
@@ -32,7 +32,7 @@ public class BootstrapRunService {
 
   @Inject WorkspaceRepository workspaceRepository;
 
-  @Inject BootstrapCommandMapper bootstrapCommandMapper;
+  @Inject BootstrapRunMapper bootstrapRunMapper;
 
   @Inject WorkspaceChangePublisher changePublisher;
 
@@ -74,7 +74,7 @@ public class BootstrapRunService {
   public List<BootstrapRunDto> listForWorkspace(String repoId, String workspaceId) {
     Workspace workspace = activeWorkspace(repoId, workspaceId);
     return bootstrapRunRepository.findByWorkspaceRow(workspace.id).stream()
-        .map(bootstrapCommandMapper::toDto)
+        .map(bootstrapRunMapper::toDto)
         .toList();
   }
 

@@ -13,9 +13,10 @@ import jakarta.ws.rs.core.MediaType;
 import java.util.List;
 
 /**
- * The runtime surface of daemons in one workspace: the effective daemons with their supervised
- * status (all of them, running or not — the everything-visible convention) and start/stop. The
- * event feed moved to the durable {@code /daemon-events} endpoint.
+ * The runtime surface of services in one workspace: the config-declared services with their
+ * supervised status (all of them, running or not — the everything-visible convention) and
+ * start/stop. {@code {daemonId}} path params carry the config-declared service {@code id:}
+ * (defaulting to its name). The event feed moved to the durable {@code /daemon-events} endpoint.
  */
 @Path("/repositories/{repoId}/workspaces/{workspaceId}/services")
 @Produces(MediaType.APPLICATION_JSON)

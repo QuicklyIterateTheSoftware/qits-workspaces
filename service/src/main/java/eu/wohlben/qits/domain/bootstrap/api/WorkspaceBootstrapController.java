@@ -1,10 +1,12 @@
 package eu.wohlben.qits.domain.bootstrap.api;
 
-import eu.wohlben.qits.domain.bootstrap.control.BootstrapCommandService;
 import eu.wohlben.qits.domain.bootstrap.control.BootstrapRunService;
 import eu.wohlben.qits.domain.bootstrap.control.WorkspaceBootstrapRunner;
-import eu.wohlben.qits.domain.bootstrap.dto.BootstrapCommandDto;
 import eu.wohlben.qits.domain.bootstrap.dto.BootstrapRunDto;
+import eu.wohlben.qits.domain.bootstrap.dto.BootstrapStepDto;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -19,8 +21,9 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * The workspace surface of the bootstrap chain: the configured commands in execution order, each
- * with its last recorded run in this workspace (null when it never ran), plus the on-demand
+ * The workspace surface of the bootstrap chain: the config-declared steps (from the workspace's
+ * in-container {@code .qits-config.yml} — the only chain source since Part 5) in execution order,
+ * each with its last recorded run in this workspace (null when it never ran), plus the on-demand
  * triggers. Runs kick off asynchronously — a chain can take as long as a cold {@code mvn install} —
  * and progress arrives over the workspace SSE channel's {@code bootstrap} hints; a run already in
  * flight is a 400.
@@ -30,7 +33,7 @@ import java.util.stream.Collectors;
 @Consumes(MediaType.APPLICATION_JSON)
 public class WorkspaceBootstrapController {
 
-  @Inject BootstrapCommandService bootstrapCommandService;
+  @Inject Instance<WorkspaceConfigReader> configReader;
 
   @Inject BootstrapRunService bootstrapRunService;
 
@@ -38,7 +41,7 @@ public class WorkspaceBootstrapController {
 
   public static record ListWorkspaceBootstrapRequest() {
     public record Response(boolean chainRunning, List<Entry> entries) {
-      public record Entry(BootstrapCommandDto command, BootstrapRunDto lastRun) {}
+      public record Entry(BootstrapStepDto step, BootstrapRunDto lastRun) {}
     }
   }
 
@@ -48,12 +51,23 @@ public class WorkspaceBootstrapController {
     Map<String, BootstrapRunDto> lastRuns =
         bootstrapRunService.listForWorkspace(repoId, workspaceId).stream()
             .collect(Collectors.toMap(BootstrapRunDto::bootstrapCommandId, Function.identity()));
+    List<QitsConfig.BootstrapDecl> chain =
+        configReader.isUnsatisfied()
+            ? List.of()
+            : configReader
+                .get()
+                .readConfig(workspaceId)
+                .map(view -> view.config().bootstrap())
+                .orElse(List.of());
     var entries =
-        bootstrapCommandService.resolveAll(repoId).stream()
+        chain.stream()
             .map(
-                command ->
+                decl ->
                     new ListWorkspaceBootstrapRequest.Response.Entry(
-                        command, lastRuns.get(command.id())))
+                        new BootstrapStepDto(decl.id(), decl.name(), decl.description()),
+                        // The last-run row is keyed by step name (the runner records the daemon's
+                        // reported name; ids default to names until configs declare real ids).
+                        lastRuns.get(decl.name())))
             .toList();
     return new ListWorkspaceBootstrapRequest.Response(
         bootstrapRunner.isChainRunning(repoId, workspaceId), entries);
@@ -75,13 +89,16 @@ public class WorkspaceBootstrapController {
     public record Response(boolean started) {}
   }
 
+  /**
+   * {@code {stepId}} is the config-declared bootstrap {@code id:} (defaulting to the step name).
+   */
   @POST
-  @Path("/{commandId}/run")
+  @Path("/{stepId}/run")
   public RunBootstrapCommandRequest.Response runSingle(
       @PathParam("repoId") String repoId,
       @PathParam("workspaceId") String workspaceId,
-      @PathParam("commandId") String commandId) {
-    bootstrapRunner.runSingleAsync(repoId, workspaceId, commandId);
+      @PathParam("stepId") String stepId) {
+    bootstrapRunner.runSingleAsync(repoId, workspaceId, stepId);
     return new RunBootstrapCommandRequest.Response(true);
   }
 }

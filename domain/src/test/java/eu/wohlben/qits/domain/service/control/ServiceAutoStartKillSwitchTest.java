@@ -3,9 +3,10 @@ package eu.wohlben.qits.domain.service.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -17,6 +18,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -47,7 +49,7 @@ public class ServiceAutoStartKillSwitchTest {
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject FakeWorkspaceConfigReader configReader;
   @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
 
@@ -57,24 +59,30 @@ public class ServiceAutoStartKillSwitchTest {
     var project = projectService.create("KillSwitch Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    String daemonId =
-        repositoryDaemonService.create(
-                repo.id,
-                "auto",
-                null,
-                "sleep 300",
-                null,
-                "TERM",
-                RestartPolicy.NEVER,
-                true, // autoStart, but the kill switch overrides it
-                0,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null)
-            .id;
+    String daemonId = "auto";
+    configReader.setConfig(
+        "work",
+        new QitsConfig(
+            null,
+            null,
+            null,
+            List.of(
+                new QitsConfig.ServiceDecl(
+                    daemonId,
+                    "auto",
+                    null,
+                    "sleep 300",
+                    null,
+                    null,
+                    true, // autoStart, but the
+                    // kill switch overrides it
+                    RestartPolicy.NEVER,
+                    0,
+                    "TERM",
+                    null,
+                    null,
+                    null)),
+            null));
 
     containerEvents.fireStarted(repo.id, "work");
 

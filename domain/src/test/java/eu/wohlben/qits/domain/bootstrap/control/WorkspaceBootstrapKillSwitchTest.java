@@ -3,6 +3,7 @@ package eu.wohlben.qits.domain.bootstrap.control;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.GitExecutor;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForDaemonsRecorder;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -11,14 +12,17 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
  * {@code qits.bootstrap.autorun-enabled=false} suppresses the provision-time chain — a fresh
- * provision passes straight through to daemon auto-start with no run recorded. Manual runs stay
- * available (not covered here; they don't consult the switch by construction).
+ * provision passes straight through to daemon auto-start with no run recorded, even when the
+ * checkout declares a chain. Manual runs stay available (not covered here; they don't consult the
+ * switch by construction).
  */
 @QuarkusTest
 @TestProfile(WorkspaceBootstrapKillSwitchTest.KillSwitchProfile.class)
@@ -45,17 +49,32 @@ public class WorkspaceBootstrapKillSwitchTest {
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
-  @Inject BootstrapCommandService bootstrapCommandService;
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceReadyForDaemonsRecorder readyRecorder;
+  @Inject GitExecutor git;
+
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
 
   @Test
   public void killSwitchPassesFreshProvisionStraightThrough() throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Bootstrap Kill Switch", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
+    // A declared chain exists (committed before the workspace fork, so the checkout carries it) —
+    // the kill switch, not its absence, is what suppresses the run.
+    Path origin = Path.of(dataDir, repo.id, "origin");
+    Path worktree = Files.createTempDirectory("qits-config-commit");
+    git.exec(null, "git", "clone", origin.toString(), worktree.toString());
+    git.exec(worktree.toFile(), "git", "config", "user.email", "t@example.com");
+    git.exec(worktree.toFile(), "git", "config", "user.name", "Test");
+    Files.writeString(
+        worktree.resolve(".qits-config.yml"),
+        "version: 1\nbootstrap:\n  - name: 'install'\n    execute: 'echo hi'\n");
+    git.exec(worktree.toFile(), "git", "add", ".qits-config.yml");
+    git.exec(worktree.toFile(), "git", "commit", "-m", "stage qits config");
+    git.exec(worktree.toFile(), "git", "push", "origin", "HEAD:master");
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    bootstrapCommandService.create(repo.id, "install", null, "echo hi", null, null, null);
     readyRecorder.clear();
 
     workspaceService.ensureContainer(repo.id, "work");

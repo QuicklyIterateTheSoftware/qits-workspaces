@@ -4,11 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
@@ -20,6 +21,7 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,7 +33,8 @@ import org.junit.jupiter.api.Test;
  * streams onto its state machine — it runs no tmux session itself. A {@link
  * FakeWorkspaceServiceDriver} plays the daemon (records the host's calls, exposes the sink the host
  * subscribed), and {@link FakeWorkspaceDaemonLiveness} makes the workspace daemon-live. The tmux
- * fallback (no live daemon) stays covered by {@link ServiceSupervisorTest}.
+ * fallback (no live daemon) stays covered by {@link ServiceSupervisorTest}. Definitions are
+ * config-declared, staged into the {@link FakeWorkspaceConfigReader} keyed by their {@code id:}.
  */
 @QuarkusTest
 @TestProfile(ServiceSupervisorProjectionTest.TestProfile.class)
@@ -52,14 +55,16 @@ public class ServiceSupervisorProjectionTest {
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject FakeWorkspaceConfigReader configReader;
   @Inject ServiceSupervisor supervisor;
   @Inject FakeWorkspaceDaemonLiveness liveness;
   @Inject FakeWorkspaceServiceDriver driver;
 
   @BeforeEach
-  void resetDriver() {
-    driver.reset(); // the fake is a shared singleton across this class's test methods
+  void resetFakes() {
+    // Both fakes are shared singletons across this class's test methods.
+    driver.reset();
+    configReader.clear();
   }
 
   private String repoWithLiveWorkspace() throws Exception {
@@ -72,23 +77,29 @@ public class ServiceSupervisorProjectionTest {
   }
 
   private String createDaemon(String repoId, String name, String script) {
-    return repositoryDaemonService.create(
-            repoId,
-            name,
-            null,
-            script,
-            null,
-            "TERM",
-            RestartPolicy.ON_FAILURE,
-            null,
-            3,
+    configReader.setConfig(
+        "work",
+        new QitsConfig(
             null,
             null,
             null,
-            null,
-            null,
-            null)
-        .id;
+            List.of(
+                new QitsConfig.ServiceDecl(
+                    name,
+                    name,
+                    null,
+                    script,
+                    null,
+                    null,
+                    null,
+                    RestartPolicy.ON_FAILURE,
+                    3,
+                    "TERM",
+                    null,
+                    null,
+                    null)),
+            null));
+    return name;
   }
 
   private ServiceStatus statusOf(String repoId, String daemonId) {

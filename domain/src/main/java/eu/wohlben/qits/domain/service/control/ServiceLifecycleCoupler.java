@@ -1,12 +1,13 @@
 package eu.wohlben.qits.domain.service.control;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
-import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStopping;
 import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForDaemons;
+import eu.wohlben.qits.domain.service.dto.ServiceDefinitionDto;
+import eu.wohlben.qits.domain.service.mapper.ServiceDefinitionMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
@@ -22,8 +23,8 @@ import org.jboss.logging.Logger;
  *   <li><b>start</b> — when a freshly started workspace container is past its bootstrap chain
  *       (signalled by {@link WorkspaceReadyForDaemons}, fired by {@code WorkspaceBootstrapRunner}
  *       either as a pass-through of the container start or after the chain succeeded), start the
- *       repository's auto-start daemons so the workspace runs its dev server unattended instead of
- *       coming up daemon-less. Deliberately <em>not</em> coupled to {@code
+ *       workspace config's auto-start services so the workspace runs its dev server unattended
+ *       instead of coming up daemon-less. Deliberately <em>not</em> coupled to {@code
  *       WorkspaceContainerStarted} directly: bootstrap must finish first, and CDI gives two async
  *       observers of one event no ordering, so the sequencing is structural. Observed with
  *       {@code @ObservesAsync} — runs on the async observer thread and never adds to {@code
@@ -43,7 +44,9 @@ public class ServiceLifecycleCoupler {
 
   private static final Logger LOG = Logger.getLogger(ServiceLifecycleCoupler.class);
 
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject jakarta.enterprise.inject.Instance<WorkspaceConfigReader> configReader;
+
+  @Inject ServiceDefinitionMapper definitions;
 
   @Inject ServiceSupervisor supervisor;
 
@@ -62,16 +65,18 @@ public class ServiceLifecycleCoupler {
     // set — even when it is empty or the kill switch is off — because its terminal `done` waits
     // for exactly that declaration.
     TechnicalProcess process = processRegistry.find(evt.technicalProcessId()).orElse(null);
-    List<RepositoryDaemonDto> autoStarts =
-        !autostartEnabled
+    List<ServiceDefinitionDto> autoStarts =
+        !autostartEnabled || configReader.isUnsatisfied()
             ? List.of()
-            : repositoryDaemonService.resolveAll(evt.repoId()).stream()
-                .filter(RepositoryDaemonDto::autoStart)
+            : configReader.get().readConfig(evt.workspaceId()).stream()
+                .flatMap(view -> view.config().services().stream())
+                .map(definitions::toDto)
+                .filter(ServiceDefinitionDto::autoStart)
                 .toList();
     if (process != null) {
-      process.expectDaemons(autoStarts.stream().map(RepositoryDaemonDto::name).toList());
+      process.expectDaemons(autoStarts.stream().map(ServiceDefinitionDto::name).toList());
     }
-    for (RepositoryDaemonDto daemon : autoStarts) {
+    for (ServiceDefinitionDto daemon : autoStarts) {
       try {
         supervisor.start(evt.repoId(), evt.workspaceId(), daemon.id(), process);
       } catch (BadRequestException alreadyRunning) {

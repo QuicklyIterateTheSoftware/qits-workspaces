@@ -1,12 +1,13 @@
 package eu.wohlben.qits.domain.bootstrap.control;
 
-import eu.wohlben.qits.domain.bootstrap.dto.BootstrapCommandDto;
 import eu.wohlben.qits.domain.bootstrap.entity.BootstrapOutcome;
 import eu.wohlben.qits.domain.error.BadRequestException;
+import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
+import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerStarted;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -18,10 +19,8 @@ import jakarta.enterprise.event.ObservesAsync;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.time.Duration;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,8 +64,6 @@ public class WorkspaceBootstrapRunner {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceBootstrapRunner.class);
 
-  @Inject BootstrapCommandService bootstrapCommandService;
-
   @Inject BootstrapRunService bootstrapRunService;
 
   @Inject WorkspaceService workspaceService;
@@ -76,6 +73,13 @@ public class WorkspaceBootstrapRunner {
   @Inject WorkspaceChangePublisher changePublisher;
 
   @Inject TechnicalProcessRegistry processRegistry;
+
+  /**
+   * The in-container config read (Part 2) — the only source of the bootstrap chain since Part 5
+   * removed the DB store. Absent in apps without the backend (cli); a single-step run then skips
+   * its existence check and forwards the requested name straight to the daemon.
+   */
+  @Inject Instance<WorkspaceConfigReader> configReader;
 
   /**
    * The socket-backed driver that awaits (and re-triggers) the daemon's chain. Optional — apps
@@ -205,16 +209,46 @@ public class WorkspaceBootstrapRunner {
         });
   }
 
-  /** Re-run one command on demand (async). Does not touch daemon auto-start. */
-  public void runSingleAsync(String repoId, String workspaceId, String commandId) {
-    BootstrapCommandDto command = bootstrapCommandService.resolve(repoId, commandId);
+  /**
+   * Re-run one step on demand (async). Does not touch daemon auto-start. {@code stepId} is the
+   * config-declared {@code id:} (which defaults to the step name) — resolved against the
+   * workspace's ConfigView to the step name the daemon understands.
+   */
+  public void runSingleAsync(String repoId, String workspaceId, String stepId) {
+    String stepName = resolveStepName(workspaceId, stepId);
     submitManual(
         repoId,
         workspaceId,
         () -> {
           workspaceService.ensureContainer(repoId, workspaceId);
-          runDaemon(repoId, workspaceId, QitsConfig.baseName(command.name()), null);
+          runDaemon(repoId, workspaceId, stepName, null);
         });
+  }
+
+  /**
+   * Maps a config-declared bootstrap {@code id:} to its step name. When the config is readable the
+   * id must resolve (404 otherwise); when no daemon is live yet to read it (a cold workspace — the
+   * manual run itself provisions), the id passes through (ids default to names, so it is usually
+   * already the step name, and the daemon errors on a genuine mismatch).
+   */
+  private String resolveStepName(String workspaceId, String stepId) {
+    if (configReader.isUnsatisfied()) {
+      return stepId;
+    }
+    return configReader
+        .get()
+        .readConfig(workspaceId)
+        .map(
+            view ->
+                view.config().bootstrap().stream()
+                    .filter(decl -> decl.id().equals(stepId))
+                    .findFirst()
+                    .map(QitsConfig.BootstrapDecl::name)
+                    .orElseThrow(
+                        () ->
+                            new NotFoundException(
+                                "Bootstrap step not declared in .qits-config.yml: " + stepId)))
+        .orElse(stepId);
   }
 
   /** Enter the in-flight guard and hand the work to the manual-run executor. */
@@ -272,26 +306,20 @@ public class WorkspaceBootstrapRunner {
 
   /**
    * Turns the daemon's streamed step events into host state: {@code bootstrap:<name>} process
-   * segments, {@link BootstrapRun} outcome rows (keyed to the matching DB command when one exists),
-   * and BOOTSTRAP UI hints (fired by {@link BootstrapRunService#recordOutcome}). The daemon reports
-   * the raw config name; the DB config-origin row carries the {@code @qits-config} suffix, so
-   * matching is by {@linkplain QitsConfig#baseName base name}.
+   * segments, {@link BootstrapRun} outcome rows (keyed by the step name — the file is the only
+   * chain source, so the name <em>is</em> the stable snapshot key), and BOOTSTRAP UI hints (fired
+   * by {@link BootstrapRunService#recordOutcome}).
    */
   private final class RecordingSink implements WorkspaceBootstrapDriver.StepSink {
     private final String repoId;
     private final String workspaceId;
     private final TechnicalProcess process;
-    private final Map<String, BootstrapCommandDto> byBaseName;
     private final Set<String> openedSegments = new HashSet<>();
 
     private RecordingSink(String repoId, String workspaceId, TechnicalProcess process) {
       this.repoId = repoId;
       this.workspaceId = workspaceId;
       this.process = process;
-      this.byBaseName = new HashMap<>();
-      for (BootstrapCommandDto command : bootstrapCommandService.resolveAll(repoId)) {
-        byBaseName.put(QitsConfig.baseName(command.name()), command);
-      }
     }
 
     @Override
@@ -315,11 +343,6 @@ public class WorkspaceBootstrapRunner {
     @Override
     public void onOutcome(String name, String outcome, Integer exitCode) {
       BootstrapOutcome resolved = BootstrapOutcome.valueOf(outcome);
-      BootstrapCommandDto command = byBaseName.get(QitsConfig.baseName(name));
-      // Snapshot key: the DB command id when the step maps to a declared row, else the step name (a
-      // branch-divergent step with no host row still gets a stable last-run row).
-      String bootstrapCommandId = command != null ? command.id() : name;
-      String recordName = command != null ? command.name() : name;
       // A skip has no run of its own — record no exit code (the check's non-zero is the skip
       // reason,
       // not a run outcome). commandId is always null now: the step ran in the container, not via a
@@ -327,7 +350,7 @@ public class WorkspaceBootstrapRunner {
       // log).
       Integer recordedExit = resolved == BootstrapOutcome.SKIPPED ? null : exitCode;
       bootstrapRunService.recordOutcome(
-          repoId, workspaceId, bootstrapCommandId, recordName, resolved, null, recordedExit);
+          repoId, workspaceId, name, name, resolved, null, recordedExit);
       if (process != null) {
         String segment = bootstrapSegment(name);
         if (openedSegments.add(segment)) {
@@ -338,9 +361,9 @@ public class WorkspaceBootstrapRunner {
     }
   }
 
-  /** The technical-process segment for one bootstrap command: {@code bootstrap:<base name>}. */
-  public static String bootstrapSegment(String commandName) {
-    return "bootstrap:" + QitsConfig.baseName(commandName);
+  /** The technical-process segment for one bootstrap step: {@code bootstrap:<step name>}. */
+  public static String bootstrapSegment(String stepName) {
+    return "bootstrap:" + stepName;
   }
 
   private static String key(String repoId, String workspaceId) {

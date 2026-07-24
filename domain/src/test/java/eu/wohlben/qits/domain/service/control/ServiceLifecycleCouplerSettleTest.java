@@ -4,10 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -21,14 +22,17 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
  * The container&#8594;daemon <em>stop</em> coupling: a {@code WorkspaceContainerStopping} event
  * settles a workspace's live daemons STOPPED (INFO, no crash) instead of leaving them to the crash
  * machinery — so a deliberate {@code stopContainer} is not misread as a crash and resurrected. The
- * kill-switch case is {@link DaemonSettleKillSwitchTest}.
+ * kill-switch case is {@link ServiceSettleKillSwitchTest}. Definitions are config-declared, staged
+ * into the {@link FakeWorkspaceConfigReader}.
  */
 @QuarkusTest
 @TestProfile(ServiceLifecycleCouplerSettleTest.TestProfile.class)
@@ -60,10 +64,15 @@ public class ServiceLifecycleCouplerSettleTest {
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject FakeWorkspaceConfigReader configReader;
   @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
   @Inject ContainerRuntime containers;
+
+  @BeforeEach
+  void resetConfig() {
+    configReader.clear(); // the fake is a shared singleton across this class's test methods
+  }
 
   private String repoWithWorkspace() throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
@@ -74,10 +83,18 @@ public class ServiceLifecycleCouplerSettleTest {
   }
 
   private String createDaemon(String repoId, String name, String command, RestartPolicy policy) {
-    return repositoryDaemonService.create(
-            repoId, name, null, command, null, "TERM", policy, false, 3, null, null, null, null,
-            null, null)
-        .id;
+    configReader.setConfig(
+        "work",
+        new QitsConfig(
+            null,
+            null,
+            null,
+            List.of(
+                new QitsConfig.ServiceDecl(
+                    name, name, null, command, null, null, false, policy, 3, "TERM", null, null,
+                    null)),
+            null));
+    return name;
   }
 
   private ServiceInstanceDto instanceOf(String repoId, String daemonId) {

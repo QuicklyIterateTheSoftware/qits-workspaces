@@ -1,12 +1,11 @@
 package eu.wohlben.qits.domain.service.dto;
 
 import eu.wohlben.qits.domain.daemon.dto.HealthCheckStatusDto;
-import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import java.util.List;
 
 /**
- * One of the repository's daemons in a workspace with its supervised runtime state. {@code
+ * One of the workspace's config-declared services with its supervised runtime state. {@code
  * commandId} is the current (or most recent) registry command backing the instance — the
  * log/terminal re-attach target — and null if the daemon never ran in this JVM. {@code proxyPath}
  * is the qits-origin base path the daemon's app is served under ({@code
@@ -18,7 +17,7 @@ import java.util.List;
  * latest result of each declared healthcheck (runtime-only, all-UNKNOWN until probed).
  */
 public record ServiceInstanceDto(
-    RepositoryDaemonDto daemon,
+    ServiceDefinitionDto daemon,
     ServiceStatus status,
     int restartCount,
     String commandId,

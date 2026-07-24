@@ -5,9 +5,10 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.service.control.ServiceSupervisor;
@@ -24,6 +25,7 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -52,9 +54,9 @@ public class ServiceProxyRouteTest {
         Path tempDir = Files.createTempDirectory("qits-daemon-proxy-test-repos");
         return Map.of(
             "qits.repositories.data-dir", tempDir.toString(),
-            "qits.daemons.ready-grace-ms", "300",
-            "qits.daemons.stop-grace-ms", "1000",
-            "qits.daemons.restart-backoff-initial-ms", "100");
+            "qits.services.ready-grace-ms", "300",
+            "qits.services.stop-grace-ms", "1000",
+            "qits.services.restart-backoff-initial-ms", "100");
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -69,15 +71,23 @@ public class ServiceProxyRouteTest {
 
   @Inject WorkspaceService workspaceService;
 
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject FakeWorkspaceConfigReader configReader;
 
   @Inject ServiceSupervisor supervisor;
 
   private Vertx echoVertx;
   private HttpServer echoServer;
   private final AtomicInteger echoHits = new AtomicInteger();
+  // Static: JUnit instantiates the class per test method, so an instance counter would reset and
+  // every test would stage the same id (the proxy keys instances by (workspaceId, daemonId) alone).
+  private static final AtomicInteger daemonSeq = new AtomicInteger();
   private final java.util.concurrent.atomic.AtomicReference<String> lastHostHeader =
       new java.util.concurrent.atomic.AtomicReference<>();
+
+  @BeforeEach
+  void resetStagedConfig() {
+    configReader.clear();
+  }
 
   @BeforeEach
   void startEchoServer() throws Exception {
@@ -109,34 +119,48 @@ public class ServiceProxyRouteTest {
     }
   }
 
-  /** Definition before workspace, so the (fake) container "publishes" the port at creation. */
   private Setup setUpReadyDaemon(String script, String readyPattern) throws Exception {
     return setUpReadyDaemon(script, readyPattern, null);
   }
 
+  /**
+   * Config staged before the workspace, so the supervisor resolves the definition (from the
+   * workspace's in-container config — the only definition source since Part 5) when the start
+   * provisions the (fake) container.
+   */
   private Setup setUpReadyDaemon(String script, String readyPattern, String basePath)
       throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Proxy Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    String daemonId =
-        repositoryDaemonService.create(
-                repo.id,
-                "echo-daemon",
-                null,
-                script,
-                readyPattern,
-                "TERM",
-                RestartPolicy.NEVER,
-                null, // autoStart (default true)
-                0,
-                null,
-                echoServer.actualPort(),
-                null,
-                basePath,
-                null,
-                null)
-            .id;
+    // Unique per setup: the proxy/supervisor key instances by (workspaceId, daemonId) alone, so a
+    // fixed id would collide with a previous test's stopped instance ("work" repeats across repos).
+    String daemonId = "echo-daemon-" + daemonSeq.incrementAndGet();
+    configReader.setConfig(
+        "work",
+        new QitsConfig(
+            null,
+            null,
+            null,
+            List.of(
+                new QitsConfig.ServiceDecl(
+                    daemonId,
+                    "echo-daemon",
+                    null,
+                    script,
+                    readyPattern,
+                    null, // otel
+                    // autoStart off: the test starts manually, and a late provision-time event
+                    // from a previous test must not auto-start this id on its stale workspace
+                    // (the proxy keys instances by (workspaceId, daemonId) alone).
+                    Boolean.FALSE,
+                    RestartPolicy.NEVER,
+                    0,
+                    "TERM",
+                    null, // environment
+                    new QitsConfig.WebViewDecl(echoServer.actualPort(), null, basePath),
+                    null)), // healthChecks
+            null));
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
     supervisor.start(repo.id, "work", daemonId);
     return new Setup(repo.id, daemonId);

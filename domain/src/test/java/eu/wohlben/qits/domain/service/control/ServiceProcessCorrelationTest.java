@@ -3,12 +3,13 @@ package eu.wohlben.qits.domain.service.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.process.dto.TechnicalProcessFrame;
 import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
@@ -27,7 +28,8 @@ import org.junit.jupiter.api.Test;
  * WorkspaceContainerStarted} onto the async observer thread, so an auto-started daemon's startup
  * lines land in the {@code daemon:<name>} segment of the <em>same</em> process that streamed the
  * provision, STARTING→READY settles that segment, and the process reaches {@code done} only once
- * every auto-start daemon settled.
+ * every auto-start daemon settled. The auto-start definition is config-declared, staged into the
+ * {@link FakeWorkspaceConfigReader}.
  */
 @QuarkusTest
 @TestProfile(ServiceProcessCorrelationTest.TestProfile.class)
@@ -54,7 +56,7 @@ public class ServiceProcessCorrelationTest {
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject FakeWorkspaceConfigReader configReader;
   @Inject TechnicalProcessRegistry registry;
 
   private static final class Replay implements TechnicalProcess.Listener {
@@ -84,22 +86,28 @@ public class ServiceProcessCorrelationTest {
     // The echo doubles as the ready pattern, so READY (and the segment settle it triggers) can
     // only happen after the follower delivered the line into the segment — deterministic ordering
     // instead of racing the grace timer against tail startup.
-    repositoryDaemonService.create(
-        repo.id,
-        "web",
-        null,
-        "echo hello-from-daemon; sleep 300",
-        "hello-from-daemon",
-        "TERM",
-        RestartPolicy.NEVER,
-        true,
-        0,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    configReader.setConfig(
+        "work",
+        new QitsConfig(
+            null,
+            null,
+            null,
+            List.of(
+                new QitsConfig.ServiceDecl(
+                    "web",
+                    "web",
+                    null,
+                    "echo hello-from-daemon; sleep 300",
+                    "hello-from-daemon",
+                    null,
+                    true,
+                    RestartPolicy.NEVER,
+                    0,
+                    "TERM",
+                    null,
+                    null,
+                    null)),
+            null));
 
     String processId = workspaceService.beginEnsureContainer(repo.id, "work");
     TechnicalProcess process = registry.find(processId).orElseThrow();

@@ -4,9 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -18,15 +19,19 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The container&#8594;daemon coupling: a {@code WorkspaceContainerStarted} event brings a
- * repository's auto-start daemons up (and leaves the opt-out ones alone), tolerates an
- * already-running instance without blocking the rest, and is gated by the kill switch (which is off
- * by default in tests — this class re-enables it via its profile; the kill-switch case is {@link
- * DaemonAutoStartKillSwitchTest}).
+ * The container&#8594;daemon coupling: a container-started event (via the bootstrap pass-through to
+ * {@code WorkspaceReadyForDaemons}) brings a workspace config's auto-start services up (and leaves
+ * the opt-out ones alone), tolerates an already-running instance without blocking the rest, and is
+ * gated by the kill switch (which is off by default in tests — this class re-enables it via its
+ * profile; the kill-switch case is {@link ServiceAutoStartKillSwitchTest}). Auto-start flags are
+ * config-declared, staged into the {@link FakeWorkspaceConfigReader}.
  */
 @QuarkusTest
 @TestProfile(ServiceAutoStarterTest.TestProfile.class)
@@ -54,9 +59,18 @@ public class ServiceAutoStarterTest {
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
-  @Inject RepositoryDaemonService repositoryDaemonService;
+  @Inject FakeWorkspaceConfigReader configReader;
   @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
+
+  /** The staged config is per-test state: replace it wholesale (never drop the other daemons). */
+  private final List<QitsConfig.ServiceDecl> staged = new ArrayList<>();
+
+  @BeforeEach
+  void resetConfig() {
+    staged.clear();
+    configReader.clear(); // the fake is a shared singleton across this class's test methods
+  }
 
   /** Clones the fixture and adds a lazy {@code work} workspace (no container yet). */
   private String repoWithWorkspace() throws Exception {
@@ -67,24 +81,25 @@ public class ServiceAutoStarterTest {
     return repo.id;
   }
 
+  /** Add one auto-start/opt-out service to the workspace's staged config; returns its id. */
   private String createDaemon(String repoId, String name, boolean autoStart) {
-    return repositoryDaemonService.create(
-            repoId,
+    staged.add(
+        new QitsConfig.ServiceDecl(
+            name,
             name,
             null,
             "sleep 300",
             null,
-            "TERM",
-            RestartPolicy.NEVER,
+            null,
             autoStart,
+            RestartPolicy.NEVER,
             0,
+            "TERM",
             null,
             null,
-            null,
-            null,
-            null,
-            null)
-        .id;
+            null));
+    configReader.setConfig("work", new QitsConfig(null, null, null, staged, null));
+    return name;
   }
 
   private ServiceInstanceDto instanceOf(String repoId, String daemonId) {
