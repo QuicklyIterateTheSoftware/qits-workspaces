@@ -76,10 +76,10 @@ public class LogLevelClassifier implements LogClassifier {
    * A single line's severity, or {@code null} when it is unremarkable. A line that carries an
    * explicit level token is classified by <em>that</em> level and nothing else — the log framework
    * already declared how severe the line is, so an incidental "error"/exception keyword in the
-   * message must not upgrade a WARNING (or INFO) line to ERROR. This is exactly the case that used
-   * to flip a healthy daemon to DEGRADED, e.g. Quarkus' {@code … WARNING [io.…VertxHttpSender]
-   * Failed to export … Full error message: …}. Only lines with no explicit level fall back to the
-   * keyword / exception-name / traceback heuristics that catch unstructured output.
+   * message must not upgrade a WARNING (or INFO) line to ERROR, e.g. Quarkus' {@code … WARNING
+   * [io.…VertxHttpSender] Failed to export … Full error message: …}. Only lines with no explicit
+   * level fall back to the keyword / exception-name / traceback heuristics that catch unstructured
+   * output.
    */
   private static ServiceEventSeverity classifyLine(String line) {
     Matcher level = LEVEL_TOKEN.matcher(line);

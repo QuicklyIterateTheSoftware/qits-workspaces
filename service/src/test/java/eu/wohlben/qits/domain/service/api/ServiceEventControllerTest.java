@@ -69,7 +69,7 @@ public class ServiceEventControllerTest {
     serviceEventService.publish(
         event(
             repoId,
-            ServiceEventKind.ERROR_DETECTED,
+            ServiceEventKind.STATUS_CHANGED,
             ServiceEventSeverity.ERROR,
             "NullPointerException: boom",
             "logs/app.log",
@@ -111,7 +111,7 @@ public class ServiceEventControllerTest {
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(1))
-        .body("events[0].kind", equalTo("ERROR_DETECTED"));
+        .body("events[0].kind", equalTo("STATUS_CHANGED"));
 
     given()
         .get("/api/service-events?repoId=" + repoId + "&pageSize=1&page=1")

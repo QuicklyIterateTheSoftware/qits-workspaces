@@ -4,10 +4,7 @@ import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 import eu.wohlben.qits.domain.command.control.CommandRegistry;
 import eu.wohlben.qits.domain.command.control.CommandService;
 import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
-import eu.wohlben.qits.domain.daemon.dto.LogObserverDto;
-import eu.wohlben.qits.domain.daemon.dto.LogSourceDto;
 import eu.wohlben.qits.domain.daemon.dto.RepositoryDaemonDto;
-import eu.wohlben.qits.domain.daemon.entity.LogObserverKind;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.process.control.SegmentLineSink;
@@ -47,17 +44,16 @@ import org.jboss.logging.Logger;
  * daemon itself runs as a detached session inside the container ({@link
  * ContainerRuntime#startDaemon}) so it outlives a qits restart; qits streams its output by
  * following the session's mirror log with an ordinary registry command (the "follower", kind
- * DAEMON), which keeps the ready-pattern, observers, per-line persistence, and terminal re-attach
- * working. The supervisor adds the state machine ({@code STARTING → READY →
- * DEGRADED/CRASHED/RESTARTING → STOPPED}), the restart policy with exponential backoff, readiness
- * detection, graceful stop, and a liveness poll (the detached session has no host-side exit
- * callback).
+ * DAEMON), which keeps the ready-pattern, per-line persistence, and terminal re-attach working. The
+ * supervisor adds the state machine ({@code STARTING → READY → CRASHED/RESTARTING → STOPPED}), the
+ * restart policy with exponential backoff, readiness detection, graceful stop, and a liveness poll
+ * (the detached session has no host-side exit callback).
  *
  * <p>In-memory supervisor state is lost on a JVM restart, but the sessions are not: {@link
  * #adoptIfRunning} re-adopts a still-running session on first sighting (resuming the log follow +
- * liveness poll) instead of showing it STOPPED. Every transition and observer finding is published
- * as a {@link ServiceEventDto} through {@link ServiceEventService}, which fans out to the UI feed
- * and the workspace's agent session.
+ * liveness poll) instead of showing it STOPPED. Every transition is published as a {@link
+ * ServiceEventDto} through {@link ServiceEventService}, which fans out to the UI feed and the
+ * workspace's agent session.
  */
 @ApplicationScoped
 public class ServiceSupervisor {
@@ -112,11 +108,6 @@ public class ServiceSupervisor {
     ProxyOrigin origin;
 
     /**
-     * File-source tails (run inside the container); started once per instance, closed on settle.
-     */
-    List<ContainerTailSource> tails = List.of();
-
-    /**
      * The technical process tracking the container start that auto-started this instance, or null
      * for manual/adopted starts. Its {@code daemon:<name>} segment receives the startup log and
      * settles on the first terminal-ish transition (READY/CRASHED/STOPPED).
@@ -150,8 +141,6 @@ public class ServiceSupervisor {
   @Inject RepositoryDaemonService repositoryDaemonService;
 
   @Inject ServiceEventService events;
-
-  @Inject LogClassifier classifier;
 
   @Inject ContainerRuntime containers;
 
@@ -203,10 +192,6 @@ public class ServiceSupervisor {
   /** First restart delay; doubles per consecutive restart, capped at 30s. */
   @ConfigProperty(name = "qits.services.restart-backoff-initial-ms", defaultValue = "1000")
   long restartBackoffInitialMillis;
-
-  /** How often FILE log sources are polled for growth/rotation. */
-  @ConfigProperty(name = "qits.services.file-tail-poll-ms", defaultValue = "500")
-  long fileTailPollMillis;
 
   /**
    * How often a running daemon's detached session is polled for liveness (crash/exit detection).
@@ -520,9 +505,9 @@ public class ServiceSupervisor {
    * (Re)launch or adopt a daemon. The daemon itself runs as a detached session inside the container
    * ({@link ContainerRuntime#startDaemon} — a tmux session for docker) so it outlives a qits
    * restart; qits streams its output by following the session's mirror log with an ordinary
-   * registry command (the "follower"), which keeps the ready-pattern, observers, per-line
-   * persistence, and terminal re-attach working unchanged. Liveness is polled from the session, not
-   * a host exit callback.
+   * registry command (the "follower"), which keeps the ready-pattern, per-line persistence, and
+   * terminal re-attach working unchanged. Liveness is polled from the session, not a host exit
+   * callback.
    *
    * @param adopt true when reconciling an already-running session found on boot: skip the reap and
    *     the session start, follow the mirror log from its end (history is already persisted, not
@@ -548,13 +533,6 @@ public class ServiceSupervisor {
       sinks.add(
           new ReadyPatternSink(Pattern.compile(daemon.readyPattern()), () -> markReady(instance)));
     }
-    List<ObservedLineListener> outputObservers = new ArrayList<>();
-    for (var observer : daemon.observers()) {
-      outputObservers.add(observerFor(observer, instance));
-    }
-    ProcessOutputTap outputTap =
-        outputObservers.isEmpty() ? null : new ProcessOutputTap(outputObservers);
-
     String publicBase =
         daemon.webView() != null
             ? ServiceProxyPath.servedBase(
@@ -596,13 +574,9 @@ public class ServiceSupervisor {
         container,
         followScript,
         (commandId, exitCode, terminatedManually) -> {}, // follower exit doesn't drive lifecycle
-        outputTap,
         sinks.toArray(CommandOutputSink[]::new));
 
     resolveOrigin(instance);
-    if (instance.tails.isEmpty()) {
-      instance.tails = startFileTails(instance);
-    }
 
     if (adopt) {
       transition(
@@ -719,87 +693,6 @@ public class ServiceSupervisor {
   }
 
   /**
-   * One observer instance per (observer definition, source), so LOG_LEVEL batches stay contiguous
-   * within one source and anchors are coherent. Findings are dispatched onto the scheduler rather
-   * than synchronously: a producer delivers lines under its own monitor (the file tail's final
-   * drain even runs under the supervisor monitor), so acquiring the supervisor monitor inline from
-   * an observer callback could deadlock.
-   */
-  private ObservedLineListener observerFor(LogObserverDto observer, Instance instance) {
-    if (observer.kind() == LogObserverKind.PATTERN) {
-      return new PatternLogObserver(
-          Pattern.compile(observer.pattern()),
-          observer.severity() != null ? observer.severity() : ServiceEventSeverity.ERROR,
-          finding -> scheduler.execute(() -> onFinding(instance, finding)));
-    }
-    return new LogLevelObserver(
-        classifier, scheduler, finding -> scheduler.execute(() -> onFinding(instance, finding)));
-  }
-
-  /**
-   * One {@code tail -F} per FILE source, run <em>inside the workspace's container</em> (the working
-   * tree lives at {@code /workspace} there, not on the host), each feeding its own set of
-   * observers. Source paths are relative to {@code /workspace} and re-guarded here against
-   * traversal (they were validated lexically at definition time too). Tails outlive restarts and
-   * stop when the instance settles — see {@link #transition}.
-   */
-  private List<ContainerTailSource> startFileTails(Instance instance) {
-    List<LogSourceDto> sources = instance.daemon.sources();
-    if (sources == null || sources.isEmpty() || instance.daemon.observers().isEmpty()) {
-      return List.of();
-    }
-    String container = containers.containerName(instance.workspaceId, instance.repoId);
-    List<ContainerTailSource> tails = new ArrayList<>();
-    for (LogSourceDto source : sources) {
-      if (!isSafeRelativePath(source.path())) {
-        LOG.warnf("Skipping log source outside the workspace: %s", source.path());
-        continue;
-      }
-      List<ObservedLineListener> observers = new ArrayList<>();
-      for (var observer : instance.daemon.observers()) {
-        observers.add(observerFor(observer, instance));
-      }
-      tails.add(
-          new ContainerTailSource(tailArgv(container, source.path()), source.path(), observers));
-    }
-    return tails;
-  }
-
-  /**
-   * The command that tails one source inside the container: {@code tail -n 0 -F -- <path>} run with
-   * workdir {@code /workspace}. {@code -n 0} starts at end (history is not replayed); {@code -F}
-   * retries a missing file and reopens on rotation, so a late-appearing log is read from line 1.
-   */
-  private List<String> tailArgv(String container, String path) {
-    List<String> argv =
-        new ArrayList<>(containers.execArgv(container, false, "/workspace", Map.of()));
-    argv.add("tail");
-    argv.add("--sleep-interval=" + (fileTailPollMillis / 1000.0));
-    argv.add("-n");
-    argv.add("0");
-    argv.add("-F");
-    argv.add("--");
-    argv.add(path);
-    return argv;
-  }
-
-  /**
-   * Rejects an absolute source path or one that could climb out of {@code /workspace} via {@code
-   * ..}.
-   */
-  private static boolean isSafeRelativePath(String path) {
-    if (path == null || path.isBlank() || path.startsWith("/") || path.indexOf('\0') >= 0) {
-      return false;
-    }
-    for (String segment : path.split("/")) {
-      if (segment.equals("..")) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
    * Kill any process in the workspace's container left over from a previous run of this daemon —
    * chiefly Quarkus dev mode's forked application JVM, which escapes the launched process group (so
    * a stop's {@code kill -- -pgid} misses it), keeps binding the http port, and would wedge this
@@ -833,13 +726,6 @@ public class ServiceSupervisor {
     }
   }
 
-  private static void closeTails(Instance instance) {
-    for (ContainerTailSource tail : instance.tails) {
-      tail.close();
-    }
-    instance.tails = List.of();
-  }
-
   private synchronized void markReady(Instance instance) {
     if (instance.status == ServiceStatus.STARTING) {
       cancelPending(instance);
@@ -859,40 +745,6 @@ public class ServiceSupervisor {
           ServiceStatus.READY,
           ServiceEventSeverity.INFO,
           "ready (grace period elapsed)",
-          null);
-    }
-  }
-
-  private synchronized void onFinding(Instance instance, ObserverFinding finding) {
-    if (!isLive(instance.status)) {
-      return; // Late-arriving classification after the run ended.
-    }
-    events.publish(
-        new ServiceEventDto(
-            instance.repoId,
-            instance.workspaceId,
-            instance.daemon.id(),
-            instance.daemon.name(),
-            ServiceEventKind.ERROR_DETECTED,
-            finding.severity(),
-            instance.status,
-            finding.errorType() + ": " + finding.summary(),
-            finding.logExcerpt(),
-            instance.commandId,
-            finding.source(),
-            finding.anchorFrom(),
-            finding.anchorTo(),
-            finding.sourceEpoch(),
-            Instant.now()));
-    if (instance.status == ServiceStatus.READY
-        && finding.severity() == ServiceEventSeverity.ERROR) {
-      // The ERROR_DETECTED event above already carried the evidence; the DEGRADED transition
-      // itself is INFO so the agent isn't notified twice for one finding.
-      transition(
-          instance,
-          ServiceStatus.DEGRADED,
-          ServiceEventSeverity.INFO,
-          "degraded (errors in output; process still alive)",
           null);
     }
   }
@@ -990,14 +842,13 @@ public class ServiceSupervisor {
 
   /**
    * Re-read the daemon definition from the repository before an automatic relaunch, so a mid-run
-   * edit (webView added, startScript changed, observers/env updated) takes effect on the fresh
-   * process instead of the supervisor resurrecting the launch-time snapshot. Falls back to the
-   * pinned copy if the definition was deleted mid-flight — {@link #launch} still needs something to
-   * start, and the next liveness/settle cycle will clean it up. Without this, the proxy's {@link
-   * #proxyTarget} (which reads {@code instance.daemon.webView()}) and the REST list (which prefers
-   * the database definition) answer from two different snapshots after an {@code ON_FAILURE}
-   * restart — see docs/issues
-   * resolved/2026-07-06_daemon-relaunch-uses-stale-definition-after-webview-update.
+   * edit (webView added, startScript changed, env updated) takes effect on the fresh process
+   * instead of the supervisor resurrecting the launch-time snapshot. Falls back to the pinned copy
+   * if the definition was deleted mid-flight — {@link #launch} still needs something to start, and
+   * the next liveness/settle cycle will clean it up. Without this, the proxy's {@link #proxyTarget}
+   * (which reads {@code instance.daemon.webView()}) and the REST list (which prefers the database
+   * definition) answer from two different snapshots after an {@code ON_FAILURE} restart — see
+   * docs/issues resolved/2026-07-06_daemon-relaunch-uses-stale-definition-after-webview-update.
    */
   private void refreshDefinition(Instance instance) {
     try {
@@ -1017,14 +868,9 @@ public class ServiceSupervisor {
     instance.status = status;
     settleProcessSegment(instance, status, summary);
     changePublisher.fire(instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.DAEMONS);
-    if (!isLive(status)) {
-      closeTails(instance);
-    }
-    // No process to probe outside STARTING/READY/DEGRADED (RESTARTING included — during the
-    // backoff there is nothing listening, and the relaunch starts a fresh probe epoch anyway).
-    if (status != ServiceStatus.STARTING
-        && status != ServiceStatus.READY
-        && status != ServiceStatus.DEGRADED) {
+    // No process to probe outside STARTING/READY (RESTARTING included — during the backoff there is
+    // nothing listening, and the relaunch starts a fresh probe epoch anyway).
+    if (status != ServiceStatus.STARTING && status != ServiceStatus.READY) {
       cancelHealth(instance);
     }
     events.publish(
@@ -1124,7 +970,6 @@ public class ServiceSupervisor {
   private static boolean isLive(ServiceStatus status) {
     return status == ServiceStatus.STARTING
         || status == ServiceStatus.READY
-        || status == ServiceStatus.DEGRADED
         || status == ServiceStatus.RESTARTING;
   }
 
@@ -1162,10 +1007,7 @@ public class ServiceSupervisor {
    * what it reports. Callbacks arrive on the control-socket thread; each synchronizes on the
    * supervisor monitor like every other transition path.
    *
-   * <p>Log-observer / DEGRADED derivation from the streamed output is deliberately not wired here
-   * yet: it is anchored to the command audit-log line sequence ({@code ProcessOutputTap}) that the
-   * projection path bypasses, so it rides a follow-up. The tmux fallback keeps full observer
-   * fidelity. Streamed lines still feed the crash-excerpt {@link TailSink}.
+   * <p>Streamed lines feed the crash-excerpt {@link TailSink}.
    */
   private final class ProjectionSink implements WorkspaceServiceDriver.ServiceEventSink {
 

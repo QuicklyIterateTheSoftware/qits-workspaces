@@ -116,8 +116,6 @@ public class WorkspaceBootstrapRunnerTest {
             null,
             null,
             null,
-            null,
-            null,
             null)
         .id;
   }

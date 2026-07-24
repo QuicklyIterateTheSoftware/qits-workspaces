@@ -113,7 +113,7 @@ public class ServiceProxyRoute {
               rc,
               502,
               "The daemon is not running (" + status + ") — start it from the workspace page.");
-      case READY, DEGRADED -> {
+      case READY -> {
         ProxyOrigin origin = target.get().origin();
         if (origin == null) {
           respond(

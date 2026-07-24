@@ -83,8 +83,6 @@ public class ServiceAutoStarterTest {
             null,
             null,
             null,
-            null,
-            null,
             null)
         .id;
   }

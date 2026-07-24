@@ -99,8 +99,6 @@ public class ServiceProcessCorrelationTest {
         null,
         null,
         null,
-        null,
-        null,
         null);
 
     String processId = workspaceService.beginEnsureContainer(repo.id, "work");

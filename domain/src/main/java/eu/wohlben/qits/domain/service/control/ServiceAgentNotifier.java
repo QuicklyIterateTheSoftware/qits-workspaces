@@ -52,10 +52,6 @@ public class ServiceAgentNotifier {
   /** Visible for the spool path and tests: the exact message injected into the conversation. */
   static String format(ServiceEventDto event) {
     StringBuilder message = new StringBuilder("[daemon:").append(event.serviceName());
-    if (event.source() != null && !ObservedLine.PROCESS_OUTPUT.equals(event.source())) {
-      // Say where the evidence came from when it wasn't the process output (a tailed file).
-      message.append(':').append(event.source());
-    }
     message.append("] ");
     if (event.severity() != null) {
       message.append(event.severity()).append(": ");

@@ -54,8 +54,7 @@ public class ServiceProxyRouteTest {
             "qits.repositories.data-dir", tempDir.toString(),
             "qits.daemons.ready-grace-ms", "300",
             "qits.daemons.stop-grace-ms", "1000",
-            "qits.daemons.restart-backoff-initial-ms", "100",
-            "qits.daemons.file-tail-poll-ms", "100");
+            "qits.daemons.restart-backoff-initial-ms", "100");
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -135,8 +134,6 @@ public class ServiceProxyRouteTest {
                 echoServer.actualPort(),
                 null,
                 basePath,
-                null,
-                null,
                 null,
                 null)
             .id;

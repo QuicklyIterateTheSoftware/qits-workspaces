@@ -10,8 +10,6 @@ public enum ServiceStatus {
   STARTING,
   /** The ready pattern matched (or the grace period elapsed) — the daemon is considered up. */
   READY,
-  /** The process is alive but an observer reported errors; reset only by restart or stop. */
-  DEGRADED,
   /** Exited and a relaunch is scheduled (restart policy, backoff pending). */
   RESTARTING,
   /** Exited (or exhausted its restarts) without being asked to stop. */

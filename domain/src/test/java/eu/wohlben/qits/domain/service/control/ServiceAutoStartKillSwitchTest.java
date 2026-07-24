@@ -73,8 +73,6 @@ public class ServiceAutoStartKillSwitchTest {
                 null,
                 null,
                 null,
-                null,
-                null,
                 null)
             .id;
 

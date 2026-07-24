@@ -1,33 +1,19 @@
 package eu.wohlben.qits.domain.service.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.command.entity.LogChannel;
 import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
- * Pure unit tests for the observer pipeline: line framing over raw PTY chunks, the process-output
- * tap (channel filter, ANSI stripping, sequence-preserving positions), the PATTERN observer (match,
- * severity, throttle, anchor), the LOG_LEVEL observer's batching (quiet logs produce nothing, an
- * error batch produces one finding carrying the offset-based excerpt and its anchor range), and the
- * local log-level classifier itself.
+ * Pure unit tests for the shared log pipeline still in use after the log-observer subsystem was
+ * removed: line framing over raw PTY chunks (the base of the ready-pattern and crash-excerpt
+ * sinks), and the local log-level classifier that grades the general command audit log.
  */
 public class ObserverSinkTest {
-
-  private static ObservedLine out(long position, String content) {
-    return new ObservedLine(ObservedLine.PROCESS_OUTPUT, position, null, content);
-  }
 
   private static final class CapturingLines extends LineFramingSink {
     final List<String> lines = new ArrayList<>();
@@ -45,92 +31,9 @@ public class ObserverSinkTest {
     sink.write("hel");
     sink.write("lo\r\nwo");
     sink.write("rld\n");
-    sink.write("\u001B[31mred error\u001B[0m\n");
+    sink.write("[31mred error[0m\n");
 
     assertEquals(List.of("hello", "world", "red error"), sink.lines);
-  }
-
-  @Test
-  public void processOutputTapForwardsOutputLinesWithTheirPersistedSequence() {
-    List<ObservedLine> observed = new ArrayList<>();
-    ProcessOutputTap tap = new ProcessOutputTap(List.of(observed::add));
-
-    tap.append("cmd-1", 0, LogChannel.OUTPUT, "\u001B[32mready\u001B[0m", Instant.now());
-    tap.append("cmd-1", 1, LogChannel.STDIN, "typed input", Instant.now());
-    tap.append("cmd-1", 2, LogChannel.OUTPUT, "   ", Instant.now());
-    tap.append("cmd-1", 3, LogChannel.OUTPUT, "second", Instant.now());
-
-    assertEquals(2, observed.size(), "STDIN and blank lines are not observed");
-    assertEquals("ready", observed.get(0).content(), "ANSI escapes are stripped");
-    assertEquals(0, observed.get(0).position(), "position is the command_log_line seq");
-    assertEquals(ObservedLine.PROCESS_OUTPUT, observed.get(0).source());
-    assertNull(observed.get(0).sourceEpoch(), "process output has no rotation epoch");
-    assertEquals(3, observed.get(1).position(), "skipped lines still consume their seq");
-  }
-
-  @Test
-  public void patternObserverEmitsAnchoredFindingAndThrottles() {
-    List<ObserverFinding> findings = new ArrayList<>();
-    PatternLogObserver observer =
-        new PatternLogObserver(
-            Pattern.compile("ERROR"), ServiceEventSeverity.WARNING, findings::add);
-
-    observer.onLine(out(7, "all fine"));
-    observer.onLine(out(8, "ERROR: broke once"));
-    observer.onLine(out(9, "ERROR: broke twice"));
-
-    assertEquals(1, findings.size(), "second match within the throttle window is dropped");
-    ObserverFinding finding = findings.get(0);
-    assertEquals(ServiceEventSeverity.WARNING, finding.severity());
-    assertEquals("ERROR: broke once", finding.summary());
-    assertEquals(ObservedLine.PROCESS_OUTPUT, finding.source());
-    assertEquals(8, finding.anchorFrom(), "the anchor is the matched line's position");
-    assertEquals(8, finding.anchorTo());
-  }
-
-  @Test
-  public void logLevelObserverIgnoresQuietLogsAndClassifiesErrorBatches() throws Exception {
-    CountDownLatch findingLatch = new CountDownLatch(1);
-    List<ObserverFinding> findings = new ArrayList<>();
-    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    try {
-      LogLevelObserver observer =
-          new LogLevelObserver(
-              new LogLevelClassifier(),
-              scheduler,
-              finding -> {
-                findings.add(finding);
-                findingLatch.countDown();
-              });
-
-      // Quiet, healthy output: buffered, debounced, classified as unremarkable — no finding.
-      observer.onLine(out(0, "GET / 200 5ms"));
-      observer.onLine(out(1, "GET /favicon.ico 200 1ms"));
-      Thread.sleep(2500);
-      assertEquals(0, findings.size(), "quiet logs must not produce findings");
-
-      // An error batch: one finding for the whole burst, excerpt starting at the evidence and the
-      // anchor bounding exactly the excerpt's lines.
-      observer.onLine(out(2, "serving request"));
-      observer.onLine(out(3, "Traceback (most recent call last):"));
-      observer.onLine(out(4, "ZeroDivisionError: division by zero"));
-      assertTrue(findingLatch.await(10, TimeUnit.SECONDS), "finding should arrive after debounce");
-      assertEquals(1, findings.size(), "one finding per batch");
-      ObserverFinding finding = findings.get(0);
-      assertEquals(ServiceEventSeverity.ERROR, finding.severity());
-      assertTrue(
-          finding.logExcerpt().startsWith("Traceback"),
-          "excerpt starts at the classified offset: " + finding.logExcerpt());
-      assertEquals(ObservedLine.PROCESS_OUTPUT, finding.source());
-      assertEquals(3, finding.anchorFrom(), "anchor starts at the classified line");
-      assertEquals(4, finding.anchorTo(), "anchor ends at the batch's last line");
-      assertEquals(
-          "Traceback (most recent call last):\nZeroDivisionError: division by zero",
-          finding.logExcerpt(),
-          "the excerpt equals the anchored lines' content");
-    } finally {
-      scheduler.shutdownNow();
-    }
   }
 
   @Test
@@ -163,7 +66,7 @@ public class ObserverSinkTest {
 
     // A line's explicit level wins over an incidental "error" keyword in its message: Quarkus'
     // telemetry-export line is WARNING-level and mentions "Full error message", but it must NOT be
-    // escalated to ERROR (which would flip a healthy dev-server daemon to DEGRADED).
+    // escalated to ERROR.
     var telemetry =
         classifier
             .classify(

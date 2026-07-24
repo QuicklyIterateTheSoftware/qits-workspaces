@@ -87,8 +87,6 @@ public class ServiceSupervisorProjectionTest {
             null,
             null,
             null,
-            null,
-            null,
             null)
         .id;
   }
