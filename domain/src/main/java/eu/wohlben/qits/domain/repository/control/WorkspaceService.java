@@ -608,7 +608,7 @@ public class WorkspaceService {
 
     // `parent` is the branch to fork from; `branch` is the new branch the workspace owns.
     // Each workspace gets its own branch so two workspaces never commit to the same branch.
-    String parentBranch = (parent == null || parent.isBlank()) ? "master" : parent;
+    String parentBranch = (parent == null || parent.isBlank()) ? defaultMainBranch(repo) : parent;
     String newBranch = (branch == null || branch.isBlank()) ? workspaceId : branch;
     // Both are user-supplied and passed to git: reject dash-leading names so they can't be smuggled
     // in as flags (argv flag injection).
@@ -714,6 +714,15 @@ public class WorkspaceService {
       slug = "main";
     }
     return slug;
+  }
+
+  /**
+   * The branch a blank parent/target defaults to: the repository's configured main branch (set at
+   * clone time from the remote's default), with "master" as the last-resort fallback for a row
+   * whose {@code mainBranch} was never populated.
+   */
+  private static String defaultMainBranch(Repository repo) {
+    return (repo.mainBranch == null || repo.mainBranch.isBlank()) ? "master" : repo.mainBranch;
   }
 
   private record BranchParent(String branch, String parent) {}
@@ -1015,16 +1024,17 @@ public class WorkspaceService {
 
   @Transactional
   public MergeResult mergeWorkspace(String repoId, String workspaceId, String target) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    Repository repo =
+        repositoryRepository
+            .findByIdOptional(repoId)
+            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
 
     Workspace workspace =
         workspaceRepository
             .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
 
-    String resolvedTarget = (target == null || target.isBlank()) ? "master" : target;
+    String resolvedTarget = (target == null || target.isBlank()) ? defaultMainBranch(repo) : target;
 
     // Resolve a target given as a workspace id to the branch that workspace owns.
     Workspace targetWorkspace =
