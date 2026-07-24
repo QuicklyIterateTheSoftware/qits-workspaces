@@ -7,17 +7,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The parsed, framework-free representation of a repository's committed {@code .qits-config.yml}
- * (see {@code
- * docs/epics/qits-project-repositories/features/2026-07-18_qits-config-in-repo-configuration.md}).
- * Every field maps 1:1 onto an existing entity field — the schema is the entity model re-expressed
- * in kebab-case, so there are no new domain concepts here. {@link QitsConfigParser} produces it;
- * {@link QitsConfigReconciler} upserts it into the existing tables.
+ * The parsed, framework-free representation of a workspace checkout's committed {@code
+ * .qits-config.yml}. The file is <strong>authoritative</strong>: it is read in-container by the
+ * workspace-daemon and surfaced to the host over the control socket as the Part-2 wire schema
+ * ({@link WorkspaceConfigView} wraps it; {@code WorkspaceDaemonRegistry} Jackson-deserializes it).
+ * There is no host-side DB config store and no reconciler — declared actions/services/bootstrap
+ * steps live only in the file.
  *
- * <p>Declared actions/daemons are namespaced by {@link #CONFIG_NAME_SUFFIX}: their stored name is
- * {@code <declared-name>@qits-config}. The write API rejects that suffix in user-supplied names, so
- * config- and UI-origin entries can never collide and "which origin" is derivable from the name
- * alone (no persisted column). See {@link #configName}/{@link #isConfigName}.
+ * <p>Every declared entry carries an explicit, deterministic string {@code id:} (defaulting to its
+ * {@code name} when absent) that identifies it across the wire; a duplicate id is a user error,
+ * allowed to collide.
  */
 public record QitsConfig(
     RepositorySection repository,
@@ -33,12 +32,7 @@ public record QitsConfig(
     @com.fasterxml.jackson.annotation.JsonAlias("daemons") List<ServiceDecl> services,
     List<BootstrapDecl> bootstrap) {
 
-  /**
-   * The reserved name suffix stamped on every config-declared action/daemon. URL-safe, no spaces.
-   */
-  public static final String CONFIG_NAME_SUFFIX = "@qits-config";
-
-  /** An absent/empty file — the no-op that keeps a config-free repository on the old path. */
+  /** An absent/empty file — the no-op that keeps a config-free workspace on the old path. */
   public static final QitsConfig EMPTY =
       new QitsConfig(null, List.of(), List.of(), List.of(), List.of());
 
@@ -58,55 +52,30 @@ public record QitsConfig(
         && bootstrap.isEmpty();
   }
 
-  /** The stored name for a declared entry: {@code <base>@qits-config}. */
-  public static String configName(String base) {
-    return base + CONFIG_NAME_SUFFIX;
-  }
-
-  /** Whether {@code name} belongs to the config namespace (i.e. is a config-origin entry). */
-  public static boolean isConfigName(String name) {
-    return name != null && name.endsWith(CONFIG_NAME_SUFFIX);
-  }
-
-  /**
-   * The declared base name for a stored config name (strips the suffix); pass-through otherwise.
-   */
-  public static String baseName(String name) {
-    return isConfigName(name)
-        ? name.substring(0, name.length() - CONFIG_NAME_SUFFIX.length())
-        : name;
-  }
-
-  /**
-   * Where an action/daemon came from: hand-made in the UI, or declared in {@code .qits-config.yml}.
-   */
-  public enum Origin {
-    UI,
-    CONFIG
-  }
-
-  /** An entry's origin, derived from whether its name carries the config suffix. */
-  public static Origin originOf(String name) {
-    return isConfigName(name) ? Origin.CONFIG : Origin.UI;
-  }
-
   /** The {@code repository:} section: fields the file may own on the repository itself. */
   public record RepositorySection(String mainBranch, RepositoryArchetype archetype) {}
 
   /** One {@code frameworks[]} entry — a detection override/hint, consumed live, never stored. */
   public record FrameworkDecl(String kind, String root) {}
 
-  /** One {@code actions[]} entry → a repository-scoped {@code ActionConfiguration}. */
+  /** One {@code actions[]} entry — a config-declared workspace action. */
   public record ActionDecl(
+      String id,
       String name,
       String description,
       String execute,
       String check,
       boolean interactive,
-      Map<String, String> environment) {}
+      Map<String, String> environment) {
+    /** {@code id} defaults to {@code name} when absent/blank. */
+    public ActionDecl {
+      id = id == null || id.isBlank() ? name : id;
+    }
+  }
 
-  /** One {@code daemons[]} entry → a {@code RepositoryDaemon} and its embeddables. */
+  /** One {@code services[]} entry — a config-declared workspace service (dev daemon). */
   public record ServiceDecl(
+      String id,
       String name,
       String description,
       String start,
@@ -118,23 +87,34 @@ public record QitsConfig(
       String stopSignal,
       Map<String, String> environment,
       WebViewDecl webView,
-      List<HealthCheckDecl> healthChecks) {}
+      List<HealthCheckDecl> healthChecks) {
+    /** {@code id} defaults to {@code name} when absent/blank. */
+    public ServiceDecl {
+      id = id == null || id.isBlank() ? name : id;
+    }
+  }
 
   /**
-   * One {@code bootstrap[]} entry → a {@code BootstrapCommand}; list position becomes {@code
-   * orderIndex} (the file's order is the execution order).
+   * One {@code bootstrap[]} entry — a config-declared bootstrap step; list position is the
+   * execution order.
    */
   public record BootstrapDecl(
+      String id,
       String name,
       String description,
       String execute,
       String check,
-      Map<String, String> environment) {}
+      Map<String, String> environment) {
+    /** {@code id} defaults to {@code name} when absent/blank. */
+    public BootstrapDecl {
+      id = id == null || id.isBlank() ? name : id;
+    }
+  }
 
-  /** The {@code web-view:} block → {@code WebView} embeddable. */
+  /** The {@code web-view:} block of a service. */
   public record WebViewDecl(Integer port, String entryPath, String basePath) {}
 
-  /** One {@code health-checks[]} entry → {@code HealthCheck} embeddable. */
+  /** One {@code health-checks[]} entry of a service. */
   public record HealthCheckDecl(
       String name,
       HealthCheckKind kind,

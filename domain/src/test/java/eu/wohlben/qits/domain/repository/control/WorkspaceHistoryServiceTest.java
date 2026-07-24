@@ -123,9 +123,7 @@ public class WorkspaceHistoryServiceTest {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     String actionId =
-        actionConfigurationService.createForRepository(
-                repoId, "echo", null, "echo hi", null, false, null)
-            .id;
+        actionConfigurationService.create("echo", null, "echo hi", null, false, null).id;
     commandService.launchAndAwait(repoId, "feat", actionId);
 
     // Previously the command's FK pinned the workspace row and this threw a constraint violation.

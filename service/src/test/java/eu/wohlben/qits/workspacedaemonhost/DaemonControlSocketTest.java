@@ -198,6 +198,39 @@ class DaemonControlSocketTest {
   }
 
   @Test
+  void readConfigDeserializesExplicitIdsAndDefaultsMissingIdsToNames() throws Exception {
+    // Part 5: every declared entry carries an id: — explicit when the file declares one, defaulting
+    // to the entry's name when absent. The registry's Jackson deserialization into QitsConfig must
+    // honor both.
+    configJson =
+        "{\"frameworks\":[],"
+            + "\"actions\":["
+            + "{\"id\":\"build-ci\",\"name\":\"build\",\"execute\":\"mvn -B verify\"},"
+            + "{\"name\":\"test\",\"execute\":\"mvn test\"}],"
+            + "\"services\":["
+            + "{\"id\":\"dev-server\",\"name\":\"dev\",\"start\":\"mvn quarkus:dev\"},"
+            + "{\"name\":\"logs\",\"start\":\"tail -f app.log\"}],"
+            + "\"bootstrap\":["
+            + "{\"id\":\"install-deps\",\"name\":\"install\",\"execute\":\"./install.sh\"},"
+            + "{\"name\":\"seed\",\"execute\":\"./seed.sh\"}]}";
+    configWarning = null;
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+
+      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ID);
+
+      assertTrue(read.isPresent());
+      QitsConfig config = read.get().config();
+      assertEquals("build-ci", config.actions().get(0).id());
+      assertEquals("test", config.actions().get(1).id(), "id-less action defaults id to name");
+      assertEquals("dev-server", config.services().get(0).id());
+      assertEquals("logs", config.services().get(1).id(), "id-less service defaults id to name");
+      assertEquals("install-deps", config.bootstrap().get(0).id());
+      assertEquals("seed", config.bootstrap().get(1).id(), "id-less step defaults id to name");
+    }
+  }
+
+  @Test
   void readConfigSurfacesTheDaemonsWarningWithEmptyConfig() throws Exception {
     configJson = "{\"frameworks\":[],\"actions\":[],\"daemons\":[],\"bootstrap\":[]}";
     configWarning = "Unsupported or missing 'version' (expected 1): null";
