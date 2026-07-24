@@ -41,7 +41,7 @@ import org.jboss.logging.Logger;
  *
  * <ul>
  *   <li><b>Fresh provision</b> — observes {@link WorkspaceContainerStarted} (async, the {@code
- *       DaemonLifecycleCoupler} precedent) and awaits the daemon's chain only for {@code
+ *       ServiceLifecycleCoupler} precedent) and awaits the daemon's chain only for {@code
  *       freshProvision} transitions (a bare clone was just bootstrapped; a restarted container kept
  *       its state, and the daemon does not re-run). A plain restart, or the autorun kill switch,
  *       passes straight through to daemon auto-start.

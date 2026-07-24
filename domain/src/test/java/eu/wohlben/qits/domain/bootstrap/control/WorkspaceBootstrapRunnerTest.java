@@ -7,10 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import eu.wohlben.qits.domain.bootstrap.dto.BootstrapRunDto;
 import eu.wohlben.qits.domain.bootstrap.entity.BootstrapOutcome;
-import eu.wohlben.qits.domain.daemon.control.DaemonSupervisor;
 import eu.wohlben.qits.domain.daemon.control.RepositoryDaemonService;
-import eu.wohlben.qits.domain.daemon.dto.DaemonInstanceDto;
-import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.project.control.ProjectService;
@@ -18,6 +15,9 @@ import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForDaemonsRecorder;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
+import eu.wohlben.qits.domain.service.control.ServiceSupervisor;
+import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -54,9 +54,9 @@ public class WorkspaceBootstrapRunnerTest {
         Path tempDir = Files.createTempDirectory("qits-bootstrap-runner-test-repos");
         return Map.of(
             "qits.repositories.data-dir", tempDir.toString(),
-            "qits.daemons.autostart-enabled", "true",
-            "qits.daemons.ready-grace-ms", "300",
-            "qits.daemons.liveness-poll-ms", "150",
+            "qits.services.autostart-enabled", "true",
+            "qits.services.ready-grace-ms", "300",
+            "qits.services.liveness-poll-ms", "150",
             // The host's chain-await timeout (the fake driver runs the chain synchronously, so this
             // only bounds a hung await).
             "qits.bootstrap.await-timeout-ms", "8000");
@@ -75,7 +75,7 @@ public class WorkspaceBootstrapRunnerTest {
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceBootstrapRunner runner;
   @Inject RepositoryDaemonService repositoryDaemonService;
-  @Inject DaemonSupervisor supervisor;
+  @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
   @Inject WorkspaceReadyForDaemonsRecorder readyRecorder;
 
@@ -152,18 +152,18 @@ public class WorkspaceBootstrapRunnerTest {
         expected + " for " + commandId);
   }
 
-  private DaemonInstanceDto daemonInstance(String repoId, String daemonId) {
+  private ServiceInstanceDto daemonInstance(String repoId, String daemonId) {
     return supervisor.effectiveDaemons(repoId, "work").stream()
         .filter(i -> i.daemon().id().equals(daemonId))
         .findFirst()
         .orElse(null);
   }
 
-  private DaemonInstanceDto awaitDaemonStatus(String repoId, String daemonId, DaemonStatus expected)
-      throws InterruptedException {
+  private ServiceInstanceDto awaitDaemonStatus(
+      String repoId, String daemonId, ServiceStatus expected) throws InterruptedException {
     return await(
         () -> {
-          DaemonInstanceDto i = daemonInstance(repoId, daemonId);
+          ServiceInstanceDto i = daemonInstance(repoId, daemonId);
           return i != null && i.status() == expected ? i : null;
         },
         expected + " for daemon " + daemonId);
@@ -182,7 +182,7 @@ public class WorkspaceBootstrapRunnerTest {
 
     BootstrapRunDto first = awaitOutcome(repoId, firstId, BootstrapOutcome.SUCCEEDED);
     BootstrapRunDto second = awaitOutcome(repoId, secondId, BootstrapOutcome.SUCCEEDED);
-    awaitDaemonStatus(repoId, daemonId, DaemonStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
 
     assertEquals(
         List.of("first", "second"),
@@ -231,8 +231,8 @@ public class WorkspaceBootstrapRunnerTest {
     assertNull(lastRun(repoId, neverId), "commands after the failure never ran");
     assertFalse(Files.exists(marker));
     assertEquals(0, readyRecorder.countFor(repoId, "work"), "a failed chain never fires ready");
-    DaemonInstanceDto daemon = daemonInstance(repoId, daemonId);
-    assertEquals(DaemonStatus.STOPPED, daemon.status(), "auto-start daemon stays down");
+    ServiceInstanceDto daemon = daemonInstance(repoId, daemonId);
+    assertEquals(ServiceStatus.STOPPED, daemon.status(), "auto-start daemon stays down");
     assertNull(daemon.commandId(), "the daemon was never launched");
   }
 
@@ -270,7 +270,7 @@ public class WorkspaceBootstrapRunnerTest {
     await(
         () -> readyRecorder.countFor(repoId, "work") >= 1 ? Boolean.TRUE : null,
         "recovery releases auto-start");
-    awaitDaemonStatus(repoId, daemonId, DaemonStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
   }
 
   @Test
