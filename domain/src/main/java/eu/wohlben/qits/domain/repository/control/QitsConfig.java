@@ -25,7 +25,14 @@ public record QitsConfig(
     RepositorySection repository,
     List<FrameworkDecl> frameworks,
     List<ActionDecl> actions,
-    List<DaemonDecl> daemons,
+    // TEMPORARY alias: the committed `.qits-config.yml` (incl. the test fixtures) still uses the
+    // old
+    // `daemons:` key; accept it so a stale file / stale daemon image (whose ConfigJson may still
+    // emit
+    // `daemons`) deserializes. Drop the alias once the fixtures' two-level submodule round-trip
+    // lands
+    // the `services:` key (docs/epics/qits-workspace-daemon/features/2026-07-24_*).
+    @com.fasterxml.jackson.annotation.JsonAlias("daemons") List<ServiceDecl> services,
     List<BootstrapDecl> bootstrap) {
 
   /**
@@ -41,7 +48,7 @@ public record QitsConfig(
   public QitsConfig {
     frameworks = frameworks == null ? List.of() : List.copyOf(frameworks);
     actions = actions == null ? List.of() : List.copyOf(actions);
-    daemons = daemons == null ? List.of() : List.copyOf(daemons);
+    services = services == null ? List.of() : List.copyOf(services);
     bootstrap = bootstrap == null ? List.of() : List.copyOf(bootstrap);
   }
 
@@ -49,7 +56,7 @@ public record QitsConfig(
     return repository == null
         && frameworks.isEmpty()
         && actions.isEmpty()
-        && daemons.isEmpty()
+        && services.isEmpty()
         && bootstrap.isEmpty();
   }
 
@@ -101,7 +108,7 @@ public record QitsConfig(
       Map<String, String> environment) {}
 
   /** One {@code daemons[]} entry → a {@code RepositoryDaemon} and its embeddables. */
-  public record DaemonDecl(
+  public record ServiceDecl(
       String name,
       String description,
       String start,

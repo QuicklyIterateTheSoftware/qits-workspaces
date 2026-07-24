@@ -192,8 +192,8 @@ class DaemonControlSocketTest {
       assertEquals(1, config.actions().size());
       assertEquals("build", config.actions().get(0).name());
       assertEquals(Map.of("CI", "true"), config.actions().get(0).environment());
-      assertEquals(1, config.daemons().size());
-      assertEquals(8080, config.daemons().get(0).webView().port());
+      assertEquals(1, config.services().size());
+      assertEquals(8080, config.services().get(0).webView().port());
     }
   }
 
