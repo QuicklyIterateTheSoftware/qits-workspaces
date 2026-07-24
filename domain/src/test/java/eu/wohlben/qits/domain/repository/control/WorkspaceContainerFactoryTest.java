@@ -39,6 +39,13 @@ class WorkspaceContainerFactoryTest {
     f.qitsPort = "8080";
     // Mirrors the shipped default (qits.bootstrap.autorun-enabled): the daemon self-runs bootstrap.
     f.bootstrapAutorunEnabled = true;
+    // Mirrors the shipped qits.services.* defaults, forwarded to the daemon's in-container
+    // ServiceSupervisor (Part 4).
+    f.servicesAutostartEnabled = true;
+    f.serviceReadyGraceMs = 10000;
+    f.serviceBackoffInitialMs = 1000;
+    f.serviceBackoffMaxMs = 30000;
+    f.serviceStopGraceMs = 5000;
     // A live project scope, so the daemon self-clones name-addressed. Stubbed (the real resolver
     // needs a tx + DB); the no-scope fallback has its own test.
     f.nameResolver =
