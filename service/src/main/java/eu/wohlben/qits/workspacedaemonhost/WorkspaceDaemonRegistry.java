@@ -8,6 +8,7 @@ import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonProvisioner;
+import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
@@ -15,6 +16,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandExit;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
@@ -26,6 +28,8 @@ import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
+import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
+import eu.wohlben.qits.workspacedaemon.protocol.StartDaemon;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
 import io.quarkus.websockets.next.WebSocketConnection;
@@ -34,12 +38,14 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -70,7 +76,8 @@ public class WorkspaceDaemonRegistry
     implements WorkspaceDaemonLiveness,
         WorkspaceDaemonProvisioner,
         WorkspaceConfigReader,
-        WorkspaceBootstrapDriver {
+        WorkspaceBootstrapDriver,
+        WorkspaceServiceDriver {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceDaemonRegistry.class);
 
@@ -104,6 +111,15 @@ public class WorkspaceDaemonRegistry
    * awaiter never picks up a previous cycle's retained terminal.
    */
   private final ConcurrentHashMap<String, PendingBootstrap> bootstraps = new ConcurrentHashMap<>();
+
+  /**
+   * Host coordinators subscribed to service (dev-server) lifecycle events (Part 4). The daemon owns
+   * the process lifecycle and streams every transition; the host {@code ServiceSupervisor} projects
+   * them. Registered once at host startup, so it's a small, stable list — {@code
+   * CopyOnWriteArrayList} makes the socket-thread iteration lock-free.
+   */
+  private final CopyOnWriteArrayList<WorkspaceServiceDriver.ServiceEventSink> serviceSinks =
+      new CopyOnWriteArrayList<>();
 
   /** The terminal outcome of a {@link #runCommand} round-trip. */
   public record CommandResult(int exitCode, String stdout, String stderr) {}
@@ -143,6 +159,12 @@ public class WorkspaceDaemonRegistry
         LOG.infof(
             "workspace-daemon HELLO for workspace %s (repo %s, branch %s, capability %d)",
             hello.workspaceId(), hello.repoId(), hello.branch(), hello.capabilityVersion());
+        // Remember the repository the daemon serves: service (dev-server) events carry only the
+        // service NAME, and the host keys supervision state by (repoId, workspaceId, id) — so the
+        // ServiceEventSink needs repoId to resolve the name to a repository daemon definition.
+        if (client != null) {
+          client.repoId = hello.repoId();
+        }
         connection.sendTextAndAwait(codec.encode(new Ack()));
       }
       case Heartbeat ignored -> {
@@ -156,6 +178,9 @@ public class WorkspaceDaemonRegistry
         } else if (chunk.correlationId() != null
             && chunk.correlationId().startsWith(DaemonProtocol.BOOTSTRAP_CORRELATION_PREFIX)) {
           streamBootstrapOutput(workspaceId, chunk);
+        } else if (chunk.correlationId() != null
+            && chunk.correlationId().startsWith(DaemonProtocol.SERVICE_CORRELATION_PREFIX)) {
+          streamServiceOutput(workspaceId, client, chunk);
         } else if (client != null) {
           client.appendChunk(chunk);
         }
@@ -182,12 +207,47 @@ public class WorkspaceDaemonRegistry
       case BootstrapStep step -> routeBootstrapStep(workspaceId, step);
       case BootstrapOutcome outcome -> routeBootstrapOutcome(workspaceId, outcome);
       case Bootstrapped done -> completeBootstrap(workspaceId, done.ok());
+      case DaemonEvent event -> routeServiceState(workspaceId, client, event);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
       case RunCommand ignored -> {}
       case Describe ignored -> {}
       case DescribeConfig ignored -> {}
       case RunBootstrap ignored -> {}
+      case StartDaemon ignored -> {}
+      case SignalDaemon ignored -> {}
+    }
+  }
+
+  /** Fan a service's lifecycle transition out to every subscribed host coordinator. */
+  private void routeServiceState(String workspaceId, DaemonConnection client, DaemonEvent event) {
+    if (serviceSinks.isEmpty()) {
+      return;
+    }
+    String repoId = client != null ? client.repoId : null;
+    for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
+      sink.onState(repoId, workspaceId, event.id(), event.state(), event.exitCode());
+    }
+  }
+
+  /**
+   * Fan a running service's streamed output (correlation {@code service:<name>}) out to the sinks.
+   */
+  private void streamServiceOutput(
+      String workspaceId, DaemonConnection client, CommandChunk chunk) {
+    if (serviceSinks.isEmpty()) {
+      return;
+    }
+    String repoId = client != null ? client.repoId : null;
+    String name =
+        chunk.correlationId().substring(DaemonProtocol.SERVICE_CORRELATION_PREFIX.length());
+    for (String line : chunk.text().split("\n", -1)) {
+      if (line.isEmpty()) {
+        continue;
+      }
+      for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
+        sink.onLine(repoId, workspaceId, name, chunk.stream().name(), line);
+      }
     }
   }
 
@@ -475,6 +535,36 @@ public class WorkspaceDaemonRegistry
     }
   }
 
+  @Override
+  public void subscribe(WorkspaceServiceDriver.ServiceEventSink sink) {
+    serviceSinks.add(sink);
+  }
+
+  @Override
+  public void startService(
+      String workspaceId, String serviceName, String script, Map<String, String> env) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      LOG.debugf("startService('%s'): no workspace-daemon live for %s", serviceName, workspaceId);
+      return; // daemon-backed mode requires a live daemon; the host falls back to tmux otherwise
+    }
+    String correlationId = UUID.randomUUID().toString();
+    client.connection.sendTextAndAwait(
+        codec.encode(new StartDaemon(correlationId, serviceName, script, env)));
+  }
+
+  @Override
+  public void signalService(String workspaceId, String serviceName, String signal) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      LOG.debugf("signalService('%s'): no workspace-daemon live for %s", serviceName, workspaceId);
+      return;
+    }
+    String correlationId = UUID.randomUUID().toString();
+    client.connection.sendTextAndAwait(
+        codec.encode(new SignalDaemon(correlationId, serviceName, signal)));
+  }
+
   /** Poll for a live daemon up to {@code timeout}; true once one is connected. */
   private boolean awaitLive(String workspaceId, Duration timeout) {
     long deadline = System.nanoTime() + timeout.toNanos();
@@ -495,6 +585,10 @@ public class WorkspaceDaemonRegistry
   /** One live client: its connection plus the in-flight correlated round-trips. */
   private static final class DaemonConnection {
     private final WebSocketConnection connection;
+
+    /** The repository the daemon serves, learned from its {@link Hello} — see {@code onMessage}. */
+    private volatile String repoId;
+
     private final ConcurrentHashMap<String, PendingCommand> pendingCommands =
         new ConcurrentHashMap<>();
     // WorkspaceInfo carries no correlation id (Part-1 stub), so describes are matched FIFO: a queue

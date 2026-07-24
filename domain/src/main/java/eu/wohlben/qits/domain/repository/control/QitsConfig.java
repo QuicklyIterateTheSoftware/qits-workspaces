@@ -1,10 +1,10 @@
 package eu.wohlben.qits.domain.repository.control;
 
-import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
 import eu.wohlben.qits.domain.daemon.entity.HealthCheckKind;
 import eu.wohlben.qits.domain.daemon.entity.LogObserverKind;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.repository.entity.RepositoryArchetype;
+import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
 import java.util.List;
 import java.util.Map;
 
@@ -132,7 +132,7 @@ public record QitsConfig(
   public record WebViewDecl(Integer port, String entryPath, String basePath) {}
 
   /** One {@code observers[]} entry → {@code LogObserver} embeddable. */
-  public record ObserverDecl(LogObserverKind kind, String pattern, DaemonEventSeverity severity) {}
+  public record ObserverDecl(LogObserverKind kind, String pattern, ServiceEventSeverity severity) {}
 
   /** One {@code sources[]} entry → {@code LogSource} embeddable (FILE sources only). */
   public record SourceDecl(String path, String label) {}

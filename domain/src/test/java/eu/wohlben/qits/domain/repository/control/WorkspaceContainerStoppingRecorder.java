@@ -10,7 +10,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Test helper: records every {@link WorkspaceContainerStopping} the <em>synchronous</em> event bus
  * delivers, capturing whether the container still {@code exists()} at observation time — the proof
  * that firing happens <em>before</em> {@code containers.rm}. Independent of {@code
- * DaemonLifecycleCoupler} and its kill switch.
+ * ServiceLifecycleCoupler} and its kill switch.
  */
 @ApplicationScoped
 public class WorkspaceContainerStoppingRecorder {

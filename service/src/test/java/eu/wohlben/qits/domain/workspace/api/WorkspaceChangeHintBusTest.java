@@ -3,11 +3,11 @@ package eu.wohlben.qits.domain.workspace.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-import eu.wohlben.qits.domain.daemon.control.DaemonEventService;
-import eu.wohlben.qits.domain.daemon.dto.DaemonEventDto;
-import eu.wohlben.qits.domain.daemon.entity.DaemonEventKind;
-import eu.wohlben.qits.domain.daemon.entity.DaemonEventSeverity;
-import eu.wohlben.qits.domain.daemon.entity.DaemonStatus;
+import eu.wohlben.qits.domain.service.control.ServiceEventService;
+import eu.wohlben.qits.domain.service.dto.ServiceEventDto;
+import eu.wohlben.qits.domain.service.entity.ServiceEventKind;
+import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
+import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint.Topic;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Verifies the {@code domain} → SSE hint bus end to end through real CDI async delivery: the
  * publisher's {@code fireAsync} reaches an {@code @ObservesAsync} observer ({@link HintCollector}),
- * and a real producer ({@link DaemonEventService#publish}) fires the right topic at its
+ * and a real producer ({@link ServiceEventService#publish}) fires the right topic at its
  * choke-point.
  */
 @QuarkusTest
@@ -42,7 +42,7 @@ class WorkspaceChangeHintBusTest {
 
   @Inject WorkspaceChangePublisher publisher;
 
-  @Inject DaemonEventService daemonEventService;
+  @Inject ServiceEventService serviceEventService;
 
   @Inject HintCollector collector;
 
@@ -82,16 +82,16 @@ class WorkspaceChangeHintBusTest {
 
   @Test
   void publishingADaemonEventFiresADaemonEventsHint() throws InterruptedException {
-    daemonEventService.publish(
-        new DaemonEventDto(
+    serviceEventService.publish(
+        new ServiceEventDto(
             "repo-de",
             "wt-de",
             "daemon-1",
             "Dev server",
-            DaemonEventKind.STATUS_CHANGED,
-            DaemonEventSeverity
+            ServiceEventKind.STATUS_CHANGED,
+            ServiceEventSeverity
                 .INFO, // INFO so the agent notifier is skipped; the hint fires anyway
-            DaemonStatus.READY,
+            ServiceStatus.READY,
             "ready",
             null,
             null,

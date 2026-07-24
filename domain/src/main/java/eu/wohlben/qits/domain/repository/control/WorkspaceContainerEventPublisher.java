@@ -6,7 +6,7 @@ import jakarta.inject.Inject;
 
 /**
  * The one-liners {@link WorkspaceService} calls to announce a workspace container's lifecycle
- * edges, observed in the daemon area ({@code DaemonLifecycleCoupler}). {@code domain} stays
+ * edges, observed in the daemon area ({@code ServiceLifecycleCoupler}). {@code domain} stays
  * web-framework-free; the coupling is CDI events, inverting the forbidden direct dependency.
  *
  * <p>The two directions fire deliberately differently:
