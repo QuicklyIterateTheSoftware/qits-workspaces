@@ -14,6 +14,8 @@ import eu.wohlben.qits.domain.process.control.SegmentLineSink;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
+import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
+import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.domain.service.dto.ServiceEventDto;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
 import eu.wohlben.qits.domain.service.entity.ServiceEventKind;
@@ -21,6 +23,7 @@ import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -81,6 +84,15 @@ public class ServiceSupervisor {
     boolean stopRequested;
     TailSink tail;
     ScheduledFuture<?> pending;
+
+    /**
+     * True when this service is supervised by the in-container workspace-daemon (Part 4) and this
+     * instance is only a host-side <b>projection</b> of the events it streams — the daemon owns
+     * spawn/restart/backoff/group-kill, so the host runs no tmux session, follower, liveness poll,
+     * or reap for it. False for the tmux fallback (no live daemon), which drives the process
+     * itself.
+     */
+    boolean daemonBacked;
 
     /** Polls the detached daemon session's liveness (it has no host-side exit callback). */
     ScheduledFuture<?> liveness;
@@ -147,6 +159,39 @@ public class ServiceSupervisor {
 
   @Inject HealthProbeService healthProbes;
 
+  /**
+   * The in-container supervision driver (Part 4). Present only in the backend app (its impl is
+   * {@code WorkspaceDaemonRegistry}); absent in cli/tests, where this supervisor keeps the tmux
+   * path. When present and a workspace's daemon is live, that workspace's services are
+   * <b>daemon-backed</b> — this supervisor projects their streamed events instead of driving tmux.
+   */
+  @Inject jakarta.enterprise.inject.Instance<WorkspaceServiceDriver> serviceDriver;
+
+  /** Liveness of a workspace's control socket — the daemon-backed vs tmux-fallback gate. */
+  @Inject jakarta.enterprise.inject.Instance<WorkspaceDaemonLiveness> liveness;
+
+  /**
+   * Subscribe the projection sink once at startup, so a daemon's service events reach this
+   * supervisor's state machine, segments, and proxy. No-op when the driver is absent (cli/tests).
+   */
+  @PostConstruct
+  void subscribeProjection() {
+    if (!serviceDriver.isUnsatisfied()) {
+      serviceDriver.get().subscribe(new ProjectionSink());
+    }
+  }
+
+  /**
+   * Whether {@code workspaceId}'s services are supervised by a live in-container daemon (Part 4).
+   * If so, this supervisor projects the daemon's events; otherwise it drives the tmux fallback (the
+   * degradation contract — a stale, pre-daemon image still works exactly as before).
+   */
+  private boolean daemonBacked(String workspaceId) {
+    return !serviceDriver.isUnsatisfied()
+        && !liveness.isUnsatisfied()
+        && liveness.get().isDaemonLive(workspaceId);
+  }
+
   /** Without a ready pattern, STARTING flips to READY after this long (if still alive). */
   @ConfigProperty(name = "qits.services.ready-grace-ms", defaultValue = "10000")
   long readyGraceMillis;
@@ -203,7 +248,22 @@ public class ServiceSupervisor {
     Instance instance = new Instance(repoId, workspaceId, daemon);
     instance.process = process;
     instances.put(key, instance);
-    launch(instance);
+    if (daemonBacked(workspaceId)) {
+      // Daemon-backed: register a projection only. An auto-start (process != null, from the
+      // lifecycle coupler) needs no instruction — the daemon self-starts the service from its
+      // in-container config; we pre-register so its streamed events settle this segment/status. A
+      // manual start (no process) asks the daemon to start it now.
+      instance.daemonBacked = true;
+      instance.tail = new TailSink();
+      instance.status = ServiceStatus.STARTING;
+      if (process == null) {
+        serviceDriver
+            .get()
+            .startService(workspaceId, daemon.name(), daemon.startScript(), daemon.environment());
+      }
+    } else {
+      launch(instance); // tmux fallback (no live daemon) — drive the process ourselves
+    }
     return toInstanceDto(instance, null, workspaceId);
   }
 
@@ -217,6 +277,14 @@ public class ServiceSupervisor {
     cancelPending(instance);
     cancelLiveness(instance);
     cancelHealth(instance);
+    if (instance.daemonBacked) {
+      // The daemon owns the process: ask it to stop (it reports back STOPPED, which the projection
+      // sink settles). No host tmux signal/force-kill/follower involved.
+      serviceDriver
+          .get()
+          .signalService(workspaceId, instance.daemon.name(), instance.daemon.stopSignal());
+      return toInstanceDto(instance, null, workspaceId);
+    }
     if (instance.status == ServiceStatus.RESTARTING) {
       // No live session — the pending relaunch was the only thing to cancel.
       transition(instance, ServiceStatus.STOPPED, ServiceEventSeverity.INFO, "stopped", null);
@@ -284,7 +352,23 @@ public class ServiceSupervisor {
         cancelPending(instance);
         cancelLiveness(instance);
         cancelHealth(instance);
-        if (instance.status == ServiceStatus.RESTARTING) {
+        if (instance.daemonBacked) {
+          // Daemon-backed: the container (and its PID-1 daemon + services) is about to be removed.
+          // Ask the daemon to stop the service on a graceful stop, then settle STOPPED here —
+          // deterministically, since the container's imminent rm may beat the daemon's STOPPED
+          // event. No host tmux/follower to tear down.
+          if (graceful && !serviceDriver.isUnsatisfied()) {
+            serviceDriver
+                .get()
+                .signalService(workspaceId, instance.daemon.name(), instance.daemon.stopSignal());
+          }
+          transition(
+              instance,
+              ServiceStatus.STOPPED,
+              ServiceEventSeverity.INFO,
+              "workspace stopped",
+              null);
+        } else if (instance.status == ServiceStatus.RESTARTING) {
           // No live session — the pending relaunch (just cancelled) was all there was to stop.
           transition(
               instance,
@@ -386,6 +470,9 @@ public class ServiceSupervisor {
    * running when first probed is simply left settled.
    */
   private void adoptIfRunning(String repoId, String workspaceId, RepositoryDaemonDto definition) {
+    if (daemonBacked(workspaceId)) {
+      return; // daemon-backed adoption is event-driven (the daemon re-reports on socket reconnect)
+    }
     Key key = new Key(repoId, workspaceId, definition.id());
     synchronized (this) {
       Instance existing = instances.get(key);
@@ -1064,5 +1151,149 @@ public class ServiceSupervisor {
         instance.commandId,
         proxyPath,
         HealthProbeService.snapshotOrUnknown(instance.health, daemon.healthChecks()));
+  }
+
+  // --- Daemon-backed projection (Part 4) ------------------------------------------------------
+
+  /**
+   * Projects the in-container daemon's service events onto this supervisor's existing state machine
+   * (SSE, {@code daemon:<name>} segment, web-view proxy origin), reusing {@link #transition}. The
+   * daemon owns the process lifecycle, so nothing here spawns/restarts/polls — this only reflects
+   * what it reports. Callbacks arrive on the control-socket thread; each synchronizes on the
+   * supervisor monitor like every other transition path.
+   *
+   * <p>Log-observer / DEGRADED derivation from the streamed output is deliberately not wired here
+   * yet: it is anchored to the command audit-log line sequence ({@code ProcessOutputTap}) that the
+   * projection path bypasses, so it rides a follow-up. The tmux fallback keeps full observer
+   * fidelity. Streamed lines still feed the crash-excerpt {@link TailSink}.
+   */
+  private final class ProjectionSink implements WorkspaceServiceDriver.ServiceEventSink {
+
+    @Override
+    public void onState(
+        String repoId, String workspaceId, String serviceName, String state, Integer exitCode) {
+      if (repoId == null) {
+        return; // no repo context (daemon Hello not yet seen) — can't resolve the definition
+      }
+      ServiceStatus mapped = mapStatus(state);
+      if (mapped == null) {
+        LOG.debugf("Ignoring unknown service state '%s' for '%s'", state, serviceName);
+        return;
+      }
+      synchronized (ServiceSupervisor.this) {
+        Instance instance = findByName(repoId, workspaceId, serviceName);
+        if (instance == null) {
+          // The daemon reports a service the host didn't pre-register (a reconnect re-report after
+          // a
+          // qits restart, or a config-declared service with no coupler run) — event-driven
+          // adoption.
+          RepositoryDaemonDto definition = resolveDefinition(repoId, serviceName);
+          if (definition == null) {
+            LOG.debugf(
+                "Ignoring event for service '%s' with no repository definition in %s",
+                serviceName, repoId);
+            return;
+          }
+          instance = new Instance(repoId, workspaceId, definition);
+          instance.tail = new TailSink();
+          instances.put(new Key(repoId, workspaceId, definition.id()), instance);
+        }
+        instance.daemonBacked = true;
+        if (mapped == ServiceStatus.READY) {
+          resolveOrigin(instance); // the service is bound now — resolve the proxy target
+        }
+        if (mapped == ServiceStatus.RESTARTING) {
+          instance.restartCount++;
+        }
+        String excerpt =
+            mapped == ServiceStatus.CRASHED && instance.tail != null
+                ? instance.tail.excerpt()
+                : null;
+        transition(instance, mapped, severityFor(mapped), summaryFor(mapped, exitCode), excerpt);
+      }
+    }
+
+    @Override
+    public void onLine(
+        String repoId, String workspaceId, String serviceName, String stream, String line) {
+      synchronized (ServiceSupervisor.this) {
+        Instance instance = findByName(repoId, workspaceId, serviceName);
+        if (instance == null || !instance.daemonBacked || instance.tail == null) {
+          return;
+        }
+        instance.tail.write(line + "\n"); // feeds the crash excerpt on a later CRASHED transition
+      }
+    }
+  }
+
+  /**
+   * Find a repository-workspace's supervised instance by service name (caller holds the monitor).
+   * Keyed by repoId too: a workspace slug like {@code work} repeats across repositories, so name +
+   * slug alone would cross-match another repo's service.
+   */
+  private Instance findByName(String repoId, String workspaceId, String serviceName) {
+    for (Instance instance : instances.values()) {
+      if (instance.repoId.equals(repoId)
+          && instance.workspaceId.equals(workspaceId)
+          && instance.daemon.name().equals(serviceName)) {
+        return instance;
+      }
+    }
+    return null;
+  }
+
+  /** Test hook: whether {@code workspaceId}'s services are currently daemon-backed (Part 4). */
+  boolean isDaemonBacked(String workspaceId) {
+    return daemonBacked(workspaceId);
+  }
+
+  /**
+   * Resolve a repository's daemon definition by service name (a DB read; the orphan case is null).
+   */
+  private RepositoryDaemonDto resolveDefinition(String repoId, String serviceName) {
+    try {
+      for (RepositoryDaemonDto definition : repositoryDaemonService.resolveAll(repoId)) {
+        if (definition.name().equals(serviceName)) {
+          return definition;
+        }
+      }
+    } catch (RuntimeException e) {
+      LOG.debugf(e, "service definition lookup failed for '%s' in repo %s", serviceName, repoId);
+    }
+    return null;
+  }
+
+  private static ServiceStatus mapStatus(String state) {
+    if (state == null) {
+      return null;
+    }
+    return switch (state) {
+      case "STARTING" -> ServiceStatus.STARTING;
+      case "READY" -> ServiceStatus.READY;
+      case "RESTARTING" -> ServiceStatus.RESTARTING;
+      case "CRASHED" -> ServiceStatus.CRASHED;
+      case "STOPPED" -> ServiceStatus.STOPPED;
+      default -> null;
+    };
+  }
+
+  private static ServiceEventSeverity severityFor(ServiceStatus status) {
+    return switch (status) {
+      case CRASHED -> ServiceEventSeverity.ERROR;
+      case RESTARTING -> ServiceEventSeverity.WARNING;
+      default -> ServiceEventSeverity.INFO;
+    };
+  }
+
+  private static String summaryFor(ServiceStatus status, Integer exitCode) {
+    String suffix = exitCode != null ? " (exit " + exitCode + ")" : "";
+    return switch (status) {
+      case STARTING -> "starting";
+      case READY -> "ready";
+      case RESTARTING -> "restarting" + suffix;
+      case CRASHED -> "crashed" + suffix;
+      case STOPPED -> "stopped" + suffix;
+      default -> status.name();
+    };
   }
 }
