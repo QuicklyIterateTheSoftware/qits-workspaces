@@ -577,6 +577,41 @@ public class WorkspaceService {
     }
   }
 
+  /**
+   * Pre-flight guard shared by branch integration ({@link #mergeBranch}) and workspace integration
+   * ({@link #mergeWorkspace}) — and therefore by the MCP {@code integrateBranch} tool, which routes
+   * through {@code mergeBranch}. Integration merges the source branch's <em>origin</em> ref (inside
+   * the target's workspace), so before that ref is read this makes it faithful to the live source
+   * workspace:
+   *
+   * <ol>
+   *   <li>refuses a dirty working tree with a 400 — the origin-side merge would silently leave the
+   *       workspace's uncommitted work behind; and
+   *   <li>pushes the container's branch so every commit made inside the container reaches the
+   *       origin ref the merge reads. The push is <em>not</em> swallowed: a failure aborts the
+   *       whole integration, because a silently-skipped push would integrate a stale ref.
+   * </ol>
+   *
+   * A {@code null} source workspace or one with no live container — a plain branch or a stopped
+   * workspace — has nothing uncommitted to lose and a provably complete origin ref (nothing ever
+   * ran to advance it beyond origin), so it is a no-op. This deliberately does <em>not</em> require
+   * the source to be up to date with the target: integrating a diverged but cleanly-mergeable
+   * branch (yielding a merge commit, or a reported conflict) is a supported flow.
+   *
+   * <p>Takes the already-resolved {@link Workspace} rather than re-looking-it-up by branch: {@code
+   * mergeWorkspace} identifies its source by {@code workspaceId}, and two active workspaces could
+   * in principle share a branch — re-resolving by branch could push/clean-check the wrong
+   * container.
+   */
+  private void requireSyncedSourceForIntegration(String repoId, Workspace sourceWorkspace) {
+    if (sourceWorkspace == null
+        || !containers.exists(containers.containerName(sourceWorkspace.workspaceId, repoId))) {
+      return;
+    }
+    requireCleanWorkingTree(repoId, sourceWorkspace, "integrate");
+    containerGit(repoId, sourceWorkspace.workspaceId, "push", "origin", sourceWorkspace.branch);
+  }
+
   /** True when another workspace forks from {@code branch} (i.e. lists it as its parent). */
   private boolean hasChildren(String repoId, String branch) {
     for (Workspace other : workspaceRepository.findActiveByRepositoryId(repoId)) {
@@ -1286,14 +1321,11 @@ public class WorkspaceService {
     }
 
     String currentBranch = workspace.branch;
-    // Integration merges origin refs (in a temp host workspace); a live container may hold
-    // unpushed commits, so push the source branch first or the merge would miss them. No container
-    // means nothing ever ran in the workspace, so its origin ref is provably complete — skip. A
-    // live container's failed push still aborts the merge (a swallowed failure would silently
-    // integrate a stale ref).
-    if (containers.exists(containers.containerName(workspaceId, repoId))) {
-      containerGit(repoId, workspaceId, "push", "origin", currentBranch);
-    }
+    // Same pre-integration guard as branch integration: refuse a dirty working tree and push the
+    // container's unpushed commits so the origin ref this merge reads is complete (a swallowed push
+    // would silently integrate a stale ref). Pass the workspace resolved by id (not its branch) so
+    // the guard acts on exactly this container. A stopped/absent container is a no-op.
+    requireSyncedSourceForIntegration(repoId, workspace);
     MergeResult result = mergeIntoTarget(repoId, currentBranch, resolvedTarget);
     if (!result.hasConflicts()) {
       recordEvent(
@@ -1334,13 +1366,10 @@ public class WorkspaceService {
     if (source.equals(resolvedTarget)) {
       throw new BadRequestException("Cannot integrate '" + source + "' into itself");
     }
-    // A dirty workspace backing the source branch would have its uncommitted work left behind by
-    // the
-    // integration (a plain branch has no working tree, so it is never blocked).
-    Workspace sourceWorkspace = findWorkspaceByBranch(repoId, source);
-    if (sourceWorkspace != null) {
-      requireCleanWorkingTree(repoId, sourceWorkspace, "integrate");
-    }
+    // Guard and complete the source before the origin-side merge reads its ref: refuse a dirty
+    // working tree (a plain branch has none, so it is never blocked) and push any commits that live
+    // only inside the source container so they aren't silently dropped from the integration.
+    requireSyncedSourceForIntegration(repoId, findWorkspaceByBranch(repoId, source));
 
     MergeResult merged = mergeIntoTarget(repoId, source, resolvedTarget);
 
