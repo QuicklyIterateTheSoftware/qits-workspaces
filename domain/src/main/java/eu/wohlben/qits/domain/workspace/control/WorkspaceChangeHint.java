@@ -29,10 +29,18 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
     /**
      * The workspace working tree changed on disk — a file was created, modified, deleted, or moved
      * (typically the coding agent scaffolding without a commit). Fired by {@code
-     * WorkspaceWatchService} from a per-workspace {@code inotifywait}; the frontend re-fetches
-     * {@code /files} and {@code /detection}.
+     * WorkspaceDaemonRegistry} whenever the in-container {@code workspace-daemon} reports its
+     * working-tree marker moved (the daemon watches with its own {@code inotifywait}); the frontend
+     * re-fetches {@code /files} and {@code /detection}.
      */
     FILES,
+    /**
+     * The workspace's working-tree cleanliness (clean/dirty) changed — reported by the in-container
+     * {@code workspace-daemon} over its socket and cached by {@code WorkspaceDaemonRegistry}. Fired
+     * on the repository channel (branch tree) so the frontend re-fetches the workspace list and
+     * refreshes the dirty badge.
+     */
+    GIT_STATUS,
     /**
      * A technical process for this workspace started or completed (e.g. a container start). The
      * frontend re-fetches {@code /active-process} and — when an id comes back — opens the separate

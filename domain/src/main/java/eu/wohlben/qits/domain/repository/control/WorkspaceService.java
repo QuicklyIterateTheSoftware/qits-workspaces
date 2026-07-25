@@ -73,6 +73,15 @@ public class WorkspaceService {
   @Inject Instance<WorkspaceDaemonLiveness> clientLiveness;
 
   /**
+   * The in-container workspace-daemon's last-reported working-tree cleanliness (clean/dirty),
+   * surfaced as {@link WorkspaceDto#clean}. {@code Instance<>} for the same reason as {@link
+   * #clientLiveness}: apps without the backend impl (cli, tests) have no {@link WorkspaceGitStatus}
+   * bean and simply see it empty. Only consulted for RUNNING workspaces — the daemon reports only
+   * while connected.
+   */
+  @Inject Instance<WorkspaceGitStatus> gitStatus;
+
+  /**
    * Awaits the in-container workspace-daemon's autonomous self-provision (clone + submodules on
    * boot) — the <b>sole</b> provisioning path (docs/epics/qits-workspace-daemon/ Part 2). {@code
    * Instance<>} because the real backend impl lives in {@code service}; apps without it (cli,
@@ -327,6 +336,12 @@ public class WorkspaceService {
                       : wt.runtimeStatus == WorkspaceRuntimeStatus.RUNNING
                           ? WorkspaceRuntimeStatus.STOPPED
                           : wt.runtimeStatus;
+              // Clean/dirty is only knowable while the daemon is connected (RUNNING); otherwise it
+              // stays null (unknown ⇒ no badge). The daemon re-reports on reconnect.
+              Boolean clean =
+                  runtime == WorkspaceRuntimeStatus.RUNNING && gitStatus.isResolvable()
+                      ? gitStatus.get().isClean(wt.workspaceId).orElse(null)
+                      : null;
               return new WorkspaceDto(
                   wt.workspaceId,
                   wt.parent,
@@ -337,6 +352,7 @@ public class WorkspaceService {
                   wt.status,
                   runtime,
                   wt.runtimeError,
+                  clean,
                   wt.preamble,
                   wt.result,
                   wt.resolvedAt);

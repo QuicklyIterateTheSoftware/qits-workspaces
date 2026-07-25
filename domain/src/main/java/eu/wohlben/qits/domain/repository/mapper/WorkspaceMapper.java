@@ -13,5 +13,6 @@ public interface WorkspaceMapper {
   @Mapping(target = "ahead", ignore = true)
   @Mapping(target = "behind", ignore = true)
   @Mapping(target = "conflictsWithParent", ignore = true)
+  @Mapping(target = "clean", ignore = true)
   WorkspaceDto toDto(Workspace entity);
 }

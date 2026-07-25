@@ -3,6 +3,7 @@ package eu.wohlben.qits.domain.repository.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -51,6 +52,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Inject GitExecutor git;
   @Inject WorkspaceContainerStartedRecorder startedRecorder;
   @Inject WorkspaceContainerStoppingRecorder stoppingRecorder;
+  @Inject FakeWorkspaceGitStatus gitStatus;
 
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
@@ -97,6 +99,31 @@ public class WorkspaceContainerLifecycleServiceTest {
         git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
         containerHead(container),
         "the provisioned container has the branch checked out");
+  }
+
+  @Test
+  public void cleanFlagIsSurfacedOnlyWhileRunningAndReported() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+
+    // STOPPED (not provisioned): the daemon can't be connected, so clean stays unknown even if a
+    // stale value were reported.
+    gitStatus.report("feat", false);
+    assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
+    assertNull(workspaceDto(repoId, "feat").clean(), "no clean/dirty badge while not RUNNING");
+
+    // RUNNING + reported dirty → clean == false.
+    workspaceService.ensureContainer(repoId, "feat");
+    assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
+    assertEquals(Boolean.FALSE, workspaceDto(repoId, "feat").clean());
+
+    // RUNNING + reported clean → clean == true.
+    gitStatus.report("feat", true);
+    assertEquals(Boolean.TRUE, workspaceDto(repoId, "feat").clean());
+
+    // RUNNING but the daemon hasn't reported (yet) → unknown (null), not a stale value.
+    gitStatus.forget("feat");
+    assertNull(workspaceDto(repoId, "feat").clean(), "RUNNING but unreported ⇒ unknown");
   }
 
   @Test

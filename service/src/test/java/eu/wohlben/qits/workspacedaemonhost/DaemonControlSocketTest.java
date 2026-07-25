@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint.Topic;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
@@ -20,6 +22,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
+import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
@@ -60,6 +63,7 @@ class DaemonControlSocketTest {
   @Inject Vertx vertx;
   @Inject WorkspaceDaemonRegistry registry;
   @Inject DaemonMessageCodec codec;
+  @Inject HintRecorder hints;
 
   @TestHTTPResource("/api/workspace-daemon/" + WORKSPACE_ID)
   URI endpoint;
@@ -499,6 +503,59 @@ class DaemonControlSocketTest {
     assertFalse(registry.isDaemonLive(WORKSPACE_ID));
   }
 
+  @Test
+  void gitStatusReportCachesTheFlagAndFiresFilesAndGitStatusHints() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      hints.clear();
+
+      peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, false, "abc123")));
+
+      // The flag is cached for the DTO read path.
+      await(() -> registry.isClean(WORKSPACE_ID).isPresent());
+      assertEquals(Optional.of(false), registry.isClean(WORKSPACE_ID));
+      // Every report re-homes the old host watcher's FILES trigger (workspace channel)…
+      await(() -> hints.has(Topic.FILES, "repo-1", WORKSPACE_ID));
+      assertTrue(hints.has(Topic.FILES, "repo-1", WORKSPACE_ID), hints.toString());
+      // …and a flag change nudges the branch-tree badge on the repository channel (repoId, null).
+      await(() -> hints.has(Topic.GIT_STATUS, "repo-1", null));
+      assertTrue(hints.has(Topic.GIT_STATUS, "repo-1", null), hints.toString());
+    }
+  }
+
+  @Test
+  void unchangedGitStatusFiresFilesButNotGitStatus() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+
+      // First report establishes clean=true (fires FILES + GIT_STATUS).
+      peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, true, "abc123")));
+      await(() -> registry.isClean(WORKSPACE_ID).equals(Optional.of(true)));
+      hints.clear();
+
+      // A second report with the SAME flag (a dirty→dirty content edit would look like this): the
+      // marker moved on the daemon, so FILES must fire again, but the badge flag didn't change so
+      // GIT_STATUS must NOT.
+      peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, true, "abc123")));
+      await(() -> hints.has(Topic.FILES, "repo-1", WORKSPACE_ID));
+      assertTrue(hints.has(Topic.FILES, "repo-1", WORKSPACE_ID), hints.toString());
+      assertFalse(hints.has(Topic.GIT_STATUS, "repo-1", null), hints.toString());
+    }
+  }
+
+  @Test
+  void disconnectEvictsTheCachedGitStatus() throws Exception {
+    FakePeer peer = connect();
+    await(() -> registry.isDaemonLive(WORKSPACE_ID));
+    peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, false, "abc123")));
+    await(() -> registry.isClean(WORKSPACE_ID).isPresent());
+
+    peer.close();
+
+    await(() -> registry.isClean(WORKSPACE_ID).isEmpty());
+    assertTrue(registry.isClean(WORKSPACE_ID).isEmpty(), "cache cleared on disconnect (unknown)");
+  }
+
   /** Spin until {@code condition} holds or a 5s deadline passes. */
   private static void await(BooleanSupplier condition) throws InterruptedException {
     long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
@@ -529,6 +586,39 @@ class DaemonControlSocketTest {
     @Override
     public void onOutcome(String name, String outcome, Integer exitCode) {
       outcomes.add(name + ":" + outcome + ":" + exitCode);
+    }
+  }
+
+  /**
+   * Collects the async {@link WorkspaceChangeHint}s the registry fires, so the git-status tests can
+   * assert the re-homed FILES trigger and the GIT_STATUS badge nudge without the SSE boundary. An
+   * {@code @ApplicationScoped} bean discovered by the {@code @QuarkusTest}.
+   */
+  @jakarta.enterprise.context.ApplicationScoped
+  public static class HintRecorder {
+    private final List<WorkspaceChangeHint> received =
+        new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    void onHint(@jakarta.enterprise.event.ObservesAsync WorkspaceChangeHint hint) {
+      received.add(hint);
+    }
+
+    void clear() {
+      received.clear();
+    }
+
+    boolean has(Topic topic, String repoId, String workspaceId) {
+      return received.stream()
+          .anyMatch(
+              h ->
+                  h.topic() == topic
+                      && java.util.Objects.equals(h.repoId(), repoId)
+                      && java.util.Objects.equals(h.workspaceId(), workspaceId));
+    }
+
+    @Override
+    public String toString() {
+      return received.toString();
     }
   }
 

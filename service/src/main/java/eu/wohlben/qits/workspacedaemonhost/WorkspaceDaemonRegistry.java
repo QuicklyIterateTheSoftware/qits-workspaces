@@ -8,7 +8,10 @@ import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonProvisioner;
+import eu.wohlben.qits.domain.repository.control.WorkspaceGitStatus;
 import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
+import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
@@ -22,6 +25,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
+import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
@@ -77,13 +81,23 @@ public class WorkspaceDaemonRegistry
         WorkspaceDaemonProvisioner,
         WorkspaceConfigReader,
         WorkspaceBootstrapDriver,
-        WorkspaceServiceDriver {
+        WorkspaceServiceDriver,
+        WorkspaceGitStatus {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceDaemonRegistry.class);
 
   @Inject DaemonMessageCodec codec;
 
   @Inject ObjectMapper objectMapper;
+
+  @Inject WorkspaceChangePublisher changePublisher;
+
+  /**
+   * Last working-tree cleanliness each live daemon reported ({@link GitStatus}). In-memory only —
+   * known while the daemon is connected (container RUNNING), cleared on {@link #unregister}, and
+   * re-reported by the daemon on reconnect. Surfaced through {@link WorkspaceGitStatus#isClean}.
+   */
+  private final ConcurrentHashMap<String, Boolean> gitClean = new ConcurrentHashMap<>();
 
   /** How long a {@link #readConfig} waits for the live daemon's {@link ConfigView} reply. */
   @ConfigProperty(name = "qits.workspace.config.describe-timeout-ms", defaultValue = "10000")
@@ -140,6 +154,9 @@ public class WorkspaceDaemonRegistry
     clients.computeIfPresent(
         workspaceId,
         (id, existing) -> existing.connection.id().equals(connection.id()) ? null : existing);
+    // The daemon is gone: its cached working-tree status is unknown until it reconnects and
+    // re-reports (RUNNING-only semantics; the UI shows no badge in the meantime).
+    gitClean.remove(workspaceId);
     LOG.debugf(
         "workspace-daemon disconnected for workspace %s (connection %s)",
         workspaceId, connection.id());
@@ -208,6 +225,7 @@ public class WorkspaceDaemonRegistry
       case BootstrapOutcome outcome -> routeBootstrapOutcome(workspaceId, outcome);
       case Bootstrapped done -> completeBootstrap(workspaceId, done.ok());
       case DaemonEvent event -> routeServiceState(workspaceId, client, event);
+      case GitStatus status -> onGitStatus(workspaceId, client, status);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
       case RunCommand ignored -> {}
@@ -217,6 +235,29 @@ public class WorkspaceDaemonRegistry
       case StartDaemon ignored -> {}
       case SignalDaemon ignored -> {}
     }
+  }
+
+  /**
+   * Cache a working-tree status report and fan out its two consequences. Every report means the
+   * daemon's working-tree marker moved, so it re-homes the old host watcher's trigger: a {@link
+   * WorkspaceChangeHint.Topic#FILES} hint on the workspace channel makes the detail view re-fetch
+   * {@code /files} + {@code /detection}. The {@code clean} flag is cached for {@link #isClean}, and
+   * a {@link WorkspaceChangeHint.Topic#GIT_STATUS} hint on the repository channel refreshes the
+   * branch-tree dirty badge — but only when the flag actually flipped, so a dirty→dirty content
+   * edit nudges {@code FILES} without re-invalidating the whole workspace list.
+   */
+  private void onGitStatus(String workspaceId, DaemonConnection client, GitStatus status) {
+    String repoId = client != null ? client.repoId : null;
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.FILES);
+    Boolean previous = gitClean.put(workspaceId, status.clean());
+    if (previous == null || previous != status.clean()) {
+      changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.GIT_STATUS);
+    }
+  }
+
+  @Override
+  public Optional<Boolean> isClean(String workspaceId) {
+    return Optional.ofNullable(gitClean.get(workspaceId));
   }
 
   /** Fan a service's lifecycle transition out to every subscribed host coordinator. */

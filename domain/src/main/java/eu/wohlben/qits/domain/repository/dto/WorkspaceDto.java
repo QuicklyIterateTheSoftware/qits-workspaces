@@ -16,6 +16,10 @@ import java.time.Instant;
  *     independent of {@code status}: the branch is the source of truth, the container is a
  *     recreatable cache of it
  * @param runtimeError when {@code runtimeStatus} is FAILED, why the last re-provision failed
+ * @param clean whether the workspace's in-container working tree is clean ({@code true}) or has
+ *     uncommitted changes ({@code false}), as last reported by {@code workspace-daemon} over its
+ *     socket; {@code null} when unknown — the daemon only reports while the container is RUNNING,
+ *     so a STOPPED workspace (or one whose daemon hasn't reported yet) carries no clean/dirty badge
  * @param preamble markdown: the reason/goal authored at creation
  * @param result markdown: the outcome authored at resolution
  * @param resolvedAt when the workspace was resolved (null while ACTIVE)
@@ -30,6 +34,7 @@ public record WorkspaceDto(
     WorkspaceStatus status,
     WorkspaceRuntimeStatus runtimeStatus,
     String runtimeError,
+    Boolean clean,
     String preamble,
     String result,
     Instant resolvedAt) {}
