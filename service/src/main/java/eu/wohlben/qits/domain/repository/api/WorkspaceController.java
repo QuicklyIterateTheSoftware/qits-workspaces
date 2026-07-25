@@ -153,6 +153,22 @@ public class WorkspaceController {
     return workspaceService.getWorkspace(repoId, workspaceId);
   }
 
+  /**
+   * Delete the workspace's container outright ({@code docker rm}) while keeping its branch and the
+   * workspace row — the destructive counterpart to the graceful {@link #stopContainer}, which
+   * pauses in place. Reclaims the (stopped) container and any uncommitted changes in it; the next
+   * Start re-clones a fresh container from the durable branch. Does NOT delete the branch — that is
+   * {@code discard} (Abandon). Returns the refreshed workspace; 404 only when the workspace is
+   * unknown.
+   */
+  @POST
+  @Path("/{workspaceId}/delete-container")
+  public WorkspaceDto deleteContainer(
+      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+    workspaceService.deleteContainer(repoId, workspaceId);
+    return workspaceService.getWorkspace(repoId, workspaceId);
+  }
+
   public static record RecreateContainerRequest() {
     /**
      * The workspace's state at submit time plus the technical process streaming the recreate —

@@ -1215,6 +1215,29 @@ public class WorkspaceService {
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
   }
 
+  /**
+   * Deletes a workspace's container outright ({@code docker rm}) while keeping its durable branch
+   * and the ACTIVE workspace row. Where {@link #stopContainer} pauses in place (keeping the
+   * container and its {@code /workspace} clone for a lossless resume), this tears the container
+   * down and reclaims its writable layer; the next {@link #ensureContainer} re-clones a fresh
+   * container from the branch — losing only uncommitted working-tree changes, exactly like a
+   * recreate. Distinct from {@link #discardWorkspace} (Abandon), which additionally deletes the
+   * branch and soft-deletes the row. Settles any live daemons first (immediate — the container is
+   * being torn down) and leaves the workspace {@code STOPPED} with no runtime error. No-op-safe if
+   * the container is already gone ({@code rm} is best-effort).
+   */
+  @Transactional
+  public void deleteContainer(String repoId, String workspaceId) {
+    Workspace workspace =
+        workspaceRepository
+            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
+            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
+    containerEvents.fireStopping(repoId, workspaceId, false);
+    containers.rm(containers.containerName(workspaceId, repoId));
+    workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
+    workspace.runtimeError = null;
+  }
+
   @Transactional
   public MergeResult mergeWorkspace(String repoId, String workspaceId, String target) {
     Repository repo =

@@ -339,6 +339,56 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
+  public void deleteContainerRemovesTheContainerButKeepsBranchAndWorkspace() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    String container = containers.containerName("feat", repoId);
+    // The realistic entry point: the UI offers "Delete container" on a stopped workspace, whose
+    // container is still present (docker stop, not rm).
+    workspaceService.stopContainer(repoId, "feat");
+    assertTrue(containers.exists(container), "a stopped container is still present");
+
+    workspaceService.deleteContainer(repoId, "feat");
+
+    // The container is torn down (docker rm)...
+    assertFalse(containers.exists(container), "delete removes the container");
+    // ...but the durable branch and the ACTIVE workspace row survive (unlike discard/Abandon, which
+    // deletes the branch and soft-deletes the row).
+    assertTrue(workspaceService.branchExists(repoId, "feat"), "the branch is kept");
+    WorkspaceDto dto = workspaceDto(repoId, "feat");
+    assertEquals(WorkspaceStatus.ACTIVE, dto.status(), "the workspace stays active");
+    assertEquals(WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus());
+
+    // ...and Start recreates a fresh container from the branch.
+    workspaceService.ensureContainer(repoId, "feat");
+    assertTrue(containers.isRunning(container), "Start recreates the container from the branch");
+  }
+
+  @Test
+  public void deleteContainerFiresStoppingImmediatelyBeforeRm() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    stoppingRecorder.clear();
+
+    workspaceService.deleteContainer(repoId, "feat");
+
+    var seen = stoppingRecorder.forKey(repoId, "feat");
+    assertEquals(1, seen.size(), "deleteContainer fires exactly one stopping event");
+    assertFalse(seen.get(0).event().graceful(), "a teardown settles bookkeeping-only (immediate)");
+    assertTrue(
+        seen.get(0).containerExistedWhenObserved(),
+        "the stopping event fires before containers.rm");
+  }
+
+  @Test
+  public void deleteContainerOnAnUnknownWorkspaceIs404() throws Exception {
+    String repoId = clonedRepo();
+    assertThrows(NotFoundException.class, () -> workspaceService.deleteContainer(repoId, "nope"));
+  }
+
+  @Test
   public void unpushedWorkDiesWithAnUnexpectedlyRemovedContainer() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
