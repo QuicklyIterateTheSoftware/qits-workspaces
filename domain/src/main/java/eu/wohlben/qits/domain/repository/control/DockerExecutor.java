@@ -105,6 +105,9 @@ public class DockerExecutor implements ContainerRuntime {
   @Override
   public String run(String repoId, String workspaceId, String branch, String parent) {
     String name = containerName(workspaceId, repoId);
+    // Create-if-absent the labeled per-workspace /workspace volume before the container mounts it,
+    // so recreation reattaches the same checkout (and dangling-volume reconcile has its handle).
+    ensureWorkspaceVolumeIfPersistent(repoId, workspaceId, branch, parent);
     // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
     // qits.* labels, host alias, host uid, shared network); this executor only prepends the runtime
     // + `run` verb.
@@ -149,6 +152,7 @@ public class DockerExecutor implements ContainerRuntime {
       String parent,
       java.util.function.Consumer<String> onLine) {
     String name = containerName(workspaceId, repoId);
+    ensureWorkspaceVolumeIfPersistent(repoId, workspaceId, branch, parent);
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
@@ -298,6 +302,105 @@ public class DockerExecutor implements ContainerRuntime {
       }
       if (!workspaceId.isBlank()) {
         infos.add(new ContainerInfo(name, workspaceId, branch, parent, running));
+      }
+    }
+    return infos;
+  }
+
+  // --- Per-workspace /workspace volumes -------------------------------------------------------
+
+  @Override
+  public String workspaceVolumeName(String workspaceId) {
+    return containerFactory.workspaceVolumeName(workspaceId);
+  }
+
+  /** {@link #ensureWorkspaceVolume} only when the persistent-workspace flag is on. */
+  private void ensureWorkspaceVolumeIfPersistent(
+      String repoId, String workspaceId, String branch, String parent) {
+    if (containerFactory.persistWorkspace()) {
+      ensureWorkspaceVolume(repoId, workspaceId, branch, parent);
+    }
+  }
+
+  @Override
+  public void ensureWorkspaceVolume(
+      String repoId, String workspaceId, String branch, String parent) {
+    String name = containerFactory.workspaceVolumeName(workspaceId);
+    List<String> cmd = new ArrayList<>(List.of(runtime, "volume", "create"));
+    // Labels are set only at create time; docker ignores label changes on an existing volume, so a
+    // later branch rename leaves qits.branch stale — acceptable, the stable qits.workspace is the
+    // reconcile key. The factory owns the label set (it resolves qits.project and mirrors the
+    // container labels).
+    containerFactory
+        .workspaceVolumeLabels(repoId, workspaceId, branch, parent)
+        .forEach(
+            (k, v) -> {
+              cmd.add("--label");
+              cmd.add(k + "=" + v);
+            });
+    cmd.add(name);
+    ExecResult result = runCapturing(null, cmd);
+    if (result.exitCode() != 0) {
+      LOG.warnf("Could not ensure workspace volume '%s': %s", name, result.output());
+    }
+  }
+
+  @Override
+  public void removeWorkspaceVolume(String workspaceId) {
+    String name = containerFactory.workspaceVolumeName(workspaceId);
+    // Best-effort: the container must already be rm'd (docker refuses an in-use volume) and a
+    // missing volume is fine — both just log at debug and continue.
+    ExecResult result = runCapturing(null, List.of(runtime, "volume", "rm", name));
+    if (result.exitCode() != 0) {
+      LOG.debugf("Failed to remove workspace volume %s: %s", name, result.output());
+    }
+  }
+
+  @Override
+  public List<VolumeInfo> listWorkspaceVolumes() {
+    ExecResult ls =
+        runCapturing(
+            null,
+            List.of(
+                runtime,
+                "volume",
+                "ls",
+                "--filter",
+                "label=qits.managed=workspace-volume",
+                "--format",
+                "{{.Name}}"));
+    if (ls.exitCode() != 0) {
+      LOG.warnf("Failed to list workspace volumes: %s", ls.output());
+      return List.of();
+    }
+    List<VolumeInfo> infos = new ArrayList<>();
+    for (String name : ls.output().split("\n")) {
+      if (name.isBlank()) {
+        continue;
+      }
+      // Read the identity labels back one inspect at a time (the ls --format above can't emit
+      // labels portably across docker/podman); a volume whose labels can't be read is skipped.
+      ExecResult inspect =
+          runCapturing(
+              null,
+              List.of(
+                  runtime,
+                  "volume",
+                  "inspect",
+                  "--format",
+                  "{{index .Labels \"qits.project\"}}\t{{index .Labels \"qits.repository\"}}\t"
+                      + "{{index .Labels \"qits.workspace\"}}\t{{index .Labels \"qits.branch\"}}",
+                  name));
+      if (inspect.exitCode() != 0) {
+        continue;
+      }
+      String[] parts = inspect.output().trim().split("\t", -1);
+      String projectId = parts.length > 0 ? emptyToNull(parts[0]) : null;
+      String repoId = parts.length > 1 ? emptyToNull(parts[1]) : null;
+      String workspaceId = parts.length > 2 ? parts[2] : "";
+      String branch = parts.length > 3 ? emptyToNull(parts[3]) : null;
+      if (!workspaceId.isBlank()) {
+        infos.add(new VolumeInfo(name, projectId, repoId, workspaceId, branch));
       }
     }
     return infos;

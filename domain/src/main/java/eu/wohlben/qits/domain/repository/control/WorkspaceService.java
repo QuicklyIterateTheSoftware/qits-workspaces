@@ -1086,6 +1086,10 @@ public class WorkspaceService {
                 workspacePromptAttachmentRepository.deleteByWorkspaceId(wt.id);
                 recordEvent(wt, WorkspaceEventType.ABANDONED, wt.branch, null, null);
               });
+      // The branch is gone, so any persisted /workspace volume is orphaned work — reap it. The
+      // container is already absent on this path (we passed the isRunning/exists branches), so no
+      // prior rm is needed. Best-effort.
+      containers.removeWorkspaceVolume(workspaceId);
       throw new NotFoundException(
           "Workspace '" + workspaceId + "' has no branch to recreate from; abandoned");
     }
@@ -1218,13 +1222,16 @@ public class WorkspaceService {
   /**
    * Deletes a workspace's container outright ({@code docker rm}) while keeping its durable branch
    * and the ACTIVE workspace row. Where {@link #stopContainer} pauses in place (keeping the
-   * container and its {@code /workspace} clone for a lossless resume), this tears the container
-   * down and reclaims its writable layer; the next {@link #ensureContainer} re-clones a fresh
-   * container from the branch — losing only uncommitted working-tree changes, exactly like a
-   * recreate. Distinct from {@link #discardWorkspace} (Abandon), which additionally deletes the
-   * branch and soft-deletes the row. Settles any live daemons first (immediate — the container is
-   * being torn down) and leaves the workspace {@code STOPPED} with no runtime error. No-op-safe if
-   * the container is already gone ({@code rm} is best-effort).
+   * container and its {@code /workspace} volume for a lossless resume) and a plain recreate now
+   * <em>preserves</em> that volume, this is the one deliberate reset: it tears the container down
+   * <em>and removes the persistent {@code /workspace} volume</em>, so the next {@link
+   * #ensureContainer} re-creates an empty volume and re-clones a fresh checkout from the branch —
+   * losing every uncommitted working-tree change and any unpushed commit, as its Shift-guarded
+   * "loses uncommitted changes" contract promises. Distinct from {@link #discardWorkspace}
+   * (Abandon), which additionally deletes the branch and soft-deletes the row. Settles any live
+   * daemons first (immediate — the container is being torn down) and leaves the workspace {@code
+   * STOPPED} with no runtime error. No-op-safe if the container/volume are already gone (both
+   * best-effort). The container is removed before the volume (docker refuses an in-use volume).
    */
   @Transactional
   public void deleteContainer(String repoId, String workspaceId) {
@@ -1234,6 +1241,7 @@ public class WorkspaceService {
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
     containerEvents.fireStopping(repoId, workspaceId, false);
     containers.rm(containers.containerName(workspaceId, repoId));
+    containers.removeWorkspaceVolume(workspaceId);
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
     workspace.runtimeError = null;
   }
@@ -1592,14 +1600,16 @@ public class WorkspaceService {
     try {
       String branch = workspace.branch;
 
-      // Remove the workspace's container. Discard is intentionally lossy: unlike the graceful
-      // stopContainer (which docker-stops in place so the container and its /workspace survive),
-      // here we delete the container AND the branch right after, so preserving /workspace would be
-      // pointless — the operator asked to throw this work away. Settle any live daemons first
-      // (immediate — no graceful signal, the
-      // work is being discarded) so their disappearance doesn't read as a crash to be resurrected.
+      // Remove the workspace's container AND its persistent /workspace volume. Discard is
+      // intentionally lossy: unlike the graceful stopContainer (which docker-stops in place so the
+      // container and its /workspace volume survive), here we delete the container, its volume, AND
+      // the branch right after, so preserving /workspace would be pointless — the operator asked to
+      // throw this work away. Container first, then the volume (docker refuses an in-use volume).
+      // Settle any live daemons first (immediate — no graceful signal, the work is being discarded)
+      // so their disappearance doesn't read as a crash to be resurrected.
       containerEvents.fireStopping(repoId, workspace.workspaceId, false);
       containers.rm(containers.containerName(workspace.workspaceId, repoId));
+      containers.removeWorkspaceVolume(workspace.workspaceId);
 
       if (branch != null && !branch.isBlank()) {
         try {

@@ -71,6 +71,18 @@ public class FakeWorkspaceDaemonProvisioner implements WorkspaceDaemonProvisione
                 });
 
     String container = containers.containerName(workspaceId, repoId);
+    // Idempotent reconnect: the real workspace-daemon skips its self-clone when /workspace/.git
+    // already exists (a persistent /workspace volume reattached after container recreation —
+    // docs/epics/qits-workspace-daemon/features/2026-07-23_autonomous-self-clone-on-boot.md).
+    // Mirror
+    // that here so recreation on a populated volume is lossless (no re-clone into the non-empty
+    // tree): report the already-checked-out HEAD and skip clone + submodule materialization.
+    if (containers.exec(container, "/workspace", Map.of(), "test", "-e", ".git").exitCode() == 0) {
+      ContainerRuntime.ExecResult existingHead =
+          containers.exec(container, "/workspace", Map.of(), "git", "rev-parse", "HEAD");
+      return Optional.of(
+          ProvisionResult.ok(existingHead.exitCode() == 0 ? existingHead.output().trim() : ""));
+    }
     ContainerRuntime.ExecResult clone =
         containers.exec(
             container,

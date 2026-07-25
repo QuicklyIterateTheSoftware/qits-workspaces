@@ -56,6 +56,24 @@ public class WorkspaceContainerFactory {
   String pnpmVolume;
 
   /**
+   * Name prefix for the per-workspace {@code /workspace} volume — {@code prefix + workspaceId} (the
+   * stable {@code workspace_id}, safe as a docker volume name and 1:1 with the branch).
+   * Branch/repo/ project ride as labels, not the name, so a rename never strands the volume. See
+   * docs/epics/qits-workspaces/features/2026-07-25_persistent-workspace-volume.md.
+   */
+  @ConfigProperty(name = "qits.workspace.workspace-volume-prefix", defaultValue = "qits_workspace_")
+  String workspaceVolumePrefix;
+
+  /**
+   * Feature flag: when {@code true} (default), {@code /workspace} is a per-workspace named volume
+   * that survives container recreation; when {@code false}, it reverts to the container's ephemeral
+   * writable layer (no {@code -v /workspace}, no per-workspace volume lifecycle) — a reversible
+   * per-deployment kill switch while the change beds in.
+   */
+  @ConfigProperty(name = "qits.workspace.persist-workspace", defaultValue = "true")
+  boolean persistWorkspace;
+
+  /**
    * The IANA timezone every workspace container runs in ({@code TZ} env, honored by glibc, the JVM
    * and node — tzdata is in the image). Blank/absent (the default) inherits qits' own zone, so
    * wall-clock output in the container (logs, {@code date}, commit timestamps) matches the
@@ -180,6 +198,47 @@ public class WorkspaceContainerFactory {
     return network;
   }
 
+  /** Whether {@code /workspace} is a persistent per-workspace volume (vs. the ephemeral layer). */
+  public boolean persistWorkspace() {
+    return persistWorkspace;
+  }
+
+  /**
+   * The deterministic per-workspace {@code /workspace} volume name — {@code prefix + workspaceId}.
+   */
+  public String workspaceVolumeName(String workspaceId) {
+    return workspaceVolumePrefix + workspaceId;
+  }
+
+  /**
+   * The {@code qits.*} labels a per-workspace {@code /workspace} volume carries — {@code
+   * qits.managed=workspace-volume} (the reconcile filter) plus {@code qits.project} (resolved from
+   * the repo via {@link RepositoryNameResolver}) and the same repo/workspace/branch/parent identity
+   * the container labels carry, so a dangling volume is human-readable and matchable to its row.
+   * Ordered (LinkedHashMap) only for stable argv/log output.
+   */
+  public java.util.Map<String, String> workspaceVolumeLabels(
+      String repoId, String workspaceId, String branch, String parent) {
+    java.util.Map<String, String> labels = new java.util.LinkedHashMap<>();
+    labels.put("qits.managed", "workspace-volume");
+    labels.put("qits.project", resolveProjectId(repoId));
+    labels.put("qits.repository", repoId);
+    labels.put("qits.workspace", workspaceId);
+    labels.put("qits.branch", branch == null ? "" : branch);
+    labels.put("qits.parent", parent == null ? "" : parent);
+    return labels;
+  }
+
+  /**
+   * The project id a repo belongs to (blank when unresolved), for the {@code qits.project} label.
+   */
+  private String resolveProjectId(String repoId) {
+    return nameResolver
+        .resolve(repoId)
+        .map(RepositoryNameResolver.ProjectScopedName::projectId)
+        .orElse("");
+  }
+
   /**
    * A {@link WorkspaceContainer} seeded for {@code workspaceId} of {@code repoId}: its
    * deterministic name, the host uid, the four {@code qits.*} labels startup reconciliation reads
@@ -242,6 +301,12 @@ public class WorkspaceContainerFactory {
     // the
     // daemon then id-addresses (/git/<repositoryId>), mirroring cloneUrl's fallback.
     Optional<RepositoryNameResolver.ProjectScopedName> scopedName = nameResolver.resolve(repoId);
+    // The owning project id, also as a label so it mirrors the per-workspace volume's qits.project
+    // (the volume labels carry it for dangling-volume reconcile; the container carries it for
+    // symmetry). Blank when the repo has no project.
+    container.label(
+        "qits.project",
+        scopedName.map(RepositoryNameResolver.ProjectScopedName::projectId).orElse(""));
     container.env(
         "QITS_WORKSPACE_DAEMON_PROJECT_ID",
         scopedName.map(RepositoryNameResolver.ProjectScopedName::projectId).orElse(""));
@@ -314,6 +379,17 @@ public class WorkspaceContainerFactory {
     if (pnpmVolume != null && !pnpmVolume.isBlank()) {
       container.volume(pnpmVolume, PNPM_MOUNT);
       container.env("npm_config_store_dir", PNPM_MOUNT + "/store");
+    }
+    // The per-workspace /workspace volume: the workspace's checkout, persisted across container
+    // recreation instead of dying with the writable layer. The first mount populates the empty
+    // volume from the image's world-writable /workspace (docker copies the image dir's contents AND
+    // permissions), so no permission fix is needed under the arbitrary-uid container user — the
+    // same
+    // reason the shared cache volumes work. DockerExecutor.run creates it (with labels) just before
+    // this mount attaches. Flag off ⇒ /workspace stays the ephemeral writable layer (today's
+    // behavior). See docs/epics/qits-workspaces/features/2026-07-25_persistent-workspace-volume.md.
+    if (persistWorkspace) {
+      container.volume(workspaceVolumeName(workspaceId), "/workspace");
     }
     // The container runs ONLY the workspace-daemon, via the image ENTRYPOINT
     // (docker/qits/Dockerfile),

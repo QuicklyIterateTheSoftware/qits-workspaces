@@ -145,6 +145,47 @@ public interface ContainerRuntime {
   /** All workspace containers for a repository, read from their {@code qits.*} labels. */
   List<ContainerInfo> listWorkspaceContainers(String repoId);
 
+  // --- Per-workspace /workspace volumes -------------------------------------------------------
+  //
+  // A workspace's checkout lives on a per-workspace named volume mounted at /workspace (not the
+  // container's ephemeral writable layer), so it SURVIVES container recreation (image update,
+  // crash, prune, host restart) and is reattached on the next provision — the daemon then skips its
+  // self-clone on the already-populated volume. Rich qits.* labels (mirroring the container labels
+  // plus qits.managed/qits.project) make dangling volumes detectable and reapable by name-free,
+  // charset-safe reconcile. Gated by qits.workspace.persist-workspace; when off, /workspace reverts
+  // to the ephemeral layer and none of these are exercised. See
+  // docs/epics/qits-workspaces/features/2026-07-25_persistent-workspace-volume.md.
+
+  /** A discovered per-workspace volume, read back from its {@code qits.*} labels. */
+  record VolumeInfo(
+      String name, String projectId, String repoId, String workspaceId, String branch) {}
+
+  /** The deterministic per-workspace volume name (prefix + {@code workspaceId}); no round-trip. */
+  String workspaceVolumeName(String workspaceId);
+
+  /**
+   * Create-if-absent the per-workspace {@code /workspace} volume with its {@code qits.*} labels
+   * ({@code docker volume create --label …}); idempotent (a no-op on an existing volume, whose
+   * labels are left as first created). Called by {@link #run} just before the container mounts it,
+   * so the mount always attaches a labeled volume. Best-effort — a broken runtime just logs.
+   */
+  void ensureWorkspaceVolume(String repoId, String workspaceId, String branch, String parent);
+
+  /**
+   * Removes the per-workspace volume ({@code docker volume rm}); best-effort, never throws. The
+   * container referencing it must be {@link #rm}'d first (docker refuses to remove an in-use
+   * volume). This is the one destructive step that drops a persisted checkout — used only where the
+   * work is being discarded (delete-container reclaim, branch discard/abandon, repo delete, GC).
+   */
+  void removeWorkspaceVolume(String workspaceId);
+
+  /**
+   * All qits-managed per-workspace volumes (filtered by {@code
+   * label=qits.managed=workspace-volume}), with their labels read back — the input to the
+   * dangling-volume reconcile.
+   */
+  List<VolumeInfo> listWorkspaceVolumes();
+
   // --- Daemon sessions: long-runners decoupled from the qits JVM ------------------------------
   //
   // A daemon must outlive a qits restart and stay observable across one. These methods run it as a

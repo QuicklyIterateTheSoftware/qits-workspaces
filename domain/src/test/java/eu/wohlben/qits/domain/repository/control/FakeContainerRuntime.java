@@ -58,6 +58,12 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
+  @ConfigProperty(name = "qits.workspace.persist-workspace", defaultValue = "true")
+  boolean persistWorkspace;
+
+  @ConfigProperty(name = "qits.workspace.workspace-volume-prefix", defaultValue = "qits_workspace_")
+  String workspaceVolumePrefix;
+
   @Inject GitIdentity gitIdentity;
 
   @Inject RepositoryNameRepository repositoryNames;
@@ -80,6 +86,19 @@ public class FakeContainerRuntime implements ContainerRuntime {
   // it.
   private final Set<String> stopped = ConcurrentHashMap.newKeySet();
 
+  // Per-workspace /workspace volumes, keyed by workspaceId. The "volume content" is the same host
+  // clone dir the container uses as /workspace; registering a volume decouples that dir's lifetime
+  // from container membership, so an incidental `rm` KEEPS it (a real named volume survives) while
+  // `removeWorkspaceVolume` is the one path that deletes it. Emulates persist-workspace=true.
+  private record Volume(
+      String repoId, String workspaceId, String branch, String parent, Path dir) {}
+
+  private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
+
+  private Path workspaceDir(String repoId, String workspaceId) {
+    return Path.of(dataDir, repoId, "workspaces", workspaceId).toAbsolutePath();
+  }
+
   @Override
   public String containerName(String workspaceId, String repoId) {
     String shortRepo = repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
@@ -89,11 +108,16 @@ public class FakeContainerRuntime implements ContainerRuntime {
   @Override
   public String run(String repoId, String workspaceId, String branch, String parent) {
     String name = containerName(workspaceId, repoId);
-    Path dir = Path.of(dataDir, repoId, "workspaces", workspaceId).toAbsolutePath();
+    Path dir = workspaceDir(repoId, workspaceId);
     try {
       Files.createDirectories(dir.getParent());
     } catch (Exception e) {
       throw new RuntimeException(e);
+    }
+    // Mirror DockerExecutor.run: create-if-absent the per-workspace volume before "mounting" it, so
+    // a subsequent incidental `rm` preserves the checkout on the reattached volume.
+    if (persistWorkspace) {
+      ensureWorkspaceVolume(repoId, workspaceId, branch, parent);
     }
     byName.put(name, new Info(repoId, workspaceId, branch, parent, dir));
     stopped.remove(name);
@@ -220,21 +244,36 @@ public class FakeContainerRuntime implements ContainerRuntime {
   public void rm(String container) {
     stopped.remove(container);
     Info info = byName.remove(container);
-    if (info != null && Files.exists(info.dir())) {
-      try (var paths = Files.walk(info.dir())) {
-        paths
-            .sorted((a, b) -> b.getNameCount() - a.getNameCount())
-            .forEach(
-                p -> {
-                  try {
-                    Files.deleteIfExists(p);
-                  } catch (Exception ignored) {
-                    // best effort
-                  }
-                });
-      } catch (Exception ignored) {
-        // best effort
-      }
+    if (info == null) {
+      return;
+    }
+    // A persistent /workspace volume survives container removal — the checkout is reattached on the
+    // next run (recreation is lossless). Only when NO volume backs this workspace (persist off, or
+    // a raw pre-volume container) does rm reclaim the dir, mirroring docker rm destroying the
+    // writable layer. removeWorkspaceVolume is the sole path that deletes a persisted dir.
+    if (volumes.containsKey(info.workspaceId())) {
+      return;
+    }
+    deleteRecursively(info.dir());
+  }
+
+  private void deleteRecursively(Path dir) {
+    if (dir == null || !Files.exists(dir)) {
+      return;
+    }
+    try (var paths = Files.walk(dir)) {
+      paths
+          .sorted((a, b) -> b.getNameCount() - a.getNameCount())
+          .forEach(
+              p -> {
+                try {
+                  Files.deleteIfExists(p);
+                } catch (Exception ignored) {
+                  // best effort
+                }
+              });
+    } catch (Exception ignored) {
+      // best effort
     }
   }
 
@@ -253,6 +292,50 @@ public class FakeContainerRuntime implements ContainerRuntime {
             new ContainerInfo(
                 name, info.workspaceId(), info.branch(), info.parent(), !stopped.contains(name)));
       }
+    }
+    return infos;
+  }
+
+  // --- Per-workspace /workspace volumes -------------------------------------------------------
+
+  @Override
+  public String workspaceVolumeName(String workspaceId) {
+    return workspaceVolumePrefix + workspaceId;
+  }
+
+  @Override
+  public void ensureWorkspaceVolume(
+      String repoId, String workspaceId, String branch, String parent) {
+    // Idempotent: register (or refresh) the volume and ensure its backing dir exists. The dir is
+    // the
+    // same host clone the container uses as /workspace, so a checkout written there persists across
+    // container rm exactly like a real named volume.
+    Path dir = workspaceDir(repoId, workspaceId);
+    try {
+      Files.createDirectories(dir);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+    volumes.put(workspaceId, new Volume(repoId, workspaceId, branch, parent, dir));
+  }
+
+  @Override
+  public void removeWorkspaceVolume(String workspaceId) {
+    // The one destructive path: drop the volume AND its dir, even after the container is gone (the
+    // GC/discard case). Best-effort, mirroring `docker volume rm`.
+    Volume volume = volumes.remove(workspaceId);
+    if (volume != null) {
+      deleteRecursively(volume.dir());
+    }
+  }
+
+  @Override
+  public List<VolumeInfo> listWorkspaceVolumes() {
+    List<VolumeInfo> infos = new ArrayList<>();
+    for (Volume v : volumes.values()) {
+      infos.add(
+          new VolumeInfo(
+              workspaceVolumeName(v.workspaceId()), "", v.repoId(), v.workspaceId(), v.branch()));
     }
     return infos;
   }

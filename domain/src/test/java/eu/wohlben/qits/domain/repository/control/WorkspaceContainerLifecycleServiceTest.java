@@ -389,18 +389,26 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
-  public void unpushedWorkDiesWithAnUnexpectedlyRemovedContainer() throws Exception {
+  public void unpushedWorkSurvivesAnUnexpectedlyRemovedContainerOnThePersistentVolume()
+      throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
     String container = containers.containerName("feat", repoId);
-    String head = commitInContainer(container, "doomed.txt");
+    String head = commitInContainer(container, "survivor.txt");
 
-    // Unexpected death (no push) — recreation restores origin state only, so the commit is gone.
+    // Unexpected death (no graceful stop, no push, no deleteContainer) — exactly the incidental
+    // recreation the persistent /workspace volume is meant to survive. The commit was never pushed,
+    // so its survival is proof the volume (not origin) carried it: rm keeps the volume, and the
+    // next
+    // ensureContainer reattaches it (the daemon skips re-clone on the populated /workspace).
     containers.rm(container);
+    assertTrue(workspaceVolumeExists("feat"), "an incidental rm keeps the per-workspace volume");
     workspaceService.ensureContainer(repoId, "feat");
-    assertNotEquals(
-        head, containerHead(container), "an unpushed commit is lost on unexpected container death");
+    assertEquals(
+        head,
+        containerHead(container),
+        "an unpushed commit survives an unexpected container death on the persistent volume");
   }
 
   @Test
@@ -563,6 +571,95 @@ public class WorkspaceContainerLifecycleServiceTest {
         workspaceService.listWorkspaces(repoId).stream()
             .anyMatch(w -> "feat".equals(w.workspaceId())),
         "a clean workspace is abandoned normally");
+  }
+
+  @Test
+  public void beginRecreateContainerKeepsThePersistentVolumeAndItsCheckout() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    String container = containers.containerName("feat", repoId);
+    String head = commitInContainer(container, "keep.txt"); // committed ⇒ working tree clean
+    // Recreate's gate admits only an explicit-clean daemon report; a committed tree qualifies.
+    gitStatus.report("feat", true);
+    assertTrue(
+        workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
+    startedRecorder.clear();
+
+    // An image-update recreate tears the container down and provisions a fresh one — but must KEEP
+    // the volume (the core win), so the checkout is reattached, not re-cloned from scratch.
+    workspaceService.beginRecreateContainer(repoId, "feat");
+    assertTrue(
+        startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
+        "recreate re-provisions the container");
+
+    assertTrue(workspaceVolumeExists("feat"), "recreate keeps the per-workspace volume");
+    assertEquals(head, containerHead(container), "the checkout is preserved across the recreate");
+  }
+
+  @Test
+  public void deleteContainerRemovesThePersistentVolumeSoStartReClonesFresh() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    String container = containers.containerName("feat", repoId);
+    String unpushed = commitInContainer(container, "doomed.txt");
+    assertTrue(
+        workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
+
+    // The one deliberate reset: delete-container drops the container AND its volume.
+    workspaceService.deleteContainer(repoId, "feat");
+    assertFalse(workspaceVolumeExists("feat"), "delete-container removes the persistent volume");
+
+    // Start therefore re-creates an empty volume and re-clones a fresh checkout from origin — so
+    // the
+    // never-pushed commit is gone, honoring the verb's "loses uncommitted changes" contract.
+    workspaceService.ensureContainer(repoId, "feat");
+    assertTrue(workspaceVolumeExists("feat"), "Start re-creates the volume");
+    assertNotEquals(
+        unpushed, containerHead(container), "the fresh clone does not carry the discarded commit");
+  }
+
+  @Test
+  public void discardWorkspaceRemovesThePersistentVolume() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    assertTrue(
+        workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
+
+    // Abandon (discard) throws the work away: container + branch + volume all go.
+    workspaceService.discardWorkspace(repoId, "feat");
+
+    assertFalse(workspaceVolumeExists("feat"), "discard removes the persistent volume");
+    assertFalse(
+        workspaceService.listWorkspaces(repoId).stream()
+            .anyMatch(w -> "feat".equals(w.workspaceId())),
+        "the workspace is abandoned");
+  }
+
+  @Test
+  public void reconcileReapsADanglingWorkspaceVolumeButSparesActiveOnes() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat"); // an ACTIVE row + its volume
+    // A dangling volume: labeled/created but with no workspace row backing it (a crash or a manual
+    // docker rm between container teardown and removeWorkspaceVolume leaves exactly this).
+    containers.ensureWorkspaceVolume(repoId, "ghost", "gone", null);
+    assertTrue(workspaceVolumeExists("ghost"), "precondition: the dangling volume exists");
+
+    discoveryService.discover();
+
+    assertFalse(workspaceVolumeExists("ghost"), "a volume with no active row is reaped");
+    assertTrue(workspaceVolumeExists("feat"), "a volume with an active workspace is spared");
+  }
+
+  /**
+   * Whether the fake runtime is currently tracking a per-workspace volume for {@code workspaceId}.
+   */
+  private boolean workspaceVolumeExists(String workspaceId) {
+    return containers.listWorkspaceVolumes().stream()
+        .anyMatch(v -> workspaceId.equals(v.workspaceId()));
   }
 
   /**
