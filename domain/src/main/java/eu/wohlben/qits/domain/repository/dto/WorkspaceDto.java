@@ -33,6 +33,12 @@ import java.time.Instant;
  *     that announced none)
  * @param daemonBuildTime when that daemon binary was built — distinguishes floating {@code
  *     -SNAPSHOT} builds sharing one version; {@code null} when unknown
+ * @param daemonOutdated whether this workspace's daemon build is strictly older than the newest one
+ *     connected anywhere in the workspace registry — {@code true} means a newer workspace-daemon is
+ *     available, so the UI shows a warning and offers a recreate. {@code null} when not comparable
+ *     (no live daemon, no reported build time on either side) — no warning; only ever {@code true}
+ *     or {@code null} in practice, since the newest and any tied daemons are simply not outdated
+ *     (docs/epics/qits-workspace-registry/)
  */
 public record WorkspaceDto(
     String workspaceId,
@@ -50,4 +56,5 @@ public record WorkspaceDto(
     Instant resolvedAt,
     Instant daemonConnectedAt,
     String daemonVersion,
-    Instant daemonBuildTime) {}
+    Instant daemonBuildTime,
+    Boolean daemonOutdated) {}

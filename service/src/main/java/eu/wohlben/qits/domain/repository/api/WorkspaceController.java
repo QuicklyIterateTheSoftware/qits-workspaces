@@ -153,6 +153,32 @@ public class WorkspaceController {
     return workspaceService.getWorkspace(repoId, workspaceId);
   }
 
+  public static record RecreateContainerRequest() {
+    /**
+     * The workspace's state at submit time plus the technical process streaming the recreate —
+     * watch it live at {@code /api/technical-processes/{technicalProcessId}/events}.
+     */
+    public record Response(WorkspaceDto workspace, String technicalProcessId) {}
+  }
+
+  /**
+   * Recreate the workspace's container on the current image — the way to move it onto a newer
+   * workspace-daemon build once its version badge shows it is outdated
+   * (docs/epics/qits-workspace-registry/). The old container is torn down and a fresh one
+   * provisioned from the durable branch; the work streams over the returned technical process like
+   * {@code ensure-container}. Refuses with 400 unless the working tree is provably clean — a dirty
+   * or unknown (no live daemon) state is rejected, since recreating would risk losing work. 404
+   * only when the workspace itself is unknown.
+   */
+  @POST
+  @Path("/{workspaceId}/recreate-container")
+  public RecreateContainerRequest.Response recreateContainer(
+      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+    String technicalProcessId = workspaceService.beginRecreateContainer(repoId, workspaceId);
+    return new RecreateContainerRequest.Response(
+        workspaceService.getWorkspace(repoId, workspaceId), technicalProcessId);
+  }
+
   public static record MergeWorkspaceRequest(String target) {
     public record Response(String commitHash, boolean hasConflicts, String output) {}
   }

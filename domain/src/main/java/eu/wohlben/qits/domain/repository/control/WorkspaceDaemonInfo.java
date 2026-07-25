@@ -1,6 +1,7 @@
 package eu.wohlben.qits.domain.repository.control;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.Optional;
 
 /**
@@ -25,6 +26,14 @@ public interface WorkspaceDaemonInfo {
    * currently connected for it.
    */
   Optional<Info> lookup(String workspaceId);
+
+  /**
+   * Every live daemon's registry facts, across all workspaces and repositories — the enumeration
+   * seam for registry-wide questions the per-workspace {@link #lookup} can't answer, notably "which
+   * daemon build is the newest currently connected" (the registry-only notion of the latest agent
+   * version). Empty when no daemon is connected; iteration order is unspecified.
+   */
+  Collection<Info> all();
 
   /**
    * A live daemon connection's registry facts.

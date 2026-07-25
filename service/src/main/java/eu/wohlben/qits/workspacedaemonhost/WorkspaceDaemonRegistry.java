@@ -45,6 +45,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -286,6 +287,18 @@ public class WorkspaceDaemonRegistry
     return Optional.of(
         new WorkspaceDaemonInfo.Info(
             client.connectedAt, client.daemonVersion, client.daemonBuildTime));
+  }
+
+  @Override
+  public Collection<WorkspaceDaemonInfo.Info> all() {
+    // Only open sockets — mirrors lookup's guard so a lingering-but-closed entry never counts.
+    return clients.values().stream()
+        .filter(client -> client.connection.isOpen())
+        .map(
+            client ->
+                new WorkspaceDaemonInfo.Info(
+                    client.connectedAt, client.daemonVersion, client.daemonBuildTime))
+        .toList();
   }
 
   /**

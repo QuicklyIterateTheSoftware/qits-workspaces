@@ -890,6 +890,33 @@ public class WorkspaceControllerTest {
     assertRuntimeStatus(repoId, "wt-run", "RUNNING");
   }
 
+  @Test
+  public void recreateContainerRejectsAWorkspaceWhoseCleanlinessIsUnknown() {
+    String repoId = createProjectAndRepository();
+    createWorkspace(repoId, "rc-unknown", "master", "rc-unknown-branch");
+
+    // No workspace-daemon is connected in a @QuarkusTest, so the registry reports the working tree
+    // as UNKNOWN — recreate must refuse it (unknown is not a safe basis to destroy a container),
+    // surfacing the domain BadRequestException as a 400.
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces/rc-unknown/recreate-container")
+        .then()
+        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
+  }
+
+  @Test
+  public void recreateContainerIs404ForAnUnknownWorkspace() {
+    String repoId = createProjectAndRepository();
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/api/repositories/" + repoId + "/workspaces/no-such-ws/recreate-container")
+        .then()
+        .statusCode(Response.Status.NOT_FOUND.getStatusCode());
+  }
+
   /** Asserts the workspace's runtime status through the list endpoint. */
   private void assertRuntimeStatus(String repoId, String workspaceId, String expected) {
     given()

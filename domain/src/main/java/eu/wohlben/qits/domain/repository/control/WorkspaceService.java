@@ -28,6 +28,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -335,6 +337,12 @@ public class WorkspaceService {
             .filter(ContainerRuntime.ContainerInfo::running)
             .map(ContainerRuntime.ContainerInfo::workspaceId)
             .collect(Collectors.toSet());
+    // The newest daemon build connected anywhere is the registry-only "latest agent version"
+    // (docs/epics/qits-workspace-registry/): a RUNNING workspace whose build is strictly older is
+    // flagged daemonOutdated so the UI can offer a Recreate. Computed once per list, across all
+    // repos' live daemons — the notion is registry-wide, not per-repository.
+    WorkspaceDaemonInfo.Info latestDaemon =
+        daemonInfo.isResolvable() ? latestDaemon(daemonInfo.get().all()) : null;
     // The branch tree shows only live workspaces; resolved ones live in the history view.
     return workspaceRepository.findActiveByRepositoryId(repoId).stream()
         .map(
@@ -383,9 +391,42 @@ public class WorkspaceService {
                   wt.resolvedAt,
                   info != null ? info.connectedAt() : null,
                   info != null ? info.version() : null,
-                  info != null ? info.buildTime() : null);
+                  info != null ? info.buildTime() : null,
+                  daemonOutdated(info, latestDaemon));
             })
         .toList();
+  }
+
+  /**
+   * Orders live daemon connections by build recency: build time first (the {@code -SNAPSHOT}
+   * tiebreaker the registry epic is built on), then version as a stable last resort. Entries with
+   * no reported build time are filtered out by {@link #latestDaemon} before this ever sees them.
+   */
+  private static final Comparator<WorkspaceDaemonInfo.Info> DAEMON_BUILD_ORDER =
+      Comparator.comparing(WorkspaceDaemonInfo.Info::buildTime)
+          .thenComparing(i -> i.version() == null ? "" : i.version());
+
+  /**
+   * The newest daemon build among live connections, or {@code null} when none reports a build time
+   * (older images) — an unknowable build can't be "the latest", so it never wins.
+   */
+  private static WorkspaceDaemonInfo.Info latestDaemon(Collection<WorkspaceDaemonInfo.Info> all) {
+    return all.stream().filter(i -> i.buildTime() != null).max(DAEMON_BUILD_ORDER).orElse(null);
+  }
+
+  /**
+   * Whether {@code info}'s daemon build is strictly older than {@code latest} — {@code true} only
+   * when both build times are known and this one precedes the newest. Returns {@code null} (not
+   * {@code false}) whenever the two can't be compared (no live daemon, no reported build time on
+   * either side, or no newer build exists), so an uncomparable or up-to-date workspace shows no
+   * warning rather than a misleading verdict.
+   */
+  private static Boolean daemonOutdated(
+      WorkspaceDaemonInfo.Info info, WorkspaceDaemonInfo.Info latest) {
+    if (info == null || info.buildTime() == null || latest == null || latest.buildTime() == null) {
+      return null;
+    }
+    return info.buildTime().isBefore(latest.buildTime()) ? Boolean.TRUE : null;
   }
 
   /** A single active workspace's current DTO (runtime status computed live), or 404. */
@@ -866,6 +907,80 @@ public class WorkspaceService {
           }
         });
     return process.id();
+  }
+
+  /**
+   * Recreate a workspace's container on the current image — the way to roll a workspace onto a
+   * newer {@code workspace-daemon} build (docs/epics/qits-workspace-registry/). Unlike {@link
+   * #beginEnsureContainer} (which resumes an existing container in place), this deliberately tears
+   * the old container down and provisions a fresh one, so a {@code docker run} picks up whatever
+   * {@code qits.workspace.image} now resolves to.
+   *
+   * <p><b>Requires a provably clean working tree.</b> Recreating is lossy for uncommitted work, so
+   * the gate is stricter than {@link #requireCleanWorkingTree}: it consults the daemon-reported
+   * tri-state ({@link WorkspaceGitStatus#isClean}) and admits only an explicit clean. A dirty tree
+   * and an UNKNOWN state (no live daemon, or none has reported yet) are <em>both</em> rejected with
+   * a 400 — an unknowable tree is not a safe basis to destroy a container. The gate runs
+   * synchronously so a bad request fails fast; the teardown+reprovision then streams like {@link
+   * #beginEnsureContainer}: best-effort push (preserve committed work) → settle daemons gracefully
+   * → {@code rm} the old container → {@link #ensureContainer} provisions a fresh one from the
+   * durable branch (whose absent-container path re-runs {@link #provisionContainer}).
+   */
+  public String beginRecreateContainer(String repoId, String workspaceId) {
+    String branch =
+        QuarkusTransaction.requiringNew()
+            .call(
+                () ->
+                    workspaceRepository
+                        .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
+                        .map(wt -> wt.branch)
+                        .orElseThrow(
+                            () -> new NotFoundException("Workspace not found: " + workspaceId)));
+    requireCleanForRecreate(workspaceId);
+    TechnicalProcess process = processes.begin(repoId, workspaceId);
+    processExecutor.submit(
+        () -> {
+          try {
+            // Preserve committed-but-unpushed work before the container is destroyed (the tree is
+            // clean, so there is nothing uncommitted to lose — only local commits to back up).
+            pushBranch(repoId, workspaceId, branch);
+            // Settle live daemons gracefully so their disappearance reads as deliberate, not a
+            // crash
+            // the restart policy would resurrect — the same courtesy stopContainer/discard extend.
+            containerEvents.fireStopping(repoId, workspaceId, true);
+            containers.rm(containers.containerName(workspaceId, repoId));
+            // Container now absent → ensureContainer's provision path re-clones on the current
+            // image.
+            ensureContainer(repoId, workspaceId, process);
+          } catch (RuntimeException e) {
+            process.failProvision(e.getMessage());
+            LOG.debugf(
+                e, "Streamed recreate-container failed for workspace %s/%s", repoId, workspaceId);
+          }
+        });
+    return process.id();
+  }
+
+  /**
+   * Recreate's registry-only clean gate: the daemon-reported tri-state must be an <em>explicit</em>
+   * clean. Unlike {@link #requireCleanWorkingTree} (which execs git and folds unknown→dirty and
+   * absent→clean), recreate must reject UNKNOWN in its own right — a workspace with no live daemon
+   * reporting has an unknowable tree, and destroying its container could silently lose work — so
+   * both dirty ({@code Optional.of(false)}) and unknown ({@code Optional.empty()}) throw 400; only
+   * {@code Optional.of(true)} passes.
+   */
+  private void requireCleanForRecreate(String workspaceId) {
+    Optional<Boolean> clean =
+        gitStatus.isResolvable() ? gitStatus.get().isClean(workspaceId) : Optional.empty();
+    if (!clean.equals(Optional.of(Boolean.TRUE))) {
+      String state = clean.map(c -> c ? "clean" : "dirty").orElse("unknown");
+      throw new BadRequestException(
+          "Cannot recreate workspace '"
+              + workspaceId
+              + "': its working tree must be clean, but its reported state is "
+              + state
+              + ". Commit or discard changes, and ensure its daemon is connected, first.");
+    }
   }
 
   /**
