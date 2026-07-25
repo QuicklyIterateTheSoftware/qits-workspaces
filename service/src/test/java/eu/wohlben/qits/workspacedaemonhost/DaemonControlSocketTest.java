@@ -5,13 +5,25 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.domain.agent.control.AgentActivityState;
+import eu.wohlben.qits.domain.command.entity.Command;
+import eu.wohlben.qits.domain.command.entity.CommandKind;
+import eu.wohlben.qits.domain.command.entity.CommandStatus;
+import eu.wohlben.qits.domain.command.persistence.CommandRepository;
+import eu.wohlben.qits.domain.project.entity.Project;
+import eu.wohlben.qits.domain.project.persistence.ProjectRepository;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonInfo;
+import eu.wohlben.qits.domain.repository.entity.Repository;
+import eu.wohlben.qits.domain.repository.entity.Workspace;
+import eu.wohlben.qits.domain.repository.persistence.RepositoryRepository;
+import eu.wohlben.qits.domain.repository.persistence.WorkspaceRepository;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint.Topic;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
@@ -37,11 +49,13 @@ import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketClient;
 import io.vertx.core.http.WebSocketConnectOptions;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -66,6 +80,10 @@ class DaemonControlSocketTest {
   @Inject WorkspaceDaemonRegistry registry;
   @Inject DaemonMessageCodec codec;
   @Inject HintRecorder hints;
+  @Inject ProjectRepository projectRepository;
+  @Inject RepositoryRepository repositoryRepository;
+  @Inject WorkspaceRepository workspaceRepository;
+  @Inject CommandRepository commandRepository;
 
   @TestHTTPResource("/api/workspace-daemon/" + WORKSPACE_ID)
   URI endpoint;
@@ -588,6 +606,151 @@ class DaemonControlSocketTest {
   }
 
   @Test
+  void agentActivityCachesTheRollupAndFiresTheHintOnlyOnAFlip() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      hints.clear();
+
+      // A prompt was submitted: BUSY becomes the workspace rollup and fires AGENT_ACTIVITY on the
+      // workspace channel (the frame's commandId is opaque; the workspace comes from the
+      // connection).
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new AgentActivity(
+                      "cmd-1",
+                      null,
+                      DaemonProtocol.AgentState.BUSY,
+                      "UserPromptSubmit",
+                      null,
+                      null,
+                      1L)));
+      await(() -> registry.activityFor(WORKSPACE_ID).isPresent());
+      assertEquals(Optional.of(AgentActivityState.BUSY), registry.activityFor(WORKSPACE_ID));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID));
+
+      hints.clear();
+      // A reconnect-style replay of the same BUSY state: the rollup doesn't flip, so no hint.
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new AgentActivity(
+                      "cmd-1",
+                      null,
+                      DaemonProtocol.AgentState.BUSY,
+                      "UserPromptSubmit",
+                      null,
+                      null,
+                      2L)));
+      // A subsequent Stop flips BUSY→IDLE — its hint proves the duplicate above was processed first
+      // (frames run in order on the socket thread), so exactly one AGENT_ACTIVITY hint since
+      // clear().
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new AgentActivity(
+                      "cmd-1", null, DaemonProtocol.AgentState.IDLE, "Stop", null, null, 3L)));
+      await(() -> registry.activityFor(WORKSPACE_ID).equals(Optional.of(AgentActivityState.IDLE)));
+      await(() -> hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID) >= 1);
+      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID), hints.toString());
+    }
+  }
+
+  @Test
+  void disconnectEvictsTheCachedAgentActivity() throws Exception {
+    FakePeer peer = connect();
+    await(() -> registry.isDaemonLive(WORKSPACE_ID));
+    peer.ws()
+        .writeTextMessage(
+            codec.encode(
+                new AgentActivity(
+                    "cmd-1",
+                    null,
+                    DaemonProtocol.AgentState.BUSY,
+                    "UserPromptSubmit",
+                    null,
+                    null,
+                    1L)));
+    await(() -> registry.activityFor(WORKSPACE_ID).isPresent());
+
+    peer.close();
+
+    await(() -> registry.activityFor(WORKSPACE_ID).isEmpty());
+    assertTrue(registry.activityFor(WORKSPACE_ID).isEmpty(), "cache cleared on disconnect");
+  }
+
+  @Test
+  void aSessionStartAgentActivityStillDrivesTheSessionLineageWrite() throws Exception {
+    // The regression guard for retiring the direct /agent-session endpoint: a SessionStart frame,
+    // routed through the daemon, still records the same lineage row
+    // CommandService.reportAgentSession
+    // produced before.
+    String sessionId = UUID.randomUUID().toString();
+    String commandId = seedRunningAgentCommand();
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+
+      peer.ws()
+          .writeTextMessage(
+              codec.encode(
+                  new AgentActivity(
+                      commandId,
+                      sessionId,
+                      DaemonProtocol.AgentState.IDLE,
+                      "SessionStart",
+                      "startup",
+                      "/claude-home/.claude/projects/-workspace/" + sessionId + ".jsonl",
+                      1L)));
+
+      await(() -> lineageRecorded(commandId, sessionId));
+      assertTrue(lineageRecorded(commandId, sessionId), "SessionStart lineage row was written");
+    }
+  }
+
+  @Transactional
+  boolean lineageRecorded(String commandId, String sessionId) {
+    Command command = commandRepository.findById(commandId);
+    return command != null
+        && command.agentSessions.stream().anyMatch(ref -> sessionId.equals(ref.sessionId));
+  }
+
+  /** Seeds a minimal RUNNING agent command (no pinned session) and returns its id. */
+  @Transactional
+  String seedRunningAgentCommand() {
+    Project project = new Project();
+    project.id = UUID.randomUUID().toString();
+    project.name = "activity-lineage";
+    projectRepository.persist(project);
+
+    Repository repository = new Repository();
+    repository.id = UUID.randomUUID().toString();
+    repository.url = "https://example.com/repo.git";
+    repository.project = project;
+    repositoryRepository.persist(repository);
+
+    Workspace workspace = new Workspace();
+    workspace.workspaceId = "activity-work-" + UUID.randomUUID();
+    workspace.repository = repository;
+    workspace.branch = "feature/x";
+    workspaceRepository.persist(workspace);
+
+    Command command =
+        Command.builder()
+            .id(UUID.randomUUID().toString())
+            .workspace(workspace)
+            .branch("feature/x")
+            .commitHash("abcdef1234567890")
+            .actionName("Claude Code (repository MCP)")
+            .executeScript("exec claude")
+            .interactive(true)
+            .kind(CommandKind.TERMINAL)
+            .status(CommandStatus.RUNNING)
+            .build();
+    commandRepository.persist(command);
+    return command.id;
+  }
+
+  @Test
   void pullFromOriginSendsAPullBranchToTheLiveDaemon() throws Exception {
     try (FakePeer peer = connect()) {
       await(() -> registry.isDaemonLive(WORKSPACE_ID));
@@ -665,12 +828,17 @@ class DaemonControlSocketTest {
     }
 
     boolean has(Topic topic, String repoId, String workspaceId) {
+      return count(topic, repoId, workspaceId) > 0;
+    }
+
+    long count(Topic topic, String repoId, String workspaceId) {
       return received.stream()
-          .anyMatch(
+          .filter(
               h ->
                   h.topic() == topic
                       && java.util.Objects.equals(h.repoId(), repoId)
-                      && java.util.Objects.equals(h.workspaceId(), workspaceId));
+                      && java.util.Objects.equals(h.workspaceId(), workspaceId))
+          .count();
     }
 
     @Override

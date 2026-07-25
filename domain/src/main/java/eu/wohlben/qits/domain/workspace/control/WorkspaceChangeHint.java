@@ -42,6 +42,14 @@ public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic
      */
     GIT_STATUS,
     /**
+     * A coding agent's live activity state changed for this workspace — its rollup flipped between
+     * cooking (BUSY), idle, waiting-on-you, or none. Reported by the in-container {@code
+     * workspace-daemon} (which hears the agent's lifecycle hooks) and cached by {@code
+     * WorkspaceDaemonRegistry}; fired on the workspace channel so the frontend re-fetches the
+     * workspace and refreshes the Agents-tab activity chip + the tab's busy dot.
+     */
+    AGENT_ACTIVITY,
+    /**
      * A technical process for this workspace started or completed (e.g. a container start). The
      * frontend re-fetches {@code /active-process} and — when an id comes back — opens the separate
      * payload-bearing process SSE stream; this channel stays hint-only.

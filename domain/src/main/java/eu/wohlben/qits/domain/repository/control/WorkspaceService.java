@@ -1,5 +1,6 @@
 package eu.wohlben.qits.domain.repository.control;
 
+import eu.wohlben.qits.domain.agent.control.AgentActivityState;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.InternalServerErrorException;
 import eu.wohlben.qits.domain.error.NotFoundException;
@@ -82,6 +83,15 @@ public class WorkspaceService {
    * while connected.
    */
   @Inject Instance<WorkspaceGitStatus> gitStatus;
+
+  /**
+   * The in-container workspace-daemon's last-reported coding-agent activity rollup, surfaced as
+   * {@link WorkspaceDto#agentActivity}. {@code Instance<>} for the same reason as {@link
+   * #gitStatus}: apps without the backend impl (cli, tests) have no {@link WorkspaceAgentActivity}
+   * bean and simply see it empty. Only consulted for RUNNING workspaces — the daemon reports only
+   * while connected.
+   */
+  @Inject Instance<WorkspaceAgentActivity> agentActivity;
 
   /**
    * The workspace registry's live view of each workspace's daemon — connected-since + the daemon
@@ -369,6 +379,11 @@ public class WorkspaceService {
                   runtime == WorkspaceRuntimeStatus.RUNNING && gitStatus.isResolvable()
                       ? gitStatus.get().isClean(wt.workspaceId).orElse(null)
                       : null;
+              // Agent activity shares clean/dirty's RUNNING-only, self-healing contract.
+              AgentActivityState activity =
+                  runtime == WorkspaceRuntimeStatus.RUNNING && agentActivity.isResolvable()
+                      ? agentActivity.get().activityFor(wt.workspaceId).orElse(null)
+                      : null;
               // Registry facts (connected-since + daemon build identity) share clean/dirty's
               // RUNNING-only, in-memory contract: known only while the daemon's socket is live.
               WorkspaceDaemonInfo.Info info =
@@ -386,6 +401,7 @@ public class WorkspaceService {
                   runtime,
                   wt.runtimeError,
                   clean,
+                  activity,
                   wt.preamble,
                   wt.result,
                   wt.resolvedAt,
