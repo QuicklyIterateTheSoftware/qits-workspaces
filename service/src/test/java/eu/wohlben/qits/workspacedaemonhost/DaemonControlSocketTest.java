@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
+import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonInfo;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint.Topic;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
@@ -127,7 +128,16 @@ class DaemonControlSocketTest {
           }
         });
     // Announce ourselves, exactly as workspace-daemon does on connect.
-    ws.writeTextMessage(codec.encode(new Hello(WORKSPACE_ID, "repo-1", "feature", "main", 1)));
+    ws.writeTextMessage(
+        codec.encode(
+            new Hello(
+                WORKSPACE_ID,
+                "repo-1",
+                "feature",
+                "main",
+                1,
+                "1.0.0-SNAPSHOT",
+                "2026-07-25T09:14:03Z")));
     ws.writeTextMessage(codec.encode(new DaemonLog("INFO", "workspace-daemon online")));
     return new FakePeer(client, ws, inbound);
   }
@@ -139,6 +149,26 @@ class DaemonControlSocketTest {
       assertTrue(registry.isDaemonLive(WORKSPACE_ID));
       assertInstanceOf(Ack.class, peer.take());
     }
+  }
+
+  @Test
+  void handshakeRecordsDaemonRegistryInfo() throws Exception {
+    try (FakePeer peer = connect()) {
+      // The entry appears on socket registration (connectedAt), but version/buildTime are filled
+      // when the Hello frame is processed — await that, not mere presence.
+      await(() -> registry.lookup(WORKSPACE_ID).map(i -> i.version() != null).orElse(false));
+      WorkspaceDaemonInfo.Info info = registry.lookup(WORKSPACE_ID).orElseThrow();
+      // The build identity the fake peer announced in its Hello is retained for the registry, the
+      // build timestamp parsed to an Instant; connectedAt is stamped server-side on registration.
+      assertEquals("1.0.0-SNAPSHOT", info.version());
+      assertEquals(java.time.Instant.parse("2026-07-25T09:14:03Z"), info.buildTime());
+      assertTrue(info.connectedAt() != null);
+    }
+  }
+
+  @Test
+  void lookupIsEmptyForAnUnknownWorkspace() {
+    assertTrue(registry.lookup("no-such-workspace").isEmpty());
   }
 
   @Test

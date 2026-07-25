@@ -23,6 +23,16 @@ import java.time.Instant;
  * @param preamble markdown: the reason/goal authored at creation
  * @param result markdown: the outcome authored at resolution
  * @param resolvedAt when the workspace was resolved (null while ACTIVE)
+ * @param daemonConnectedAt when the workspace's in-container {@code workspace-daemon} registered
+ *     its control socket — the workspace's "connected since" (docs/epics/qits-workspace-registry/).
+ *     {@code null} when unknown: like {@code clean}, the registry only knows it while the container
+ *     is RUNNING, and it resets on each daemon (re)connect (it is not a durable first-registered
+ *     time)
+ * @param daemonVersion the release version of the daemon binary the running container is on (Maven
+ *     {@code project.version}); {@code null} when unknown (no live daemon, or an older daemon image
+ *     that announced none)
+ * @param daemonBuildTime when that daemon binary was built — distinguishes floating {@code
+ *     -SNAPSHOT} builds sharing one version; {@code null} when unknown
  */
 public record WorkspaceDto(
     String workspaceId,
@@ -37,4 +47,7 @@ public record WorkspaceDto(
     Boolean clean,
     String preamble,
     String result,
-    Instant resolvedAt) {}
+    Instant resolvedAt,
+    Instant daemonConnectedAt,
+    String daemonVersion,
+    Instant daemonBuildTime) {}

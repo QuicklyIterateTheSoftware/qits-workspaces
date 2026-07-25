@@ -82,6 +82,16 @@ public class WorkspaceService {
   @Inject Instance<WorkspaceGitStatus> gitStatus;
 
   /**
+   * The workspace registry's live view of each workspace's daemon — connected-since + the daemon
+   * binary's build identity, surfaced as {@link WorkspaceDto#daemonConnectedAt}/{@code
+   * daemonVersion}/{@code daemonBuildTime} (docs/epics/qits-workspace-registry/). {@code
+   * Instance<>} for the same reason as {@link #gitStatus}: apps without the backend impl (cli,
+   * tests) have no {@link WorkspaceDaemonInfo} bean and simply see it empty. Only consulted for
+   * RUNNING workspaces.
+   */
+  @Inject Instance<WorkspaceDaemonInfo> daemonInfo;
+
+  /**
    * Notifies a target workspace's in-container daemon to pull an incoming merge/integration this
    * host just pushed to its branch (docs/epics/qits-workspace-daemon/ bidirectional auto-sync).
    * {@code Instance<>} for the same reason as {@link #gitStatus}: apps without the backend impl
@@ -351,6 +361,12 @@ public class WorkspaceService {
                   runtime == WorkspaceRuntimeStatus.RUNNING && gitStatus.isResolvable()
                       ? gitStatus.get().isClean(wt.workspaceId).orElse(null)
                       : null;
+              // Registry facts (connected-since + daemon build identity) share clean/dirty's
+              // RUNNING-only, in-memory contract: known only while the daemon's socket is live.
+              WorkspaceDaemonInfo.Info info =
+                  runtime == WorkspaceRuntimeStatus.RUNNING && daemonInfo.isResolvable()
+                      ? daemonInfo.get().lookup(wt.workspaceId).orElse(null)
+                      : null;
               return new WorkspaceDto(
                   wt.workspaceId,
                   wt.parent,
@@ -364,7 +380,10 @@ public class WorkspaceService {
                   clean,
                   wt.preamble,
                   wt.result,
-                  wt.resolvedAt);
+                  wt.resolvedAt,
+                  info != null ? info.connectedAt() : null,
+                  info != null ? info.version() : null,
+                  info != null ? info.buildTime() : null);
             })
         .toList();
   }

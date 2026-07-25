@@ -14,5 +14,8 @@ public interface WorkspaceMapper {
   @Mapping(target = "behind", ignore = true)
   @Mapping(target = "conflictsWithParent", ignore = true)
   @Mapping(target = "clean", ignore = true)
+  @Mapping(target = "daemonConnectedAt", ignore = true)
+  @Mapping(target = "daemonVersion", ignore = true)
+  @Mapping(target = "daemonBuildTime", ignore = true)
   WorkspaceDto toDto(Workspace entity);
 }

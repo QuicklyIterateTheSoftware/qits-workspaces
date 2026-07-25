@@ -6,6 +6,7 @@ import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
+import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonInfo;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonProvisioner;
 import eu.wohlben.qits.domain.repository.control.WorkspaceGitStatus;
@@ -42,6 +43,7 @@ import io.quarkus.websockets.next.WebSocketConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +87,7 @@ public class WorkspaceDaemonRegistry
         WorkspaceBootstrapDriver,
         WorkspaceServiceDriver,
         WorkspaceGitStatus,
+        WorkspaceDaemonInfo,
         WorkspaceGitSync {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceDaemonRegistry.class);
@@ -177,13 +180,23 @@ public class WorkspaceDaemonRegistry
     switch (message) {
       case Hello hello -> {
         LOG.infof(
-            "workspace-daemon HELLO for workspace %s (repo %s, branch %s, capability %d)",
-            hello.workspaceId(), hello.repoId(), hello.branch(), hello.capabilityVersion());
+            "workspace-daemon HELLO for workspace %s (repo %s, branch %s, capability %d, daemon"
+                + " %s built %s)",
+            hello.workspaceId(),
+            hello.repoId(),
+            hello.branch(),
+            hello.capabilityVersion(),
+            hello.daemonVersion(),
+            hello.daemonBuildTime());
         // Remember the repository the daemon serves: service (dev-server) events carry only the
         // service NAME, and the host keys supervision state by (repoId, workspaceId, id) — so the
-        // ServiceEventSink needs repoId to resolve the name to a repository daemon definition.
+        // ServiceEventSink needs repoId to resolve the name to a repository daemon definition. The
+        // daemon's announced build identity is retained for the workspace registry
+        // (WorkspaceDaemonInfo).
         if (client != null) {
           client.repoId = hello.repoId();
+          client.daemonVersion = hello.daemonVersion();
+          client.daemonBuildTime = parseInstant(hello.daemonBuildTime());
         }
         connection.sendTextAndAwait(codec.encode(new Ack()));
       }
@@ -262,6 +275,34 @@ public class WorkspaceDaemonRegistry
   @Override
   public Optional<Boolean> isClean(String workspaceId) {
     return Optional.ofNullable(gitClean.get(workspaceId));
+  }
+
+  @Override
+  public Optional<WorkspaceDaemonInfo.Info> lookup(String workspaceId) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        new WorkspaceDaemonInfo.Info(
+            client.connectedAt, client.daemonVersion, client.daemonBuildTime));
+  }
+
+  /**
+   * Parse the daemon's ISO-8601 build-time string to an {@code Instant}, tolerating {@code null}
+   * (older image / unfiltered dev jar) and a malformed value (never fail a registration over a
+   * cosmetic field) — either yields {@code null}, surfaced as "unknown build time".
+   */
+  private static Instant parseInstant(String iso) {
+    if (iso == null || iso.isBlank()) {
+      return null;
+    }
+    try {
+      return Instant.parse(iso);
+    } catch (java.time.format.DateTimeParseException e) {
+      LOG.debugf("workspace-daemon reported unparseable build time '%s': %s", iso, e.getMessage());
+      return null;
+    }
   }
 
   @Override
@@ -644,8 +685,18 @@ public class WorkspaceDaemonRegistry
   private static final class DaemonConnection {
     private final WebSocketConnection connection;
 
+    /** When this control socket registered — the workspace's "connected since" (registry). */
+    private final Instant connectedAt = Instant.now();
+
     /** The repository the daemon serves, learned from its {@link Hello} — see {@code onMessage}. */
     private volatile String repoId;
+
+    /**
+     * The daemon binary's build identity announced in its {@link Hello} (registry); may be null.
+     */
+    private volatile String daemonVersion;
+
+    private volatile Instant daemonBuildTime;
 
     private final ConcurrentHashMap<String, PendingCommand> pendingCommands =
         new ConcurrentHashMap<>();
