@@ -9,6 +9,7 @@ import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.domain.repository.control.WorkspaceDaemonProvisioner;
 import eu.wohlben.qits.domain.repository.control.WorkspaceGitStatus;
+import eu.wohlben.qits.domain.repository.control.WorkspaceGitSync;
 import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
@@ -30,6 +31,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
+import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
@@ -82,7 +84,8 @@ public class WorkspaceDaemonRegistry
         WorkspaceConfigReader,
         WorkspaceBootstrapDriver,
         WorkspaceServiceDriver,
-        WorkspaceGitStatus {
+        WorkspaceGitStatus,
+        WorkspaceGitSync {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceDaemonRegistry.class);
 
@@ -234,6 +237,7 @@ public class WorkspaceDaemonRegistry
       case RunBootstrap ignored -> {}
       case StartDaemon ignored -> {}
       case SignalDaemon ignored -> {}
+      case PullBranch ignored -> {}
     }
   }
 
@@ -258,6 +262,19 @@ public class WorkspaceDaemonRegistry
   @Override
   public Optional<Boolean> isClean(String workspaceId) {
     return Optional.ofNullable(gitClean.get(workspaceId));
+  }
+
+  @Override
+  public void pullFromOrigin(String workspaceId, String branch) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      // No live daemon to pull — the checkout syncs on its next host git op (fast-forward /
+      // merge-parent-in), so a missed notification never loses data. Fire-and-forget.
+      LOG.debugf("pullFromOrigin('%s'): no workspace-daemon live for %s", branch, workspaceId);
+      return;
+    }
+    String correlationId = UUID.randomUUID().toString();
+    client.connection.sendTextAndAwait(codec.encode(new PullBranch(correlationId, branch)));
   }
 
   /** Fan a service's lifecycle transition out to every subscribed host coordinator. */

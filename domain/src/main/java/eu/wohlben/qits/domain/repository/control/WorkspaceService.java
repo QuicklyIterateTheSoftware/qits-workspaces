@@ -82,6 +82,15 @@ public class WorkspaceService {
   @Inject Instance<WorkspaceGitStatus> gitStatus;
 
   /**
+   * Notifies a target workspace's in-container daemon to pull an incoming merge/integration this
+   * host just pushed to its branch (docs/epics/qits-workspace-daemon/ bidirectional auto-sync).
+   * {@code Instance<>} for the same reason as {@link #gitStatus}: apps without the backend impl
+   * (cli, tests) have no {@link WorkspaceGitSync} bean and simply skip the notification — the
+   * checkout then syncs on its next host git op, so nothing is lost.
+   */
+  @Inject Instance<WorkspaceGitSync> gitSync;
+
+  /**
    * Awaits the in-container workspace-daemon's autonomous self-provision (clone + submodules on
    * boot) — the <b>sole</b> provisioning path (docs/epics/qits-workspace-daemon/ Part 2). {@code
    * Instance<>} because the real backend impl lives in {@code service}; apps without it (cli,
@@ -510,6 +519,22 @@ public class WorkspaceService {
    */
   public Optional<Path> workspacePathForBranch(String repoId, String branch) {
     return Optional.empty();
+  }
+
+  /**
+   * After a host-side integration/merge advanced {@code targetBranch}'s origin ref, tell the
+   * workspace that owns it (if any) to pull the update into its container — so its checkout catches
+   * up right away instead of lagging until the next host git op (docs/epics/qits-workspace-daemon/
+   * bidirectional auto-sync). Best-effort and fire-and-forget: no target workspace, no backend impl
+   * (cli/tests), or no live daemon all short-circuit to a no-op. The daemon only fast-forwards, so
+   * a target tree that turned dirty in the race window is left intact.
+   */
+  private void notifyIncomingMerge(String repoId, String targetBranch) {
+    Workspace target = findWorkspaceByBranch(repoId, targetBranch);
+    if (target == null || gitSync.isUnsatisfied()) {
+      return;
+    }
+    gitSync.get().pullFromOrigin(target.workspaceId, targetBranch);
   }
 
   /** The workspace that owns {@code branch}, or null when none matches. */
@@ -1092,6 +1117,8 @@ public class WorkspaceService {
     if (!result.hasConflicts()) {
       recordEvent(
           workspace, WorkspaceEventType.MERGED, currentBranch, resolvedTarget, result.commitHash());
+      // The merge advanced the target's origin ref; if a live workspace owns it, pull it in now.
+      notifyIncomingMerge(repoId, resolvedTarget);
     }
     return result;
   }
@@ -1142,6 +1169,9 @@ public class WorkspaceService {
     // whether it is a workspace or a plain branch.
     boolean cleanedUp = false;
     if (!merged.hasConflicts()) {
+      // The integration advanced the target's origin ref; if a live workspace owns it, pull it in
+      // now (before any source cleanup — target and source are distinct branches).
+      notifyIncomingMerge(repoId, resolvedTarget);
       Path originPath = Path.of(dataDir, repoId, "origin");
       if (canCleanupBranch(repoId, originPath, source, repo.mainBranch)) {
         doCleanupBranch(repoId, source, result);

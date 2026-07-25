@@ -100,6 +100,15 @@ public class WorkspaceContainerFactory {
   boolean bootstrapAutorunEnabled;
 
   /**
+   * The auto-push kill switch, forwarded to the in-container daemon which pushes committed work to
+   * origin on its own as it observes commits (docs/epics/qits-workspace-daemon/ bidirectional
+   * auto-sync). When false the daemon never auto-pushes; incoming (host-triggered) pulls are
+   * unaffected.
+   */
+  @ConfigProperty(name = "qits.workspace.auto-push.enabled", defaultValue = "true")
+  boolean autoPushEnabled;
+
+  /**
    * Service (dev-server) supervision knobs, forwarded to the in-container daemon which supervises
    * them itself (docs/epics/qits-workspace-daemon/ Part 4). Mirror the host-side {@code
    * qits.services.*} so host projection and container supervision agree: the auto-start kill
@@ -242,6 +251,9 @@ public class WorkspaceContainerFactory {
     // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
     container.env(
         "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN", String.valueOf(bootstrapAutorunEnabled));
+    // The auto-push kill switch the daemon honours when it pushes committed work on its own
+    // (docs/epics/qits-workspace-daemon/ bidirectional auto-sync).
+    container.env("QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED", String.valueOf(autoPushEnabled));
     // Service (dev-server) supervision, self-run by the daemon as the boot-sequence tail (Part 4):
     // the auto-start kill switch + the knobs the in-container ServiceSupervisor honours.
     container.env(

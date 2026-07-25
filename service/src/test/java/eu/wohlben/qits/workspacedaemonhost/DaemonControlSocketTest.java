@@ -24,6 +24,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
 import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
+import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
@@ -554,6 +555,32 @@ class DaemonControlSocketTest {
 
     await(() -> registry.isClean(WORKSPACE_ID).isEmpty());
     assertTrue(registry.isClean(WORKSPACE_ID).isEmpty(), "cache cleared on disconnect (unknown)");
+  }
+
+  @Test
+  void pullFromOriginSendsAPullBranchToTheLiveDaemon() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+
+      // A host-side merge advanced this workspace's branch; the registry asks the daemon to pull.
+      registry.pullFromOrigin(WORKSPACE_ID, "feature");
+
+      PullBranch pull = null;
+      for (int i = 0; i < 10 && pull == null; i++) {
+        if (peer.take() instanceof PullBranch p) {
+          pull = p;
+        }
+      }
+      assertTrue(pull != null, "expected a PullBranch frame at the daemon");
+      assertEquals("feature", pull.branch());
+    }
+  }
+
+  @Test
+  void pullFromOriginIsANoOpWithoutALiveDaemon() {
+    // No daemon connected for this id: fire-and-forget, must not throw (the checkout syncs on its
+    // next host git op).
+    registry.pullFromOrigin("nobody-home", "feature");
   }
 
   /** Spin until {@code condition} holds or a 5s deadline passes. */
