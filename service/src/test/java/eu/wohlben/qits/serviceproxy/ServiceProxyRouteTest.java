@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
@@ -36,12 +37,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises the daemon web-view proxy against a real loopback origin: a Vert.x echo server plays
- * the daemon's dev server (the {@code FakeContainerRuntime} maps published ports 1:1, so the
- * daemon's {@code httpPort} <em>is</em> the host port the proxy targets). Verifies the base-path
- * contract (paths forwarded verbatim, unstripped), the lifecycle responses (splash/502/404), the
- * trailing-slash redirect, the WebSocket round-trip (the HMR path), and that unknown keys never
- * reach the origin.
+ * Exercises the service web-view proxy against a real loopback origin: a Vert.x echo server plays
+ * the daemon's dev server (the {@code FakeContainerRuntime} resolves the target to {@code
+ * 127.0.0.1} + the service's {@code webView.port}, so that port <em>is</em> the host port the proxy
+ * targets). Verifies the base-path contract (paths forwarded verbatim, unstripped), the lifecycle
+ * responses (splash/502/404), the trailing-slash redirect, the WebSocket round-trip (the HMR path),
+ * and that unknown keys never reach the origin.
+ *
+ * <p>The host {@code ServiceSupervisor} is a pure projection, so a profile-scoped {@link
+ * FakeWorkspaceServiceDriver} (enabled only for this test — the daemon ITs keep the real registry)
+ * plays the daemon: after {@code start} the test feeds a READY (or STOPPED) event through the sink
+ * the supervisor subscribed, which resolves the proxy origin.
  */
 @QuarkusTest
 @TestProfile(ServiceProxyRouteTest.TestProfile.class)
@@ -52,14 +58,17 @@ public class ServiceProxyRouteTest {
     public Map<String, String> getConfigOverrides() {
       try {
         Path tempDir = Files.createTempDirectory("qits-daemon-proxy-test-repos");
-        return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
-            "qits.services.ready-grace-ms", "300",
-            "qits.services.stop-grace-ms", "1000",
-            "qits.services.restart-backoff-initial-ms", "100");
+        return Map.of("qits.repositories.data-dir", tempDir.toString());
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
+    }
+
+    @Override
+    public java.util.Set<Class<?>> getEnabledAlternatives() {
+      // Opt this test into the fake daemon driver without disturbing the real
+      // WorkspaceDaemonRegistry that the other service tests and daemon ITs rely on.
+      return java.util.Set.of(FakeWorkspaceServiceDriver.class);
     }
   }
 
@@ -73,6 +82,8 @@ public class ServiceProxyRouteTest {
 
   @Inject FakeWorkspaceConfigReader configReader;
 
+  @Inject FakeWorkspaceServiceDriver driver;
+
   @Inject ServiceSupervisor supervisor;
 
   private Vertx echoVertx;
@@ -84,9 +95,13 @@ public class ServiceProxyRouteTest {
   private final java.util.concurrent.atomic.AtomicReference<String> lastHostHeader =
       new java.util.concurrent.atomic.AtomicReference<>();
 
+  /** The config-declared service name the daemon reports events under (the id varies per setup). */
+  private static final String SERVICE_NAME = "echo-daemon";
+
   @BeforeEach
   void resetStagedConfig() {
     configReader.clear();
+    driver.reset();
   }
 
   @BeforeEach
@@ -119,23 +134,19 @@ public class ServiceProxyRouteTest {
     }
   }
 
-  private Setup setUpReadyDaemon(String script, String readyPattern) throws Exception {
-    return setUpReadyDaemon(script, readyPattern, null);
-  }
-
   /**
-   * Config staged before the workspace, so the supervisor resolves the definition (from the
-   * workspace's in-container config — the only definition source since Part 5) when the start
-   * provisions the (fake) container.
+   * Stage a web-viewable service, provision its (fake) container, and register the projection by
+   * starting it (leaving it STARTING — the caller decides whether to drive it READY). Config is
+   * staged before the workspace so the supervisor resolves the definition from the in-container
+   * config when the start registers it.
    */
-  private Setup setUpReadyDaemon(String script, String readyPattern, String basePath)
-      throws Exception {
+  private Setup startDaemon(String basePath) throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Proxy Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
     // Unique per setup: the proxy/supervisor key instances by (workspaceId, daemonId) alone, so a
     // fixed id would collide with a previous test's stopped instance ("work" repeats across repos).
-    String daemonId = "echo-daemon-" + daemonSeq.incrementAndGet();
+    String daemonId = SERVICE_NAME + "-" + daemonSeq.incrementAndGet();
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -145,15 +156,12 @@ public class ServiceProxyRouteTest {
             List.of(
                 new QitsConfig.ServiceDecl(
                     daemonId,
-                    "echo-daemon",
+                    SERVICE_NAME,
                     null,
-                    script,
-                    readyPattern,
+                    "sleep 300",
+                    null,
                     null, // otel
-                    // autoStart off: the test starts manually, and a late provision-time event
-                    // from a previous test must not auto-start this id on its stale workspace
-                    // (the proxy keys instances by (workspaceId, daemonId) alone).
-                    Boolean.FALSE,
+                    Boolean.FALSE, // autoStart off: the test starts manually
                     RestartPolicy.NEVER,
                     0,
                     "TERM",
@@ -162,8 +170,18 @@ public class ServiceProxyRouteTest {
                     null)), // healthChecks
             null));
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    // The proxy origin resolves against a real (fake) container; provision it before READY.
+    workspaceService.ensureContainer(repo.id, "work");
     supervisor.start(repo.id, "work", daemonId);
     return new Setup(repo.id, daemonId);
+  }
+
+  /** Bring a started service READY by playing the daemon event the supervisor projects. */
+  private Setup setUpReadyDaemon(String basePath) throws Exception {
+    Setup setup = startDaemon(basePath);
+    driver.sink().onState(setup.repoId(), "work", SERVICE_NAME, "READY", null);
+    awaitStatus(setup, ServiceStatus.READY);
+    return setup;
   }
 
   private record Setup(String repoId, String daemonId) {}
@@ -189,6 +207,8 @@ public class ServiceProxyRouteTest {
   private void stopQuietly(Setup setup) {
     try {
       supervisor.stop(setup.repoId(), "work", setup.daemonId());
+      // The daemon owns the process — it reports STOPPED, which the projection settles.
+      driver.sink().onState(setup.repoId(), "work", SERVICE_NAME, "STOPPED", 0);
       awaitStatus(setup, ServiceStatus.STOPPED);
     } catch (Exception ignored) {
       // already stopped or never live
@@ -197,9 +217,8 @@ public class ServiceProxyRouteTest {
 
   @Test
   public void forwardsVerbatimRedirectsBareKeyAndRefusesAfterStop() throws Exception {
-    Setup setup = setUpReadyDaemon("sleep 300", null);
+    Setup setup = setUpReadyDaemon(null);
     try {
-      awaitStatus(setup, ServiceStatus.READY);
       String base = "/service/work/" + setup.daemonId();
 
       // Verbatim passthrough: the origin sees the unstripped path and query.
@@ -257,9 +276,8 @@ public class ServiceProxyRouteTest {
     // must present the origin's Host as `localhost` (always allow-listed by Angular's dev server)
     // instead of the container's DNS name (rejected with "This host is not allowed"). TCP still
     // targets the fixed origin; only the Host/:authority header is rewritten.
-    Setup setup = setUpReadyDaemon("sleep 300", null);
+    Setup setup = setUpReadyDaemon(null);
     try {
-      awaitStatus(setup, ServiceStatus.READY);
       given()
           .get("/service/work/" + setup.daemonId() + "/index.html")
           .then()
@@ -276,11 +294,10 @@ public class ServiceProxyRouteTest {
 
   @Test
   public void basePathPrefixedRequestsForwardVerbatim() throws Exception {
-    // A daemon with a webView.basePath serves under /service/{w}/{d}/app/ — the proxy stays a dumb
+    // A service with a webView.basePath serves under /service/{w}/{d}/app/ — the proxy stays a dumb
     // passthrough; the extra sub-path is part of the verbatim-forwarded path, never stripped.
-    Setup setup = setUpReadyDaemon("sleep 300", null, "app");
+    Setup setup = setUpReadyDaemon("app");
     try {
-      awaitStatus(setup, ServiceStatus.READY);
       String servedBase = "/service/work/" + setup.daemonId() + "/app";
       given()
           .get(servedBase + "/main.js")
@@ -303,8 +320,8 @@ public class ServiceProxyRouteTest {
 
   @Test
   public void startingDaemonGetsTheAutoRefreshingSplash() throws Exception {
-    // A ready pattern that never matches keeps the instance in STARTING.
-    Setup setup = setUpReadyDaemon("sleep 300", "NEVER_MATCHES_ANYTHING");
+    // A service that never reports READY stays in STARTING (the daemon isn't played to READY here).
+    Setup setup = startDaemon(null);
     try {
       String body =
           given()

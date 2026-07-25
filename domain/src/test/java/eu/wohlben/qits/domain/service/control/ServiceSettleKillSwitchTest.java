@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
@@ -23,7 +24,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The {@code qits.services.autostop-enabled=false} kill switch suppresses the settle coupling: a
- * container-stopping event settles nothing, leaving the daemon to the ordinary machinery.
+ * container-stopping event settles nothing, leaving the service to the daemon's own machinery.
  */
 @QuarkusTest
 @TestProfile(ServiceSettleKillSwitchTest.TestProfile.class)
@@ -37,9 +38,7 @@ public class ServiceSettleKillSwitchTest {
         return Map.of(
             "qits.repositories.data-dir", tempDir.toString(),
             "qits.services.autostop-enabled", "false",
-            "qits.services.autostart-enabled", "false",
-            "qits.services.ready-grace-ms", "300",
-            "qits.services.liveness-poll-ms", "150");
+            "qits.services.autostart-enabled", "false");
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -50,11 +49,13 @@ public class ServiceSettleKillSwitchTest {
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
+  @Inject FakeWorkspaceServiceDriver driver;
   @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
 
   @Test
   public void killSwitchSuppressesSettle() throws Exception {
+    driver.reset();
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Settle KillSwitch Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
@@ -83,18 +84,13 @@ public class ServiceSettleKillSwitchTest {
                     null)),
             null));
     supervisor.start(repo.id, "work", daemonId);
-    // Wait for READY.
-    long deadline = System.currentTimeMillis() + 15_000;
-    while (System.currentTimeMillis() < deadline
-        && instanceOf(repo.id, daemonId).status() != ServiceStatus.READY) {
-      Thread.sleep(50);
-    }
+    driver.sink().onState(repo.id, "work", "dev", "READY", null);
 
-    // The settle event fires, but the kill switch means the coupler ignores it: the daemon (still
-    // alive in its container) stays READY rather than being settled STOPPED.
+    // The settle event fires, but the kill switch means the coupler ignores it: the service (still
+    // owned by the live daemon) stays READY rather than being settled STOPPED.
     containerEvents.fireStopping(repo.id, "work", true);
 
-    Thread.sleep(600);
+    Thread.sleep(300);
     assertEquals(
         ServiceStatus.READY,
         instanceOf(repo.id, daemonId).status(),

@@ -8,6 +8,7 @@ import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
@@ -28,11 +29,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The container&#8594;daemon <em>stop</em> coupling: a {@code WorkspaceContainerStopping} event
- * settles a workspace's live daemons STOPPED (INFO, no crash) instead of leaving them to the crash
- * machinery — so a deliberate {@code stopContainer} is not misread as a crash and resurrected. The
- * kill-switch case is {@link ServiceSettleKillSwitchTest}. Definitions are config-declared, staged
- * into the {@link FakeWorkspaceConfigReader}.
+ * The container&#8594;service <em>stop</em> coupling: a {@code WorkspaceContainerStopping} event
+ * settles a workspace's live services STOPPED (INFO, no crash) instead of leaving them to be
+ * misread as a crash and resurrected — deterministically, since the container's imminent {@code rm}
+ * may beat the daemon's own STOPPED event. On a graceful stop the daemon is also asked to signal
+ * each service for a clean flush. The kill-switch case is {@link ServiceSettleKillSwitchTest}. The
+ * host is a pure projection; a {@link FakeWorkspaceServiceDriver} plays the daemon. Definitions are
+ * config-declared, staged into the {@link FakeWorkspaceConfigReader}.
  */
 @QuarkusTest
 @TestProfile(ServiceLifecycleCouplerSettleTest.TestProfile.class)
@@ -47,12 +50,7 @@ public class ServiceLifecycleCouplerSettleTest {
             "qits.repositories.data-dir", tempDir.toString(),
             "qits.services.autostop-enabled", "true",
             // Keep auto-start OFF so these tests isolate the settle direction; start manually.
-            "qits.services.autostart-enabled", "false",
-            "qits.services.ready-grace-ms", "300",
-            "qits.services.stop-grace-ms", "500",
-            // Long backoff so a crashing daemon sits in RESTARTING long enough to observe.
-            "qits.services.restart-backoff-initial-ms", "3000",
-            "qits.services.liveness-poll-ms", "150");
+            "qits.services.autostart-enabled", "false");
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -65,13 +63,15 @@ public class ServiceLifecycleCouplerSettleTest {
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
+  @Inject FakeWorkspaceServiceDriver driver;
   @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
   @Inject ContainerRuntime containers;
 
   @BeforeEach
-  void resetConfig() {
+  void resetFakes() {
     configReader.clear(); // the fake is a shared singleton across this class's test methods
+    driver.reset();
   }
 
   private String repoWithWorkspace() throws Exception {
@@ -119,66 +119,70 @@ public class ServiceLifecycleCouplerSettleTest {
   }
 
   @Test
-  public void stoppingEventSettlesReadyDaemonWithoutCrashOrRelaunch() throws Exception {
+  public void stoppingEventSettlesReadyServiceWithoutCrashOrRelaunch() throws Exception {
     String repoId = repoWithWorkspace();
     String daemonId = createDaemon(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
     supervisor.start(repoId, "work", daemonId);
+    driver.sink().onState(repoId, "work", "dev", "READY", null);
     awaitStatus(repoId, daemonId, ServiceStatus.READY);
 
     // A deliberate container stop: settle, don't crash.
     containerEvents.fireStopping(repoId, "work", true);
 
     ServiceInstanceDto settled = awaitStatus(repoId, daemonId, ServiceStatus.STOPPED);
-    assertEquals(0, settled.restartCount(), "a settled daemon is not restarted");
+    assertEquals(0, settled.restartCount(), "a settled service is not restarted");
+    assertTrue(
+        driver.signalled().contains("dev"), "a graceful settle asks the daemon to signal a flush");
 
-    // Past a couple of liveness intervals, it stays STOPPED — no crash path, no resurrection.
-    Thread.sleep(600);
+    // It stays STOPPED — no crash path, no resurrection.
+    Thread.sleep(300);
     assertEquals(
         ServiceStatus.STOPPED,
         instanceOf(repoId, daemonId).status(),
-        "the settled daemon is not resurrected by the liveness poll");
+        "the settled service is not resurrected");
   }
 
   @Test
   public void stoppingEventSettlesARestartingInstance() throws Exception {
     String repoId = repoWithWorkspace();
-    // Exits non-zero immediately, so ON_FAILURE drops it into RESTARTING (long backoff).
     String daemonId = createDaemon(repoId, "flaky", "sh -c 'exit 1'", RestartPolicy.ON_FAILURE);
     supervisor.start(repoId, "work", daemonId);
+    // Play the daemon dropping it into RESTARTING (the daemon owns the backoff).
+    driver.sink().onState(repoId, "work", "flaky", "CRASHED", 1);
+    driver.sink().onState(repoId, "work", "flaky", "RESTARTING", 1);
     awaitStatus(repoId, daemonId, ServiceStatus.RESTARTING);
 
     containerEvents.fireStopping(repoId, "work", true);
 
     awaitStatus(repoId, daemonId, ServiceStatus.STOPPED);
-    // The pending relaunch (3s backoff) must have been cancelled — it never comes back.
-    Thread.sleep(3500);
+    Thread.sleep(300);
     assertEquals(
         ServiceStatus.STOPPED,
         instanceOf(repoId, daemonId).status(),
-        "settling a RESTARTING instance cancels its pending relaunch");
+        "settling a RESTARTING instance leaves it STOPPED");
   }
 
   @Test
-  public void stopContainerDoesNotResurrectItsSettledDaemon() throws Exception {
+  public void stopContainerDoesNotResurrectItsSettledService() throws Exception {
     String repoId = repoWithWorkspace();
     String daemonId = createDaemon(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
+    // A real running container to stop — the projection start no longer provisions one (the daemon
+    // owns execution), so this test that exercises WorkspaceService.stopContainer provisions it.
+    workspaceService.ensureContainer(repoId, "work");
     supervisor.start(repoId, "work", daemonId);
+    driver.sink().onState(repoId, "work", "dev", "READY", null);
     awaitStatus(repoId, daemonId, ServiceStatus.READY);
     String container = containers.containerName("work", repoId);
 
-    // The regression: a deliberate stop under a live ON_FAILURE daemon used to be misread as a
-    // crash
-    // and the just-stopped container re-provisioned/restarted. The synchronous settle prevents it.
+    // A deliberate stop must settle the service synchronously (before the container is paused/
+    // removed) so nothing reads the disappearance as a crash to resurrect.
     workspaceService.stopContainer(repoId, "work");
 
-    Thread.sleep(600); // several liveness intervals
-    // A graceful stop now PAUSES in place (docker stop, lossless) rather than removing the
-    // container, so "not resurrected" means it stays stopped — present but never restarted by the
-    // liveness poll.
+    Thread.sleep(300);
+    // A graceful stop PAUSES in place (docker stop, lossless) rather than removing the container.
     assertTrue(containers.exists(container), "the paused container is kept, not removed");
     assertFalse(
-        containers.isRunning(container),
-        "the deliberately stopped container is not resurrected by the liveness poll");
+        containers.isRunning(container), "the deliberately stopped container is not resurrected");
     WorkspaceDto dto =
         workspaceService.listWorkspaces(repoId).stream()
             .filter(w -> "work".equals(w.workspaceId()))
@@ -189,6 +193,6 @@ public class ServiceLifecycleCouplerSettleTest {
     assertEquals(
         ServiceStatus.STOPPED,
         instanceOf(repoId, daemonId).status(),
-        "and its daemon stays STOPPED");
+        "and its service stays STOPPED");
   }
 }

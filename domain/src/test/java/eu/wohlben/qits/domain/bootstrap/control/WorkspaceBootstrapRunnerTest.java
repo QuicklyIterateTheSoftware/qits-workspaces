@@ -57,9 +57,9 @@ import org.junit.jupiter.api.Test;
  * keys daemon sessions by id host-wide, so a leaked {@code sleep 300} session from one test would
  * be <em>adopted</em> by the next test's {@code effectiveDaemons} probe under a reused id; (2)
  * every test whose pipeline fires {@code WorkspaceReadyForDaemons} drains the async coupler pass
- * (by awaiting its own auto-start daemon's READY) before returning — otherwise the late pass reads
- * the <em>next</em> test's staged config (the reader is keyed by workspace slug, not repo) and
- * starts a daemon for the wrong repo.
+ * (by awaiting its own auto-start service's STARTING — the projection host's observable that the
+ * coupler ran) before returning — otherwise the late pass reads the <em>next</em> test's staged
+ * config (the reader is keyed by workspace slug, not repo) and starts a service for the wrong repo.
  */
 @QuarkusTest
 @TestProfile(WorkspaceBootstrapRunnerTest.TestProfile.class)
@@ -73,8 +73,6 @@ public class WorkspaceBootstrapRunnerTest {
         return Map.of(
             "qits.repositories.data-dir", tempDir.toString(),
             "qits.services.autostart-enabled", "true",
-            "qits.services.ready-grace-ms", "300",
-            "qits.services.liveness-poll-ms", "150",
             // The host's chain-await timeout (the fake driver runs the chain synchronously, so this
             // only bounds a hung await).
             "qits.bootstrap.await-timeout-ms", "8000");
@@ -239,7 +237,7 @@ public class WorkspaceBootstrapRunnerTest {
 
     BootstrapRunDto first = awaitOutcome(repoId, "first", BootstrapOutcome.SUCCEEDED);
     BootstrapRunDto second = awaitOutcome(repoId, "second", BootstrapOutcome.SUCCEEDED);
-    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.STARTING);
 
     assertEquals(
         List.of("first", "second"),
@@ -272,7 +270,7 @@ public class WorkspaceBootstrapRunnerTest {
     assertEquals(List.of("ran"), Files.readAllLines(marker), "only the checked-in command ran");
     assertEquals(1, readyRecorder.countFor(repoId, "work"), "skips count as chain success");
     // Drain the coupler's auto-start pass so no late event leaks into the next test.
-    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.STARTING);
   }
 
   @Test
@@ -295,8 +293,10 @@ public class WorkspaceBootstrapRunnerTest {
     assertFalse(Files.exists(marker));
     assertEquals(0, readyRecorder.countFor(repoId, "work"), "a failed chain never fires ready");
     ServiceInstanceDto daemon = daemonInstance(repoId, daemonId);
-    assertEquals(ServiceStatus.STOPPED, daemon.status(), "auto-start daemon stays down");
-    assertNull(daemon.commandId(), "the daemon was never launched");
+    assertEquals(
+        ServiceStatus.STOPPED,
+        daemon.status(),
+        "auto-start service stays down — a withheld ready never registered a projection");
   }
 
   @Test
@@ -309,13 +309,13 @@ public class WorkspaceBootstrapRunnerTest {
     // A fresh provision runs the chain once (and auto-starts the daemon).
     workspaceService.ensureContainer(repoId, "work");
     awaitOutcome(repoId, "install", BootstrapOutcome.SUCCEEDED);
-    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.STARTING);
 
     // A restart of the Exited container (freshProvision=false): no chain re-run, straight to
     // daemon auto-start.
     workspaceService.stopContainer(repoId, "work");
     workspaceService.ensureContainer(repoId, "work");
-    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.STARTING);
 
     assertEquals(
         List.of("installed"),
@@ -342,7 +342,7 @@ public class WorkspaceBootstrapRunnerTest {
     await(
         () -> readyRecorder.countFor(repoId, "work") >= 1 ? Boolean.TRUE : null,
         "recovery releases auto-start");
-    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.STARTING);
   }
 
   @Test
@@ -382,7 +382,7 @@ public class WorkspaceBootstrapRunnerTest {
 
     // Drain: the first run's success fires ready and the coupler auto-starts the daemon — await
     // it so the async pipeline is quiescent before the next test stages its own config.
-    awaitDaemonStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitDaemonStatus(repoId, daemonId, ServiceStatus.STARTING);
   }
 
   @Test

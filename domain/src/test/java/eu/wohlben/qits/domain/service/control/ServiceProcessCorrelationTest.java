@@ -9,9 +9,11 @@ import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.domain.process.dto.TechnicalProcessFrame;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
+import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -24,12 +26,13 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cross-thread correlation of the technical process with the daemon phase: the id rides {@code
- * WorkspaceContainerStarted} onto the async observer thread, so an auto-started daemon's startup
- * lines land in the {@code daemon:<name>} segment of the <em>same</em> process that streamed the
- * provision, STARTING→READY settles that segment, and the process reaches {@code done} only once
- * every auto-start daemon settled. The auto-start definition is config-declared, staged into the
- * {@link FakeWorkspaceConfigReader}.
+ * Cross-thread correlation of the technical process with the service phase: the id rides {@code
+ * WorkspaceContainerStarted} onto the async observer thread, so an auto-started service's streamed
+ * startup lines land in the {@code daemon:<name>} segment of the <em>same</em> process that
+ * streamed the provision, a READY event settles that segment, and the process reaches {@code done}
+ * only once every auto-start service settled. Under the pure-projection host the daemon owns the
+ * lifecycle; a {@link FakeWorkspaceServiceDriver} plays its streamed line + READY. The auto-start
+ * definition is config-declared, staged into the {@link FakeWorkspaceConfigReader}.
  */
 @QuarkusTest
 @TestProfile(ServiceProcessCorrelationTest.TestProfile.class)
@@ -41,10 +44,10 @@ public class ServiceProcessCorrelationTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-daemon-process-test-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
-            "qits.services.autostart-enabled", "true",
-            "qits.services.ready-grace-ms", "300",
-            "qits.services.liveness-poll-ms", "150");
+            "qits.repositories.data-dir",
+            tempDir.toString(),
+            "qits.services.autostart-enabled",
+            "true");
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -57,6 +60,8 @@ public class ServiceProcessCorrelationTest {
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
+  @Inject FakeWorkspaceServiceDriver driver;
+  @Inject ServiceSupervisor supervisor;
   @Inject TechnicalProcessRegistry registry;
 
   private static final class Replay implements TechnicalProcess.Listener {
@@ -77,15 +82,13 @@ public class ServiceProcessCorrelationTest {
   }
 
   @Test
-  public void autoStartedDaemonLinesLandInTheStartProcessAndReadySettlesTheSegment()
+  public void streamedServiceLinesLandInTheStartProcessAndReadySettlesTheSegment()
       throws Exception {
+    driver.reset();
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Daemon Process Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    // The echo doubles as the ready pattern, so READY (and the segment settle it triggers) can
-    // only happen after the follower delivered the line into the segment — deterministic ordering
-    // instead of racing the grace timer against tail startup.
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -98,7 +101,7 @@ public class ServiceProcessCorrelationTest {
                     "web",
                     null,
                     "echo hello-from-daemon; sleep 300",
-                    "hello-from-daemon",
+                    null,
                     null,
                     true,
                     RestartPolicy.NEVER,
@@ -111,11 +114,20 @@ public class ServiceProcessCorrelationTest {
 
     String processId = workspaceService.beginEnsureContainer(repo.id, "work");
     TechnicalProcess process = registry.find(processId).orElseThrow();
+
+    // Wait until the auto-start coupler pre-registered the process-tracked "web" projection
+    // (STARTING) — only then does a streamed line/READY resolve to the process-linked instance.
+    awaitStatus(repo.id, "web", ServiceStatus.STARTING);
+
+    // Play the daemon: it streams the service's startup output, then reports READY.
+    driver.sink().onLine(repo.id, "work", "web", "STDOUT", "hello-from-daemon");
+    driver.sink().onState(repo.id, "work", "web", "READY", null);
+
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     while (!process.isTerminal() && System.currentTimeMillis() < deadline) {
       Thread.sleep(50);
     }
-    assertTrue(process.isTerminal(), "done must fire once provision + the daemon settled");
+    assertTrue(process.isTerminal(), "done must fire once provision + the service settled");
 
     Replay replay = new Replay();
     process.attach(replay);
@@ -127,12 +139,12 @@ public class ServiceProcessCorrelationTest {
                     "line".equals(f.kind())
                         && segment.equals(f.segment())
                         && f.line().contains("hello-from-daemon")),
-        "the daemon's startup output lands in its segment of the same process");
+        "the service's streamed output lands in its segment of the same process");
     TechnicalProcessFrame settle =
         replay.frames.stream()
             .filter(f -> "segment-settled".equals(f.kind()) && segment.equals(f.segment()))
             .findFirst()
-            .orElseThrow(() -> new AssertionError("daemon segment never settled"));
+            .orElseThrow(() -> new AssertionError("service segment never settled"));
     assertEquals("ok", settle.status(), "STARTING→READY settles the segment ok");
     assertEquals(
         "ok",
@@ -141,5 +153,24 @@ public class ServiceProcessCorrelationTest {
             .findFirst()
             .orElseThrow()
             .status());
+  }
+
+  private void awaitStatus(String repoId, String daemonId, ServiceStatus expected)
+      throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
+    ServiceStatus last = null;
+    while (System.currentTimeMillis() < deadline) {
+      var i =
+          supervisor.effectiveDaemons(repoId, "work").stream()
+              .filter(d -> d.daemon().id().equals(daemonId))
+              .findFirst()
+              .orElse(null);
+      last = i != null ? i.status() : null;
+      if (last == expected) {
+        return;
+      }
+      Thread.sleep(50);
+    }
+    throw new AssertionError("Timed out waiting for " + expected + "; last: " + last);
   }
 }
