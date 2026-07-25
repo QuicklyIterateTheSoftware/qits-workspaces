@@ -15,11 +15,7 @@ import eu.wohlben.qits.domain.service.entity.ServiceEventKind;
 import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -31,20 +27,7 @@ import org.junit.jupiter.api.Test;
  * running it is spooled and handed to the next session.
  */
 @QuarkusTest
-@TestProfile(ServiceAgentNotifierTest.TestProfile.class)
 public class ServiceAgentNotifierTest {
-
-  public static class TestProfile implements QuarkusTestProfile {
-    @Override
-    public Map<String, String> getConfigOverrides() {
-      try {
-        Path tempDir = Files.createTempDirectory("qits-daemon-notify-test-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
 
   @Inject ProjectService projectService;
 

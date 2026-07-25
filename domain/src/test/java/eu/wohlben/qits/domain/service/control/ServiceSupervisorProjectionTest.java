@@ -18,13 +18,8 @@ import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -40,20 +35,7 @@ import org.junit.jupiter.api.Test;
  * FakeWorkspaceConfigReader} keyed by their {@code id:}.
  */
 @QuarkusTest
-@TestProfile(ServiceSupervisorProjectionTest.TestProfile.class)
 public class ServiceSupervisorProjectionTest {
-
-  public static class TestProfile implements QuarkusTestProfile {
-    @Override
-    public Map<String, String> getConfigOverrides() {
-      try {
-        Path tempDir = Files.createTempDirectory("qits-service-projection-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
 
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
