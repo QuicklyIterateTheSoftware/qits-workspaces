@@ -1,8 +1,11 @@
 package eu.wohlben.qits.workspacedaemonhost;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.domain.agent.control.AgentActivityState;
+import eu.wohlben.qits.domain.command.control.CommandService;
 import eu.wohlben.qits.domain.repository.control.ProvisionResult;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.WorkspaceAgentActivity;
 import eu.wohlben.qits.domain.repository.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigView;
@@ -15,6 +18,7 @@ import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangeHint;
 import eu.wohlben.qits.domain.workspace.control.WorkspaceChangePublisher;
 import eu.wohlben.qits.workspacedaemon.protocol.Ack;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapStep;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
@@ -88,6 +92,7 @@ public class WorkspaceDaemonRegistry
         WorkspaceBootstrapDriver,
         WorkspaceServiceDriver,
         WorkspaceGitStatus,
+        WorkspaceAgentActivity,
         WorkspaceDaemonInfo,
         WorkspaceGitSync {
 
@@ -100,11 +105,32 @@ public class WorkspaceDaemonRegistry
   @Inject WorkspaceChangePublisher changePublisher;
 
   /**
+   * The session-lineage sink for the {@code SessionStart} activity hook — the behaviour-preserving
+   * half of retiring the old direct-to-host {@code /agent-session} hook. {@code service} depends on
+   * {@code domain}, so this framework-free service is injected directly (the Kimi ACP launch path
+   * already calls it in-JVM). Guarded at the call site so a bad/late report can't tear down the
+   * control socket.
+   */
+  @Inject CommandService commandService;
+
+  /**
    * Last working-tree cleanliness each live daemon reported ({@link GitStatus}). In-memory only —
    * known while the daemon is connected (container RUNNING), cleared on {@link #unregister}, and
    * re-reported by the daemon on reconnect. Surfaced through {@link WorkspaceGitStatus#isClean}.
    */
   private final ConcurrentHashMap<String, Boolean> gitClean = new ConcurrentHashMap<>();
+
+  /**
+   * Last coding-agent activity each live daemon reported ({@link AgentActivity}), keyed by {@code
+   * commandId} (multiple agents can run per workspace). In-memory only — same lifecycle as {@link
+   * #gitClean}: populated while the daemon is connected, evicted on {@link #unregister} (and on an
+   * {@code ENDED} report), re-reported on reconnect. Surfaced as a per-workspace rollup through
+   * {@link WorkspaceAgentActivity#activityFor}.
+   */
+  private final ConcurrentHashMap<String, ActivityEntry> agentActivity = new ConcurrentHashMap<>();
+
+  /** One tracked agent command's activity, plus the workspace it belongs to (for the rollup). */
+  private record ActivityEntry(String workspaceId, AgentActivityState state) {}
 
   /** How long a {@link #readConfig} waits for the live daemon's {@link ConfigView} reply. */
   @ConfigProperty(name = "qits.workspace.config.describe-timeout-ms", defaultValue = "10000")
@@ -164,6 +190,8 @@ public class WorkspaceDaemonRegistry
     // The daemon is gone: its cached working-tree status is unknown until it reconnects and
     // re-reports (RUNNING-only semantics; the UI shows no badge in the meantime).
     gitClean.remove(workspaceId);
+    // Likewise drop every tracked agent activity for this workspace (re-reported on reconnect).
+    agentActivity.values().removeIf(entry -> entry.workspaceId().equals(workspaceId));
     LOG.debugf(
         "workspace-daemon disconnected for workspace %s (connection %s)",
         workspaceId, connection.id());
@@ -243,6 +271,7 @@ public class WorkspaceDaemonRegistry
       case Bootstrapped done -> completeBootstrap(workspaceId, done.ok());
       case DaemonEvent event -> routeServiceState(workspaceId, client, event);
       case GitStatus status -> onGitStatus(workspaceId, client, status);
+      case AgentActivity activity -> onAgentActivity(workspaceId, client, activity);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
       case RunCommand ignored -> {}
@@ -276,6 +305,91 @@ public class WorkspaceDaemonRegistry
   @Override
   public Optional<Boolean> isClean(String workspaceId) {
     return Optional.ofNullable(gitClean.get(workspaceId));
+  }
+
+  /**
+   * Handle one agent-activity report into its two sinks. First (behaviour-preserving) sink: a
+   * {@code SessionStart} still records the session-lineage row via {@link
+   * CommandService#reportAgentSession} — the same DB write the retired direct {@code
+   * /agent-session} hook produced, now driven off this daemon frame. Wrapped in try/catch (it
+   * throws {@code BadRequestException}/{@code NotFoundException} for an invalid session id or an
+   * unknown/stopped command) so an escape can't close the control socket, mirroring {@link
+   * PendingBootstrap#dispatch}.
+   *
+   * <p>Second sink: the in-memory rollup cache. The state is stored per {@code commandId} ({@code
+   * ENDED} evicts it), and a {@link WorkspaceChangeHint.Topic#AGENT_ACTIVITY} hint is fired on the
+   * workspace channel only when the workspace's rollup actually flips — so a same-state re-report
+   * (reconnect replay) doesn't churn the UI.
+   */
+  private void onAgentActivity(
+      String workspaceId, DaemonConnection client, AgentActivity activity) {
+    String repoId = client != null ? client.repoId : null;
+    if ("SessionStart".equals(activity.hookEvent()) && activity.sessionId() != null) {
+      try {
+        commandService.reportAgentSession(
+            activity.commandId(), activity.sessionId(), activity.transcriptPath());
+      } catch (RuntimeException e) {
+        LOG.debugf(
+            "agent-session lineage report failed for command %s: %s",
+            activity.commandId(), e.getMessage());
+      }
+    }
+    AgentActivityState state = parseState(activity.state());
+    if (state == null) {
+      return; // unknown state string — lineage above still ran; nothing to cache/flip
+    }
+    AgentActivityState before = rollup(workspaceId);
+    if (state == AgentActivityState.ENDED) {
+      agentActivity.remove(activity.commandId());
+    } else {
+      agentActivity.put(activity.commandId(), new ActivityEntry(workspaceId, state));
+    }
+    if (before != rollup(workspaceId)) {
+      changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+    }
+  }
+
+  /**
+   * The per-workspace rollup: BUSY &gt; WAITING &gt; IDLE across its tracked commands; else null.
+   */
+  private AgentActivityState rollup(String workspaceId) {
+    boolean waiting = false;
+    boolean idle = false;
+    for (ActivityEntry entry : agentActivity.values()) {
+      if (!entry.workspaceId().equals(workspaceId)) {
+        continue;
+      }
+      switch (entry.state()) {
+        case BUSY -> {
+          return AgentActivityState.BUSY; // highest precedence — short-circuit
+        }
+        case WAITING -> waiting = true;
+        case IDLE -> idle = true;
+        case ENDED -> {
+          /* never stored (ENDED evicts), but be exhaustive */
+        }
+      }
+    }
+    if (waiting) {
+      return AgentActivityState.WAITING;
+    }
+    return idle ? AgentActivityState.IDLE : null;
+  }
+
+  private static AgentActivityState parseState(String state) {
+    if (state == null) {
+      return null;
+    }
+    try {
+      return AgentActivityState.valueOf(state);
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
+  }
+
+  @Override
+  public Optional<AgentActivityState> activityFor(String workspaceId) {
+    return Optional.ofNullable(rollup(workspaceId));
   }
 
   @Override

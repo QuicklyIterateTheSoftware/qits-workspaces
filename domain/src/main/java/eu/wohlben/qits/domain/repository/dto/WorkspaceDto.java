@@ -1,5 +1,6 @@
 package eu.wohlben.qits.domain.repository.dto;
 
+import eu.wohlben.qits.domain.agent.control.AgentActivityState;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceStatus;
 import java.time.Instant;
@@ -20,6 +21,10 @@ import java.time.Instant;
  *     uncommitted changes ({@code false}), as last reported by {@code workspace-daemon} over its
  *     socket; {@code null} when unknown — the daemon only reports while the container is RUNNING,
  *     so a STOPPED workspace (or one whose daemon hasn't reported yet) carries no clean/dirty badge
+ * @param agentActivity the live coding-agent activity rollup for this workspace
+ *     (BUSY/IDLE/WAITING), as last reported by {@code workspace-daemon} hearing the agent's
+ *     lifecycle hooks; {@code null} when no tracked agent is running (or the container isn't
+ *     RUNNING / none has reported yet) — same RUNNING-only, self-healing lifecycle as {@code clean}
  * @param preamble markdown: the reason/goal authored at creation
  * @param result markdown: the outcome authored at resolution
  * @param resolvedAt when the workspace was resolved (null while ACTIVE)
@@ -51,6 +56,7 @@ public record WorkspaceDto(
     WorkspaceRuntimeStatus runtimeStatus,
     String runtimeError,
     Boolean clean,
+    AgentActivityState agentActivity,
     String preamble,
     String result,
     Instant resolvedAt,

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.domain.agent.control.AgentActivityState;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.project.control.ProjectService;
@@ -38,6 +39,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Inject WorkspaceContainerStartedRecorder startedRecorder;
   @Inject WorkspaceContainerStoppingRecorder stoppingRecorder;
   @Inject FakeWorkspaceGitStatus gitStatus;
+  @Inject FakeWorkspaceAgentActivity agentActivity;
 
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
@@ -109,6 +111,30 @@ public class WorkspaceContainerLifecycleServiceTest {
     // RUNNING but the daemon hasn't reported (yet) → unknown (null), not a stale value.
     gitStatus.forget("feat");
     assertNull(workspaceDto(repoId, "feat").clean(), "RUNNING but unreported ⇒ unknown");
+  }
+
+  @Test
+  public void agentActivityIsSurfacedOnlyWhileRunningAndReported() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+
+    // STOPPED: no daemon, so activity stays unknown even if a stale value were reported.
+    agentActivity.report("feat", AgentActivityState.BUSY);
+    assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
+    assertNull(workspaceDto(repoId, "feat").agentActivity(), "no activity while not RUNNING");
+
+    // RUNNING + reported BUSY → surfaced.
+    workspaceService.ensureContainer(repoId, "feat");
+    assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
+    assertEquals(AgentActivityState.BUSY, workspaceDto(repoId, "feat").agentActivity());
+
+    // A later WAITING flip is reflected.
+    agentActivity.report("feat", AgentActivityState.WAITING);
+    assertEquals(AgentActivityState.WAITING, workspaceDto(repoId, "feat").agentActivity());
+
+    // RUNNING but nothing reported (no active agent) → null.
+    agentActivity.forget("feat");
+    assertNull(workspaceDto(repoId, "feat").agentActivity(), "RUNNING but unreported ⇒ null");
   }
 
   @Test
