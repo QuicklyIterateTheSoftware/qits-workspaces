@@ -4,30 +4,14 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import jakarta.ws.rs.core.Response;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 @QuarkusTest
-@TestProfile(WorkspaceControllerTest.TestProfile.class)
 public class WorkspaceControllerTest {
-
-  public static class TestProfile implements QuarkusTestProfile {
-    @Override
-    public Map<String, String> getConfigOverrides() {
-      try {
-        Path tempDir = Files.createTempDirectory("qits-test-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
 
   // The effective data dir the app uses, so tests can commit directly inside a workspace on disk.
   @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
