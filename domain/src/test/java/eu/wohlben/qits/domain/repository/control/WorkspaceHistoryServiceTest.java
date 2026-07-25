@@ -12,12 +12,7 @@ import eu.wohlben.qits.domain.repository.dto.WorkspaceHistoryDto;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceEventType;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceStatus;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -26,20 +21,7 @@ import org.junit.jupiter.api.Test;
  * workspace that ran a command can still be discarded — both the workspace and its command persist.
  */
 @QuarkusTest
-@TestProfile(WorkspaceHistoryServiceTest.TestProfile.class)
 public class WorkspaceHistoryServiceTest {
-
-  public static class TestProfile implements QuarkusTestProfile {
-    @Override
-    public Map<String, String> getConfigOverrides() {
-      try {
-        Path tempDir = Files.createTempDirectory("qits-history-test-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
 
   @Inject ProjectService projectService;
 

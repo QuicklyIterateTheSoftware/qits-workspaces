@@ -1,7 +1,6 @@
 package eu.wohlben.qits.domain.repository.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,10 +10,7 @@ import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceRuntimeStatus;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -25,23 +21,11 @@ import org.junit.jupiter.api.Test;
  * tearing its container down and re-provisioning it from the durable branch
  * (docs/epics/qits-workspace-registry/). Verifies the registry-only clean gate (only a
  * daemon-reported clean tree passes; dirty <em>and</em> unknown are both rejected 400) and the
- * teardown+reprovision mechanic (a fresh clone, committed work preserved via a pre-push).
+ * teardown+reprovision mechanic (a fresh container onto the current image; the persistent
+ * /workspace volume — and committed work pushed before teardown — carry the checkout across).
  */
 @QuarkusTest
-@TestProfile(WorkspaceRecreateContainerServiceTest.TestProfile.class)
 public class WorkspaceRecreateContainerServiceTest {
-
-  public static class TestProfile implements QuarkusTestProfile {
-    @Override
-    public Map<String, String> getConfigOverrides() {
-      try {
-        Path tempDir = Files.createTempDirectory("qits-recreate-test-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
 
   @Inject ProjectService projectService;
   @Inject RepositoryService repositoryService;
@@ -83,7 +67,10 @@ public class WorkspaceRecreateContainerServiceTest {
     ensureRunning(repoId, "feat");
     String container = containers.containerName("feat", repoId);
 
-    // An untracked marker only a re-clone would drop — proves rm+reprovision, not restart-in-place.
+    // An untracked marker in the working tree. Recreate re-provisions a FRESH container but keeps
+    // the persistent /workspace volume (docs/epics/qits-workspaces/features/
+    // 2026-07-25_persistent-workspace-volume.md — "recreation now preserves the working tree"), so
+    // the checkout is reattached to the new container rather than re-cloned: the marker survives.
     containers.exec(container, "/workspace", Map.of(), "bash", "-lc", "echo wip > marker.txt");
     assertEquals(
         0,
@@ -98,10 +85,11 @@ public class WorkspaceRecreateContainerServiceTest {
 
     assertTrue(containers.exists(container), "a fresh container is running after recreate");
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
-    assertNotEquals(
+    assertEquals(
         0,
         containers.exec(container, "/workspace", Map.of(), "test", "-f", "marker.txt").exitCode(),
-        "the fresh clone dropped the untracked file — the old container was destroyed, not restarted");
+        "recreate keeps the persistent /workspace volume, so the untracked file survives the"
+            + " teardown+reprovision — the checkout is reattached, not re-cloned");
   }
 
   @Test
