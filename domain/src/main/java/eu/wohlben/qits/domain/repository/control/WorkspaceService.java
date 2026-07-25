@@ -474,6 +474,24 @@ public class WorkspaceService {
     return status.exitCode() == 0 && status.output().isBlank();
   }
 
+  /**
+   * Refuses an operation that would clobber or silently discard uncommitted work: throws a 400 when
+   * the workspace's container has a dirty working tree. The daemon-reported Clean/Dirty state
+   * already hides/reroutes these actions in the UI; this is the matching server-side guard so a
+   * direct API call can't bypass it. Symmetric with {@link #isWorkspaceClean} — an absent container
+   * is clean (nothing uncommitted to lose), so a stopped workspace is never blocked here.
+   */
+  private void requireCleanWorkingTree(String repoId, Workspace wt, String operation) {
+    if (!isWorkspaceClean(repoId, wt)) {
+      throw new BadRequestException(
+          "Cannot "
+              + operation
+              + " workspace '"
+              + wt.workspaceId
+              + "': it has uncommitted changes. Commit or discard them first.");
+    }
+  }
+
   /** True when another workspace forks from {@code branch} (i.e. lists it as its parent). */
   private boolean hasChildren(String repoId, String branch) {
     for (Workspace other : workspaceRepository.findActiveByRepositoryId(repoId)) {
@@ -1108,6 +1126,13 @@ public class WorkspaceService {
     if (source.equals(resolvedTarget)) {
       throw new BadRequestException("Cannot integrate '" + source + "' into itself");
     }
+    // A dirty workspace backing the source branch would have its uncommitted work left behind by
+    // the
+    // integration (a plain branch has no working tree, so it is never blocked).
+    Workspace sourceWorkspace = findWorkspaceByBranch(repoId, source);
+    if (sourceWorkspace != null) {
+      requireCleanWorkingTree(repoId, sourceWorkspace, "integrate");
+    }
 
     MergeResult merged = mergeIntoTarget(repoId, source, resolvedTarget);
 
@@ -1260,6 +1285,7 @@ public class WorkspaceService {
     if (parent.startsWith("-")) {
       throw new BadRequestException("Invalid parent branch");
     }
+    requireCleanWorkingTree(repoId, workspace, "fast-forward");
 
     // Inside the container: fetch, first fast-forward the container's own branch to origin's ref
     // (it may have advanced out-of-band, e.g. a host-side integration into it), then fast-forward
@@ -1309,6 +1335,7 @@ public class WorkspaceService {
     if (parent.startsWith("-")) {
       throw new BadRequestException("Invalid parent branch");
     }
+    requireCleanWorkingTree(repoId, workspace, "merge the parent into");
 
     ensureContainer(repoId, workspaceId); // re-provision a lost container from the branch first
     String container = containers.containerName(workspaceId, repoId);
@@ -1360,6 +1387,7 @@ public class WorkspaceService {
             .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
 
+    requireCleanWorkingTree(repoId, workspace, "abandon");
     doDiscard(repoId, workspace, WorkspaceStatus.ABANDONED, result);
   }
 

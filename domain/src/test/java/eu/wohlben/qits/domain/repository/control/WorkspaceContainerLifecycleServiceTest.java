@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
@@ -437,6 +438,88 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertTrue(
         seen.get(0).containerExistedWhenObserved(),
         "the stopping event fires before containers.rm");
+  }
+
+  // --- Dirty-tree guards: merges/abandon are refused server-side when the working tree is dirty,
+  // matching the UI that hides/reroutes those actions on a daemon-reported dirty workspace.
+
+  @Test
+  public void fastForwardRefusesADirtyWorkspace() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    makeDirty(containers.containerName("feat", repoId));
+
+    BadRequestException ex =
+        assertThrows(
+            BadRequestException.class, () -> workspaceService.fastForwardWorkspace(repoId, "feat"));
+    assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
+  }
+
+  @Test
+  public void updateFromParentRefusesADirtyWorkspace() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    makeDirty(containers.containerName("feat", repoId));
+
+    BadRequestException ex =
+        assertThrows(
+            BadRequestException.class,
+            () -> workspaceService.updateWorkspaceFromParent(repoId, "feat"));
+    assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
+  }
+
+  @Test
+  public void integrateRefusesADirtyWorkspaceBranch() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    makeDirty(containers.containerName("feat", repoId));
+
+    BadRequestException ex =
+        assertThrows(
+            BadRequestException.class,
+            () -> workspaceService.mergeBranch(repoId, "feat", "master", null));
+    assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
+  }
+
+  @Test
+  public void abandonRefusesADirtyWorkspace() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+    makeDirty(containers.containerName("feat", repoId));
+
+    BadRequestException ex =
+        assertThrows(
+            BadRequestException.class, () -> workspaceService.discardWorkspace(repoId, "feat"));
+    assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
+    assertTrue(
+        workspaceService.listWorkspaces(repoId).stream()
+            .anyMatch(w -> "feat".equals(w.workspaceId())),
+        "the refused abandon left the workspace in place");
+  }
+
+  @Test
+  public void abandonSucceedsOnACleanWorkspace() throws Exception {
+    String repoId = clonedRepo();
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(repoId, "feat");
+
+    // A clean working tree passes the guard: abandon proceeds and drops the workspace off the list.
+    workspaceService.discardWorkspace(repoId, "feat");
+    assertFalse(
+        workspaceService.listWorkspaces(repoId).stream()
+            .anyMatch(w -> "feat".equals(w.workspaceId())),
+        "a clean workspace is abandoned normally");
+  }
+
+  /**
+   * Leaves an untracked file in the container's /workspace so `git status --porcelain` is dirty.
+   */
+  private void makeDirty(String container) {
+    containers.exec(container, "/workspace", Map.of(), "bash", "-lc", "echo wip > uncommitted.txt");
   }
 
   /** Makes a commit in the container's /workspace without pushing it, returning the new HEAD. */
