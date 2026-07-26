@@ -15,7 +15,7 @@ import java.util.Map;
  * does: the {@code domain} module carries no JAX-RS, which is what lets it stay a plain library jar.
  *
  * <p>Scoped to <em>this</em> context's exception type. An application that also runs the monorepo's
- * {@code eu.wohlben.qits.domain.error.DomainException} keeps its own mapper for it; the two coexist
+ * {@code eu.wohlben.qits.workspaces.error.DomainException} keeps its own mapper for it; the two coexist
  * because they map unrelated types.
  */
 @Provider
