@@ -122,6 +122,14 @@ public class WorkspaceDaemonRegistry
   private final ConcurrentHashMap<String, Boolean> gitClean = new ConcurrentHashMap<>();
 
   /**
+   * Last commit each live daemon reported on the same {@link GitStatus} frame as {@link #gitClean}.
+   * Same lifetime and same eviction — in-memory only, dropped on {@link #unregister}, re-reported
+   * on reconnect. Surfaced through {@link WorkspaceGitStatus#head}, which the host compares against
+   * the origin's ref instead of running {@code git rev-parse} inside the container.
+   */
+  private final ConcurrentHashMap<String, String> gitHead = new ConcurrentHashMap<>();
+
+  /**
    * Last coding-agent activity each live daemon reported ({@link AgentActivity}), keyed by {@code
    * commandId} (multiple agents can run per workspace). In-memory only — same lifecycle as {@link
    * #gitClean}: populated while the daemon is connected, evicted on {@link #unregister} (and on an
@@ -191,6 +199,7 @@ public class WorkspaceDaemonRegistry
     // The daemon is gone: its cached working-tree status is unknown until it reconnects and
     // re-reports (RUNNING-only semantics; the UI shows no badge in the meantime).
     gitClean.remove(workspaceId);
+    gitHead.remove(workspaceId);
     // Likewise drop every tracked agent activity for this workspace (re-reported on reconnect).
     agentActivity.values().removeIf(entry -> entry.workspaceId().equals(workspaceId));
     LOG.debugf(
@@ -297,6 +306,9 @@ public class WorkspaceDaemonRegistry
   private void onGitStatus(String workspaceId, DaemonConnection client, GitStatus status) {
     String repoId = client != null ? client.repoId : null;
     changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.FILES);
+    if (status.head() != null) {
+      gitHead.put(workspaceId, status.head());
+    }
     Boolean previous = gitClean.put(workspaceId, status.clean());
     if (previous == null || previous != status.clean()) {
       changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.GIT_STATUS);
@@ -306,6 +318,11 @@ public class WorkspaceDaemonRegistry
   @Override
   public Optional<Boolean> isClean(String workspaceId) {
     return Optional.ofNullable(gitClean.get(workspaceId));
+  }
+
+  @Override
+  public Optional<String> head(String workspaceId) {
+    return Optional.ofNullable(gitHead.get(workspaceId));
   }
 
   /**

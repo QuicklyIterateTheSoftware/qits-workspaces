@@ -159,36 +159,6 @@ public class WorkspaceService {
 
   @Inject GitIdentity gitIdentity;
 
-  /**
-   * Runs a git command inside a workspace's container under {@code /workspace}, throwing on a
-   * non-zero exit. The container-side counterpart of {@code git.exec(workspacePath, …)} now that
-   * the checkout lives in the container rather than on the host.
-   */
-  private String containerGit(String repoId, String workspaceId, String... gitArgs) {
-    return containerGit(repoId, workspaceId, null, gitArgs);
-  }
-
-  /** {@link #containerGit} with a per-line tap for the technical-process log stream. */
-  private String containerGit(
-      String repoId, String workspaceId, Consumer<String> onLine, String... gitArgs) {
-    String container = containers.containerName(workspaceId, repoId);
-    String[] argv = new String[gitArgs.length + 1];
-    argv[0] = "git";
-    System.arraycopy(gitArgs, 0, argv, 1, gitArgs.length);
-    ContainerRuntime.ExecResult result =
-        containers.exec(container, "/workspace", java.util.Map.of(), onLine, argv);
-    if (result.exitCode() != 0) {
-      throw new InternalServerErrorException(
-          "Container git failed ["
-              + result.exitCode()
-              + "]: "
-              + String.join(" ", argv)
-              + "\n"
-              + result.output());
-    }
-    return result.output();
-  }
-
   /** Creates {@code branch} from {@code parentBranch} host-side in the bare origin. */
   private void createBranchRefOnOrigin(Path originPath, String branch, String parentBranch) {
     try {
@@ -503,15 +473,19 @@ public class WorkspaceService {
     if (branch == null || branch.isBlank()) {
       return true;
     }
-    ContainerRuntime.ExecResult head =
-        containers.exec(container, "/workspace", java.util.Map.of(), "git", "rev-parse", "HEAD");
-    if (head.exitCode() != 0) {
-      return false; // unknown container state — never delete blindly
+    // The daemon reports its head on every GitStatus frame and auto-pushes committed work, so
+    // comparing that against the origin's ref answers this without reaching into the container.
+    // Unknown — no live daemon, nothing reported yet, or no registry bean at all (cli, tests) — is
+    // NOT "in sync": refuse, exactly as an unreadable container used to.
+    Optional<String> reportedHead =
+        gitStatus.isUnsatisfied() ? Optional.empty() : gitStatus.get().head(workspaceId);
+    if (reportedHead.isEmpty()) {
+      return false;
     }
     try {
       String originSha =
           git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/" + branch).trim();
-      return head.output().trim().equals(originSha);
+      return reportedHead.get().trim().equals(originSha);
     } catch (Exception e) {
       return false;
     }
@@ -552,10 +526,11 @@ public class WorkspaceService {
     if (!containers.exists(container)) {
       return true;
     }
-    ContainerRuntime.ExecResult status =
-        containers.exec(
-            container, "/workspace", java.util.Map.of(), "git", "status", "--porcelain");
-    return status.exitCode() == 0 && status.output().isBlank();
+    // Only an explicit CLEAN from the daemon counts. Unknown — no live daemon, none reported yet,
+    // or no registry bean at all — is treated as dirty and refuses the operation. The host has no
+    // second opinion to fall back on any more: the `docker exec git status` this used to run went
+    // into the daemon with the rest of the in-container git.
+    return !gitStatus.isUnsatisfied() && gitStatus.get().isClean(wt.workspaceId).orElse(false);
   }
 
   /**
@@ -607,8 +582,11 @@ public class WorkspaceService {
         || !containers.exists(containers.containerName(sourceWorkspace.workspaceId, repoId))) {
       return;
     }
+    // No push from here: requireCleanWorkingTree has just established the daemon reports CLEAN,
+    // and the daemon auto-pushes committed work as it goes, so origin already has the source
+    // branch. The `docker exec git push` this used to run was a host-side second opinion on state
+    // the daemon owns.
     requireCleanWorkingTree(repoId, sourceWorkspace, "integrate");
-    containerGit(repoId, sourceWorkspace.workspaceId, "push", "origin", sourceWorkspace.branch);
   }
 
   /** True when another workspace forks from {@code branch} (i.e. lists it as its parent). */
@@ -989,9 +967,9 @@ public class WorkspaceService {
     processExecutor.submit(
         () -> {
           try {
-            // Preserve committed-but-unpushed work before the container is destroyed (the tree is
-            // clean, so there is nothing uncommitted to lose — only local commits to back up).
-            pushBranch(repoId, workspaceId, branch);
+            // No backup push: requireCleanForRecreate established the daemon reports CLEAN, and
+            // the daemon pushes committed work as it lands, so origin is already current. There is
+            // nothing for the host to preserve that the daemon has not already sent.
             // Settle live services gracefully so their disappearance reads as deliberate, not a
             // crash
             // the restart policy would resurrect — the same courtesy stopContainer/discard extend.
@@ -1230,20 +1208,6 @@ public class WorkspaceService {
     }
   }
 
-  /**
-   * Best-effort push of a workspace's branch to origin from inside its container (no-op if absent).
-   */
-  void pushBranch(String repoId, String workspaceId, String branch) {
-    String container = containers.containerName(workspaceId, repoId);
-    if (branch == null || branch.isBlank() || !containers.exists(container)) {
-      return;
-    }
-    try {
-      containers.exec(container, "/workspace", java.util.Map.of(), "git", "push", "origin", branch);
-    } catch (RuntimeException ignored) {
-      // best effort — a failed push must not block the stop it guards
-    }
-  }
 
   /**
    * Gracefully pauses a workspace's container: pushes its branch to origin first (a durability
@@ -1260,7 +1224,9 @@ public class WorkspaceService {
         workspaceRepository
             .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
-    pushBranch(repoId, workspaceId, workspace.branch);
+    // No durability push before the stop: the daemon pushes committed work as it lands, so origin
+    // is current by the time we get here. A stop is a pause anyway — the container and its
+    // /workspace clone survive it, so uncommitted work is not at risk either.
     // Settle the workspace's services before the container stops, so a live service's disappearance
     // reads as a deliberate STOPPED (graceful: signal + grace) instead of a crash the restart
     // policy
@@ -1492,112 +1458,6 @@ public class WorkspaceService {
     }
   }
 
-  /**
-   * Fast-forwards a workspace's branch to the latest commit of its parent branch. Runs {@code git
-   * merge --ff-only} inside the workspace so the ref, index and working tree all advance together;
-   * the {@code --ff-only} flag refuses (and reports an error) when the branch has diverged or the
-   * working tree is dirty, which surfaces as a 400.
-   */
-  public String fastForwardWorkspace(String repoId, String workspaceId) {
-    repositories.require(repoId);
-
-    Workspace workspace =
-        workspaceRepository
-            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
-
-    String parent = workspace.parent;
-    if (parent == null || parent.isBlank()) {
-      throw new BadRequestException(
-          "Workspace '" + workspaceId + "' has no parent to fast-forward to");
-    }
-    if (parent.startsWith("-")) {
-      throw new BadRequestException("Invalid parent branch");
-    }
-    requireCleanWorkingTree(repoId, workspace, "fast-forward");
-
-    // Inside the container: fetch, first fast-forward the container's own branch to origin's ref
-    // (it may have advanced out-of-band, e.g. a host-side integration into it), then fast-forward
-    // onto the parent and push. --ff-only refuses (400) on divergence or a dirty tree — so a branch
-    // that diverged from its parent is correctly rejected even though the container was stale.
-    ensureContainer(repoId, workspaceId); // re-provision a lost container from the branch first
-    try {
-      containerGit(repoId, workspaceId, "fetch", "origin");
-      containerGit(repoId, workspaceId, "merge", "--ff-only", "origin/" + workspace.branch);
-      String output = containerGit(repoId, workspaceId, "merge", "--ff-only", "origin/" + parent);
-      containerGit(repoId, workspaceId, "push", "origin", workspace.branch);
-      return output;
-    } catch (Exception e) {
-      throw new BadRequestException(
-          "Cannot fast-forward workspace '"
-              + workspaceId
-              + "' to '"
-              + parent
-              + "': "
-              + e.getMessage());
-    }
-  }
-
-  /**
-   * Merges a workspace's parent branch into it so a diverged branch (one with its own commits) can
-   * catch up to the parent. Unlike {@link #fastForwardWorkspace}, this creates a merge commit, so
-   * it works when {@code git merge --ff-only} can't. Runs inside the workspace. If the merge hits
-   * conflicts it is aborted — leaving the workspace exactly as it was — and a 400 is returned. The
-   * UI only offers this when the trial merge was clean, but the abort keeps the workspace usable
-   * should state have changed underneath.
-   */
-  @Transactional
-  public String updateWorkspaceFromParent(String repoId, String workspaceId) {
-    repositories.require(repoId);
-
-    Workspace workspace =
-        workspaceRepository
-            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
-
-    String parent = workspace.parent;
-    if (parent == null || parent.isBlank()) {
-      throw new BadRequestException("Workspace '" + workspaceId + "' has no parent to update from");
-    }
-    if (parent.startsWith("-")) {
-      throw new BadRequestException("Invalid parent branch");
-    }
-    requireCleanWorkingTree(repoId, workspace, "merge the parent into");
-
-    ensureContainer(repoId, workspaceId); // re-provision a lost container from the branch first
-    String container = containers.containerName(workspaceId, repoId);
-
-    // Inside the container: fetch, sync the container's own branch to origin's ref (it may have
-    // advanced out-of-band), then merge the parent in (a merge commit — works where ff-only can't).
-    // Identity arrives as container-level GIT_* env (WorkspaceContainerFactory). On conflict, abort
-    // so the workspace stays usable and return a 400. On success, push so the origin reflects the
-    // merge.
-    try {
-      containerGit(repoId, workspaceId, "fetch", "origin");
-      containerGit(repoId, workspaceId, "merge", "--ff-only", "origin/" + workspace.branch);
-    } catch (Exception e) {
-      throw new InternalServerErrorException(
-          "Failed to fetch '" + parent + "' into '" + workspaceId + "': " + e.getMessage());
-    }
-    ContainerRuntime.ExecResult result =
-        containers.exec(
-            container,
-            "/workspace",
-            java.util.Map.of(),
-            "git",
-            "merge",
-            "--no-edit",
-            "origin/" + parent);
-
-    if (result.exitCode() != 0) {
-      containers.exec(container, "/workspace", java.util.Map.of(), "git", "merge", "--abort");
-      throw new BadRequestException(
-          "Cannot merge '" + parent + "' into '" + workspaceId + "' without conflicts");
-    }
-    containerGit(repoId, workspaceId, "push", "origin", workspace.branch);
-    recordEvent(workspace, WorkspaceEventType.UPDATED_FROM_PARENT, null, parent, null);
-    return result.output();
-  }
 
   public void discardWorkspace(String repoId, String workspaceId) {
     discardWorkspace(repoId, workspaceId, null);

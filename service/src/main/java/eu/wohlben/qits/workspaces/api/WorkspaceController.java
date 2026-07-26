@@ -195,31 +195,12 @@ public class WorkspaceController {
         result.commitHash(), result.hasConflicts(), result.output());
   }
 
-  public static record FastForwardWorkspaceRequest() {
-    public record Response(String output) {}
-  }
-
-  @POST
-  @Path("/{workspaceId}/fast-forward")
-  public FastForwardWorkspaceRequest.Response fastForward(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    var output = workspaceService.fastForwardWorkspace(repoId, workspaceId);
-    return new FastForwardWorkspaceRequest.Response(output);
-  }
-
-
-  public static record UpdateFromParentRequest() {
-    public record Response(String output) {}
-  }
-
-  @POST
-  @Path("/{workspaceId}/update-from-parent")
-  public UpdateFromParentRequest.Response updateFromParent(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    var output = workspaceService.updateWorkspaceFromParent(repoId, workspaceId);
-    return new UpdateFromParentRequest.Response(output);
-  }
-
+  // POST /{workspaceId}/fast-forward and /{workspaceId}/update-from-parent used to live here. Both
+  // were `docker exec git fetch/merge --ff-only/merge --no-edit/push` against the checkout inside
+  // the container — the host reaching past the daemon into the workspace it owns. They moved to the
+  // workspace-daemon's own HTTP API, where the checkout is a local java.nio path and the git runs
+  // in-process, alongside /files, /detection and /component-map. The host keeps only the state it
+  // owns: the Workspace row, the parent, and the UPDATED_FROM_PARENT event.
 
   public static record DiscardWorkspaceRequest(String result) {
     public record Response(boolean success) {}

@@ -18,6 +18,25 @@ public interface WorkspaceGitStatus {
   /**
    * Whether {@code workspaceId}'s working tree is currently clean ({@code git status --porcelain}
    * empty), or {@link Optional#empty()} if unknown (no live daemon / not yet reported).
+   *
+   * <p><b>Empty is not "clean".</b> Every caller gating a destructive operation must treat unknown
+   * as <em>dirty</em> and refuse: only an explicit {@code true} is permission to proceed. The host
+   * no longer has a way to find out for itself — the {@code docker exec git status} it used to fall
+   * back on moved into the daemon with the rest of the in-container git — so "I cannot tell" and
+   * "there are no changes" are genuinely different answers and must not be collapsed.
    */
   Optional<Boolean> isClean(String workspaceId);
+
+  /**
+   * The commit {@code workspaceId}'s checkout is currently on, as the daemon last reported it, or
+   * {@link Optional#empty()} if unknown (no live daemon / not yet reported).
+   *
+   * <p>Arrives on the same {@code GitStatus} frame as {@link #isClean} — the daemon recomputes both
+   * from one {@code git status --porcelain=v2 --branch} — so the two are always consistent with
+   * each other and with the same instant. Comparing this against the origin's ref is how the host
+   * answers "is this workspace fully pushed" without reaching into the container; the daemon
+   * auto-pushes committed work, so a match is the steady state and a mismatch means work in flight.
+   * Same fail-closed rule as {@link #isClean}: empty means refuse, not "in sync".
+   */
+  Optional<String> head(String workspaceId);
 }

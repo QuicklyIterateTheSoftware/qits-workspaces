@@ -56,32 +56,12 @@ public class IntegrateSyncsSourceContainerTest {
     return repoId;
   }
 
-  @Test
-  public void integrationIncludesCommitsThatOnlyLiveInTheSourceContainer() throws Exception {
-    String repoId = clonedRepo();
-    // A workspace forks feat-b off master, then a commit is made INSIDE its container but never
-    // pushed — the origin ref for feat-b still sits at master's tip.
-    workspaceService.createWorkspace(repoId, "feat-ws", "master", "feat-b", null);
-    workspaceService.ensureContainer(repoId, "feat-ws");
-    String container = containers.containerName("feat-ws", repoId);
-    containers.exec(
-        container,
-        "/workspace",
-        Map.of(),
-        "bash",
-        "-lc",
-        "echo hi > unpushed.txt && git add unpushed.txt && git commit -m 'unpushed work'");
+  // MOVED: integrationIncludesCommitsThatOnlyLiveInTheSourceContainer.
+  // It asserted that integrating a source workspace first pushes that workspace's container-only
+  // commits, so the integration sees them. requireSyncedSourceForIntegration no longer runs that
+  // `docker exec git push`; it requires the daemon to report CLEAN and relies on the daemon having
+  // pushed. The "no commit is left behind" property is now the daemon's -- unowned here.
 
-    // Integrating feat-b into master must first push the container commit, so unpushed.txt lands in
-    // master. Before the fix, mergeBranch pushed nothing and merged a stale (empty) ref.
-    workspaceService.mergeBranch(repoId, "feat-b", "master");
-
-    Path originPath = Path.of(dataDir, repoId, "origin");
-    String tree = git.exec(originPath.toFile(), "git", "ls-tree", "-r", "--name-only", "master");
-    assertTrue(
-        tree.lines().anyMatch("unpushed.txt"::equals),
-        "the source container's unpushed commit must be integrated into master, got:\n" + tree);
-  }
 
   @Test
   public void integrationRefusesADirtySourceWorkingTree() throws Exception {

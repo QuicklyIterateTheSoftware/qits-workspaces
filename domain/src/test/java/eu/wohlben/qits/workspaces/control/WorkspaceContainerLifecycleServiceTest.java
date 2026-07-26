@@ -321,26 +321,12 @@ public class WorkspaceContainerLifecycleServiceTest {
         "an untracked working-tree file survives stop -> resume");
   }
 
-  @Test
-  public void gracefulStopPushesUnpushedWorkSoRecreationIsLossless() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
-    String container = containers.containerName("feat", repoId);
-    String head = commitInContainer(container, "graceful.txt");
+  // MOVED: gracefulStopPushesUnpushedWorkSoRecreationIsLossless.
+  // It asserted that stopContainer pushes committed-but-unpushed work to origin before pausing, so
+  // a later recreate is lossless. The host no longer pushes: the daemon auto-pushes committed work
+  // as it lands, so origin is already current by the time a stop arrives. The lossless-recreate
+  // guarantee is real but is now the daemon's, and asserting it needs a live daemon -- unowned here.
 
-    // A graceful stop pushes before removing the container...
-    workspaceService.stopContainer(repoId, "feat");
-    Path originPath = Path.of(dataDir, repoId, "origin");
-    assertEquals(
-        head,
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
-        "graceful stop pushed the commit to origin");
-
-    // ...so the recreated container still has it.
-    workspaceService.ensureContainer(repoId, "feat");
-    assertEquals(head, containerHead(container), "recreated container has the pushed commit");
-  }
 
   @Test
   public void deleteContainerRemovesTheContainerButKeepsBranchAndWorkspace() throws Exception {
@@ -490,6 +476,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
+    gitStatus.report("feat", true); // a discard is destructive: only an explicit CLEAN permits it
     stoppingRecorder.clear();
 
     workspaceService.discardWorkspace(repoId, "feat");
@@ -505,32 +492,13 @@ public class WorkspaceContainerLifecycleServiceTest {
   // --- Dirty-tree guards: merges/abandon are refused server-side when the working tree is dirty,
   // matching the UI that hides/reroutes those actions on a daemon-reported dirty workspace.
 
-  @Test
-  public void fastForwardRefusesADirtyWorkspace() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
-    makeDirty(containers.containerName("feat", repoId));
-
-    BadRequestException ex =
-        assertThrows(
-            BadRequestException.class, () -> workspaceService.fastForwardWorkspace(repoId, "feat"));
-    assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
-  }
-
-  @Test
-  public void updateFromParentRefusesADirtyWorkspace() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
-    makeDirty(containers.containerName("feat", repoId));
-
-    BadRequestException ex =
-        assertThrows(
-            BadRequestException.class,
-            () -> workspaceService.updateWorkspaceFromParent(repoId, "feat"));
-    assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
-  }
+  // MOVED: fastForwardRefusesADirtyWorkspace / updateFromParentRefusesADirtyWorkspace.
+  // Both drove WorkspaceService.fastForwardWorkspace / updateWorkspaceFromParent, which are now the
+  // workspace-daemon's HTTP routes -- the git they ran was `docker exec` inside the container. The
+  // dirty-tree guard they asserted still exists here (requireCleanWorkingTree, now fail-closed on
+  // the daemon's report) and is covered by the abandon/integrate cases below; what is NOT covered
+  // anywhere is that fast-forward and update-from-parent themselves refuse a dirty tree. That
+  // assertion belongs with the routes, in qits-workspace-daemon.
 
   @Test
   public void integrateRefusesADirtyWorkspaceBranch() throws Exception {
@@ -538,6 +506,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
     makeDirty(containers.containerName("feat", repoId));
+    gitStatus.report("feat", false); // the daemon is what tells the host a tree is dirty
 
     BadRequestException ex =
         assertThrows(
@@ -552,6 +521,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
     makeDirty(containers.containerName("feat", repoId));
+    gitStatus.report("feat", false); // the daemon is what tells the host a tree is dirty
 
     BadRequestException ex =
         assertThrows(
@@ -568,6 +538,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(repoId, "feat");
+    gitStatus.report("feat", true); // "clean" is now a daemon report, not a host git status
 
     // A clean working tree passes the guard: abandon proceeds and drops the workspace off the list.
     workspaceService.discardWorkspace(repoId, "feat");
@@ -631,6 +602,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.ensureContainer(repoId, "feat");
     assertTrue(
         workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
+    gitStatus.report("feat", true); // a discard is destructive: only an explicit CLEAN permits it
 
     // Abandon (discard) throws the work away: container + branch + volume all go.
     workspaceService.discardWorkspace(repoId, "feat");

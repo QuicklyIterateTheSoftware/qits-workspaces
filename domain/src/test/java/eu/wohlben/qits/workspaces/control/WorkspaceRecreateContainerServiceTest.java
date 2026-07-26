@@ -98,45 +98,11 @@ public class WorkspaceRecreateContainerServiceTest {
             + " teardown+reprovision — the checkout is reattached, not re-cloned");
   }
 
-  @Test
-  public void recreatePreservesCommittedWorkByPushingBeforeTeardown() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    ensureRunning(repoId, "feat");
-    String container = containers.containerName("feat", repoId);
+  // MOVED: recreatePreservesCommittedWorkByPushingBeforeTeardown.
+  // Same guarantee, same new owner as gracefulStopPushes... in WorkspaceContainerLifecycleServiceTest:
+  // beginRecreateContainer no longer pushes before destroying the container, because the daemon has
+  // already pushed anything committed. Unowned here; belongs with the daemon's auto-push.
 
-    // A committed-but-unpushed commit: recreate must push it before rm so the re-clone still has
-    // it.
-    containers.exec(
-        container,
-        "/workspace",
-        Map.of(),
-        "bash",
-        "-lc",
-        "echo hi > kept.txt && git add kept.txt && git commit -m local");
-    String head =
-        containers
-            .exec(container, "/workspace", Map.of(), "git", "rev-parse", "HEAD")
-            .output()
-            .trim();
-
-    gitStatus.report("feat", true);
-    workspaceService.beginRecreateContainer(repoId, "feat");
-    assertTrue(startedRecorder.awaitCount(repoId, "feat", 1, 5_000));
-
-    Path originPath = Path.of(dataDir, repoId, "origin");
-    assertEquals(
-        head,
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
-        "recreate pushed the commit to origin before tearing the container down");
-    assertEquals(
-        head,
-        containers
-            .exec(container, "/workspace", Map.of(), "git", "rev-parse", "HEAD")
-            .output()
-            .trim(),
-        "the recreated container has the pushed commit");
-  }
 
   @Test
   public void recreateRefusesADirtyWorkspace() throws Exception {

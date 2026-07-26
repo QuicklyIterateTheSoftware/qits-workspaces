@@ -187,59 +187,15 @@ public interface ContainerRuntime {
    */
   List<VolumeInfo> listWorkspaceVolumes();
 
-  // --- Service sessions: long-runners decoupled from the qits JVM ------------------------------
+  // --- Service sessions ------------------------------------------------------------------------
   //
-  // A service must outlive a qits restart and stay observable across one. These methods run it as a
-  // detached session inside the container (a tmux session for docker; a plain setsid process for
-  // the
-  // test fake) whose combined output is mirrored to {@link #serviceLogPath} — the durable line
-  // stream
-  // qits tails for the ready-pattern, observers, and per-line persistence. Liveness and stop go
-  // through the session, not a host-side client, so killing qits leaves the service running and a
-  // fresh qits reconciles it from {@link #serviceAlive}.
+  // Deliberately absent. Services (dev servers) are spawned, supervised, restarted and stopped by
+  // the in-container workspace-daemon, which owns the process and pushes every lifecycle transition
+  // home over the control socket; ServiceSupervisor is only the host-side projection of that, and
+  // WorkspaceServiceDriver the outbound half. The tmux-over-`docker exec` verbs that used to live
+  // here (startService/serviceAlive/serviceExitCode/signalService/killService/serviceLogPath/
+  // attachServiceCommand) were the pre-daemon host-exec supervisor, already dead code when this
+  // repo was cut (migration-plan.md §3.3) and removed with it. There is no host-execution
+  // fallback: a workspace with no live daemon cannot run a service, and that is the honest state.
 
-  /**
-   * Launch {@code script} as a detached service session named by {@code serviceId} inside {@code
-   * container}, running on a PTY in {@code /workspace}. {@code env} is applied to the session and
-   * inherited by everything it forks. Combined stdout/stderr is mirrored to {@link
-   * #serviceLogPath}; the session's exit code (when it ends on its own) is recorded for {@link
-   * #serviceExitCode}. A stale same-id session is cleared first. Best-effort — throws only on a
-   * runtime failure.
-   */
-  void startService(String container, String serviceId, String script, Map<String, String> env);
-
-  /** Whether the service session named {@code serviceId} is currently running. */
-  boolean serviceAlive(String container, String serviceId);
-
-  /**
-   * The exit code recorded when the service session ended on its own, or null if it is still
-   * running or was killed before recording one (a kill is treated as a failure by the caller).
-   */
-  Integer serviceExitCode(String container, String serviceId);
-
-  /**
-   * Deliver {@code signal} (e.g. {@code TERM}) to the service session's process group — the
-   * graceful half of a stop. Returns false if no session is running.
-   */
-  boolean signalService(String container, String serviceId, String signal);
-
-  /** Force-stop the service session: SIGKILL its process group and tear the session down. */
-  void killService(String container, String serviceId);
-
-  /**
-   * The container-side path of the service's mirrored combined-output log — the {@code tail -F}
-   * target qits follows for the ready-pattern, observers, and persistence.
-   */
-  String serviceLogPath(String serviceId);
-
-  /**
-   * The container-side shell command that opens an <em>interactive</em> PTY onto the running
-   * service session — {@code tmux attach} for docker. Run inside a {@code docker exec -it} client
-   * (the command registry's PTY path) so the browser can drive full-screen apps (e.g. Quarkus dev's
-   * {@code [r]}/{@code [e]} keys). This is the terminal half of the split introduced by Increment 2
-   * of tmux-backed services: the background {@link #serviceLogPath} tail keeps feeding the durable
-   * pipeline (observers/ready/persistence), while this attach client is ephemeral — killing it only
-   * detaches the client, leaving the detached service session running.
-   */
-  String attachServiceCommand(String serviceId);
 }

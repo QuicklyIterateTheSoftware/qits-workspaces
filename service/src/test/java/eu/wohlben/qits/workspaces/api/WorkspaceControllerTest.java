@@ -233,72 +233,7 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode());
   }
 
-  @Test
-  public void testFastForwardAdvancesBranchToParent() {
-    String repoId = createProjectAndRepository();
 
-    // parent-wt owns parent-branch (== master); child-wt forks child-branch off it, so the two
-    // start at the same commit.
-    createWorkspace(repoId, "parent-wt", "master", "parent-branch");
-    createWorkspace(repoId, "child-wt", "parent-branch", "child-branch");
-
-    // Advance parent-branch by merging the (diverged) feature branch into it. child-branch now
-    // lags strictly behind parent-branch with no commits of its own — a clean fast-forward.
-    createWorkspace(repoId, "src-wt", "feature", "src-branch");
-    mergeInto(repoId, "src-wt", "parent-branch");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body(
-            "entries.find { it.workspace.workspaceId == 'child-wt' }.workspace.behind",
-            greaterThan(0))
-        .body(
-            "entries.find { it.workspace.workspaceId == 'child-wt' }.workspace.ahead", equalTo(0));
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .post("/api/repositories/" + repoId + "/workspaces/child-wt/fast-forward")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode());
-
-    // After fast-forwarding, child-branch sits on parent-branch's tip: no longer ahead or behind.
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body(
-            "entries.find { it.workspace.workspaceId == 'child-wt' }.workspace.behind", equalTo(0))
-        .body(
-            "entries.find { it.workspace.workspaceId == 'child-wt' }.workspace.ahead", equalTo(0));
-  }
-
-  @Test
-  public void testFastForwardRejectsDivergedBranch() {
-    String repoId = createProjectAndRepository();
-
-    createWorkspace(repoId, "dv-parent", "master", "dv-parent-branch");
-    createWorkspace(repoId, "dv-child", "dv-parent-branch", "dv-child-branch");
-    createWorkspace(repoId, "dv-src", "feature", "dv-src-branch");
-
-    // Merge feature into both branches independently: each gets its own merge commit, so the
-    // child branch ends up both ahead of and behind its parent — a fast-forward can't apply.
-    mergeInto(repoId, "dv-src", "dv-parent-branch");
-    mergeInto(repoId, "dv-src", "dv-child-branch");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .post("/api/repositories/" + repoId + "/workspaces/dv-child/fast-forward")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
 
   @Test
   public void testDivergedButCleanWorkspaceReportsNoConflict() throws Exception {
@@ -359,69 +294,19 @@ public class WorkspaceControllerTest {
             equalTo(true));
   }
 
-  @Test
-  public void testUpdateFromParentMergesDivergedBranch() throws Exception {
-    String repoId = createProjectAndRepository();
 
-    createWorkspace(repoId, "up-parent", "master", "up-parent-branch");
-    createWorkspace(repoId, "up-child", "up-parent-branch", "up-child-branch");
+  // MOVED with the routes: the four fast-forward / update-from-parent cases.
+  //
+  //   testFastForwardAdvancesBranchToParent
+  //   testFastForwardRejectsDivergedBranch
+  //   testUpdateFromParentMergesDivergedBranch
+  //   testUpdateFromParentRejectsConflictAndLeavesWorkspaceUsable
+  //
+  // POST /{workspaceId}/fast-forward and /update-from-parent are now workspace-daemon routes -- the
+  // git they drove ran `docker exec` inside the container the daemon owns. These are real
+  // behavioural cases (ff-only refuses divergence; a conflicting merge aborts and leaves the
+  // workspace usable) and they should be re-asserted against the daemon's HTTP API, not lost.
 
-    // Diverge cleanly: each branch adds its own distinct file.
-    commitFile(repoId, "up-parent", "parent-only.txt", "from parent\n", "parent commit");
-    commitFile(repoId, "up-child", "child-only.txt", "from child\n", "child commit");
-
-    // A fast-forward can't apply (the child has its own commit), but a merge can.
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .post("/api/repositories/" + repoId + "/workspaces/up-child/update-from-parent")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode());
-
-    // After merging the parent in, the child contains the parent's commit, so it's no longer
-    // behind.
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body(
-            "entries.find { it.workspace.workspaceId == 'up-child' }.workspace.behind", equalTo(0));
-  }
-
-  @Test
-  public void testUpdateFromParentRejectsConflictAndLeavesWorkspaceUsable() throws Exception {
-    String repoId = createProjectAndRepository();
-
-    createWorkspace(repoId, "uc-parent", "master", "uc-parent-branch");
-    createWorkspace(repoId, "uc-child", "uc-parent-branch", "uc-child-branch");
-
-    // Both edit the same line: a merge of the parent into the child would conflict.
-    commitFile(repoId, "uc-parent", "conflict.txt", "parent version\n", "parent edit");
-    commitFile(repoId, "uc-child", "conflict.txt", "child version\n", "child edit");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .post("/api/repositories/" + repoId + "/workspaces/uc-child/update-from-parent")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-
-    // The aborted merge must leave the workspace exactly as it was: still diverged, not mid-merge.
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body(
-            "entries.find { it.workspace.workspaceId == 'uc-child' }.workspace.behind",
-            greaterThan(0))
-        .body(
-            "entries.find { it.workspace.workspaceId == 'uc-child' }.workspace.ahead",
-            greaterThan(0));
-  }
 
 
 

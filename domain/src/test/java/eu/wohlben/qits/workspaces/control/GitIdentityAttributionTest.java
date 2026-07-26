@@ -78,38 +78,14 @@ public class GitIdentityAttributionTest {
         "the host-side synthetic merge is authored and committed by the configured identity");
   }
 
-  @Test
-  public void containerMergeCommitsAsTheConfiguredIdentityEvenOverStaleCloneConfig()
-      throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "up-parent", "master", "up-parent-branch", null);
-    workspaceService.createWorkspace(
-        repoId, "up-child", "up-parent-branch", "up-child-branch", null);
-    workspaceService.ensureContainer(repoId, "up-parent");
-    workspaceService.ensureContainer(repoId, "up-child");
-    String parentContainer = containers.containerName("up-parent", repoId);
-    String childContainer = containers.containerName("up-child", repoId);
+  // MOVED: containerMergeCommitsAsTheConfiguredIdentityEvenOverStaleCloneConfig.
+  // It asserted that the container-side merge commit carries the configured GIT_* identity
+  // rather than a stale user.* left in the clone's .git/config -- an upgrade-path regression
+  // guard. It drove updateWorkspaceFromParent, which is now a workspace-daemon route, and the
+  // merge it checked runs in the daemon's own process. The host-side half
+  // (hostSideMergeCommitsAsTheConfiguredIdentity, above) still covers the bare-origin merge.
+  // The container-side assertion is currently unowned and belongs in qits-workspace-daemon.
 
-    // Diverge cleanly: each branch adds its own distinct file (the child's own commit is what
-    // forces a true merge commit instead of a fast-forward). Pushed for the parent so the child's
-    // fetch sees it.
-    commitFile(parentContainer, "parent-only.txt");
-    containers.exec(
-        parentContainer, "/workspace", Map.of(), "git", "push", "origin", "up-parent-branch");
-    commitFile(childContainer, "child-only.txt");
-    // The upgrade path: a container provisioned before identity became env-delivered still has
-    // `user.*` in its clone's .git/config. Identity env must beat it for author AND committer.
-    containers.exec(
-        childContainer, "/workspace", Map.of(), "git", "config", "user.email", "stale@local");
-    containers.exec(childContainer, "/workspace", Map.of(), "git", "config", "user.name", "stale");
-
-    workspaceService.updateWorkspaceFromParent(repoId, "up-child");
-
-    assertEquals(
-        IDENTITY + "|" + IDENTITY,
-        tipAttribution(repoId, "refs/heads/up-child-branch"),
-        "the container-side merge commit carries the configured identity, not the stale config");
-  }
 
   /** Commits {@code file} in the container's /workspace (identity comes from the container env). */
   private void commitFile(String container, String file) {
