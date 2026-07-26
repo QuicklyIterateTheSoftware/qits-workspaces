@@ -624,7 +624,7 @@ public class WorkspaceDaemonRegistry
         // degrade-loudly warning and fall back to the empty config, same end state as a structural
         // parse error in-container.
         config = QitsConfig.EMPTY;
-        warning = warning != null ? warning : "invalid .qits-config.yml: " + e.getMessage();
+        warning = warning != null ? warning : "invalid qits config: " + e.getMessage();
       }
       return Optional.of(new WorkspaceConfigView(config, warning));
     } catch (InterruptedException e) {

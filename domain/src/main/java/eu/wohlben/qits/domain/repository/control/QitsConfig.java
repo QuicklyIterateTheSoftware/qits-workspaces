@@ -7,8 +7,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The parsed, framework-free representation of a workspace checkout's committed {@code
- * .qits-config.yml}. The file is <strong>authoritative</strong>: it is read in-container by the
+ * The parsed, framework-free representation of a workspace checkout's committed qits config file
+ * ({@code .config/qits/repository.yml}, or the legacy root-level {@code .qits-config.yml} as
+ * fallback). The file is <strong>authoritative</strong>: it is read in-container by the
  * workspace-daemon and surfaced to the host over the control socket as the Part-2 wire schema
  * ({@link WorkspaceConfigView} wraps it; {@code WorkspaceDaemonRegistry} Jackson-deserializes it).
  * There is no host-side DB config store and no reconciler — declared actions/services/bootstrap
