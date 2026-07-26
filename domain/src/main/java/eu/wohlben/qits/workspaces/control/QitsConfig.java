@@ -1,8 +1,5 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.entity.RepositoryArchetype;
-import eu.wohlben.qits.domain.service.entity.HealthCheckKind;
-import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import java.util.List;
 import java.util.Map;
 
@@ -53,8 +50,16 @@ public record QitsConfig(
         && bootstrap.isEmpty();
   }
 
-  /** The {@code repository:} section: fields the file may own on the repository itself. */
-  public record RepositorySection(String mainBranch, RepositoryArchetype archetype) {}
+  /**
+   * The {@code repository:} section: fields the file may own on the repository itself.
+   *
+   * <p>{@code archetype} is a plain String here, not the repositories context's {@code
+   * RepositoryArchetype} enum: this context only carries the value through from the daemon's {@code
+   * ConfigView} — it never branches on it, and the enum's skeleton-directory behaviour and Flyway
+   * check-constraint belong to whoever owns repositories. An unrecognized value therefore
+   * round-trips instead of failing deserialization.
+   */
+  public record RepositorySection(String mainBranch, String archetype) {}
 
   /** One {@code frameworks[]} entry — a detection override/hint, consumed live, never stored. */
   public record FrameworkDecl(String kind, String root) {}

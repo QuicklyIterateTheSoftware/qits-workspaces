@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspaces.dto;
 
-import eu.wohlben.qits.domain.command.dto.CommandDto;
 import eu.wohlben.qits.workspaces.entity.WorkspaceStatus;
 import java.time.Instant;
 import java.util.List;
@@ -16,4 +15,4 @@ public record WorkspaceHistoryDetailDto(
     Instant createdAt,
     Instant resolvedAt,
     List<WorkspaceEventDto> events,
-    List<CommandDto> commands) {}
+    List<WorkspaceCommandDto> commands) {}

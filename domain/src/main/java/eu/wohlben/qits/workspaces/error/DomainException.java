@@ -3,7 +3,7 @@ package eu.wohlben.qits.workspaces.error;
 /**
  * Base for domain-layer errors. Carries an HTTP-ish status code so the web layer can map it to a
  * response without the domain depending on JAX-RS. The {@code service} module maps these via {@code
- * DomainExceptionMapper}.
+ * WorkspacesExceptionMapper}.
  */
 public class DomainException extends RuntimeException {
 

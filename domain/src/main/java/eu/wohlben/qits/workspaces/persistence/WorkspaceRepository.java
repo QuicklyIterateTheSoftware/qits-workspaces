@@ -18,7 +18,7 @@ public class WorkspaceRepository implements PanacheRepository<Workspace> {
   public Optional<Workspace> findActiveByRepositoryAndWorkspaceId(
       String repositoryId, String workspaceId) {
     return find(
-            "repository.id = ?1 and workspaceId = ?2 and status = ?3",
+            "repositoryId = ?1 and workspaceId = ?2 and status = ?3",
             repositoryId,
             workspaceId,
             WorkspaceStatus.ACTIVE)
@@ -26,12 +26,12 @@ public class WorkspaceRepository implements PanacheRepository<Workspace> {
   }
 
   public List<Workspace> findActiveByRepositoryId(String repositoryId) {
-    return list("repository.id = ?1 and status = ?2", repositoryId, WorkspaceStatus.ACTIVE);
+    return list("repositoryId = ?1 and status = ?2", repositoryId, WorkspaceStatus.ACTIVE);
   }
 
   public boolean existsActiveByRepositoryAndWorkspaceId(String repositoryId, String workspaceId) {
     return count(
-            "repository.id = ?1 and workspaceId = ?2 and status = ?3",
+            "repositoryId = ?1 and workspaceId = ?2 and status = ?3",
             repositoryId,
             workspaceId,
             WorkspaceStatus.ACTIVE)
@@ -42,6 +42,6 @@ public class WorkspaceRepository implements PanacheRepository<Workspace> {
 
   /** Every workspace (active + resolved) for a repository, newest first — for the history view. */
   public List<Workspace> findByRepositoryId(String repositoryId) {
-    return list("repository.id = ?1 order by id desc", repositoryId);
+    return list("repositoryId = ?1 order by id desc", repositoryId);
   }
 }

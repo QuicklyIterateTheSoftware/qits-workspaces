@@ -1,26 +1,20 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.AgentActivityState;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
-import eu.wohlben.qits.domain.process.control.TechnicalProcess;
-import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.workspaces.dto.WorkspaceDto;
-import eu.wohlben.qits.workspaces.entity.Repository;
 import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.entity.WorkspaceEvent;
 import eu.wohlben.qits.workspaces.entity.WorkspaceEventType;
 import eu.wohlben.qits.workspaces.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.workspaces.entity.WorkspaceStatus;
-import eu.wohlben.qits.workspaces.persistence.RepositoryRepository;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceEventRepository;
-import eu.wohlben.qits.workspaces.persistence.WorkspacePromptAttachmentRepository;
-import eu.wohlben.qits.workspaces.persistence.WorkspacePromptDraftRepository;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -46,17 +40,20 @@ public class WorkspaceService {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceService.class);
 
-  @Inject RepositoryRepository repositoryRepository;
+  @Inject RepositoryLookup repositories;
 
   @Inject WorkspaceRepository workspaceRepository;
 
   @Inject WorkspaceEventRepository workspaceEventRepository;
 
-  @Inject WorkspacePromptDraftRepository workspacePromptDraftRepository;
+  @Inject WorkspaceMetadataStore workspaceMetadata;
 
-  @Inject WorkspacePromptAttachmentRepository workspacePromptAttachmentRepository;
-
-  @Inject MetadataService metadataService;
+  /**
+   * Fired when a workspace resolves, so other contexts can drop the rows that hang off it. The
+   * delete is soft, so their FK cascade never fires; before the extraction this class reached
+   * across and hard-deleted prompt drafts and attachments itself.
+   */
+  @Inject Event<WorkspaceResolved> workspaceResolvedEvent;
 
   @Inject GitExecutor git;
 
@@ -64,7 +61,11 @@ public class WorkspaceService {
 
   @Inject WorkspaceContainerEventPublisher containerEvents;
 
-  @Inject TechnicalProcessRegistry processes;
+  /**
+   * Optional: the technical-process framework is a cross-context streaming primitive owned by the
+   * application. Absent means the same work runs, unnarrated, with a null process id.
+   */
+  @Inject Instance<WorkspaceProcessTracker> processes;
 
   /**
    * The in-container workspace-daemon's liveness, observed alongside the docker reconciliation
@@ -254,7 +255,7 @@ public class WorkspaceService {
       String workspaceId,
       String branch,
       String parentBranch,
-      TechnicalProcess process) {
+      WorkspaceProcessTracker.Handle process) {
     if (process != null) {
       process.openSegment("docker-run");
     }
@@ -333,9 +334,7 @@ public class WorkspaceService {
   }
 
   public List<WorkspaceDto> listWorkspaces(String repoId) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    repositories.require(repoId);
 
     Path originPath = Path.of(dataDir, repoId, "origin");
     // Live container set (one docker ps), so RUNNING stays accurate even when docker state changed
@@ -752,10 +751,7 @@ public class WorkspaceService {
       String branch,
       String preamble,
       boolean adoptExisting) {
-    var repo =
-        repositoryRepository
-            .findByIdOptional(repoId)
-            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    var repo = repositories.require(repoId);
 
     // `workspaceId` becomes a path segment under the repo's workspaces dir, so it must be a strict
     // slug: no slashes/dots/dashes-leading that could traverse out of the dir or smuggle a git
@@ -802,7 +798,7 @@ public class WorkspaceService {
 
     Workspace workspace = new Workspace();
     workspace.workspaceId = workspaceId;
-    workspace.repository = repo;
+    workspace.repositoryId = repoId;
     workspace.parent = parentBranch;
     workspace.branch = newBranch;
     workspace.status = WorkspaceStatus.ACTIVE;
@@ -814,7 +810,7 @@ public class WorkspaceService {
     WorkspaceMetadata metadata = new WorkspaceMetadata();
     metadata.workspaceId = workspaceId;
     metadata.parent = parentBranch;
-    metadataService.writeWorkspaceMetadata(repoId, metadata);
+    workspaceMetadata.write(repoId, metadata);
 
     return workspace;
   }
@@ -831,10 +827,7 @@ public class WorkspaceService {
    */
   @Transactional
   public Workspace createMainWorkspace(String repoId, String branch) {
-    var repo =
-        repositoryRepository
-            .findByIdOptional(repoId)
-            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    var repo = repositories.require(repoId);
     if (branch == null || branch.isBlank() || branch.startsWith("-")) {
       throw new BadRequestException("Invalid main branch: " + branch);
     }
@@ -854,7 +847,7 @@ public class WorkspaceService {
     // the row below — no branch ref, no container. ensureContainer provisions on first use.
     Workspace workspace = new Workspace();
     workspace.workspaceId = workspaceId;
-    workspace.repository = repo;
+    workspace.repositoryId = repoId;
     workspace.parent = null; // the main branch is the tree root — it has no fork point
     workspace.branch = branch;
     workspace.status = WorkspaceStatus.ACTIVE;
@@ -865,7 +858,7 @@ public class WorkspaceService {
     WorkspaceMetadata metadata = new WorkspaceMetadata();
     metadata.workspaceId = workspaceId;
     metadata.parent = null;
-    metadataService.writeWorkspaceMetadata(repoId, metadata);
+    workspaceMetadata.write(repoId, metadata);
 
     return workspace;
   }
@@ -891,8 +884,10 @@ public class WorkspaceService {
    * clone time from the remote's default), with "master" as the last-resort fallback for a row
    * whose {@code mainBranch} was never populated.
    */
-  private static String defaultMainBranch(Repository repo) {
-    return (repo.mainBranch == null || repo.mainBranch.isBlank()) ? "master" : repo.mainBranch;
+  private static String defaultMainBranch(RepositoryLookup.RepositoryView repo) {
+    return (repo.mainBranch() == null || repo.mainBranch().isBlank())
+        ? "master"
+        : repo.mainBranch();
   }
 
   private record BranchParent(String branch, String parent) {}
@@ -928,9 +923,9 @@ public class WorkspaceService {
   }
 
   /**
-   * The streaming Start: registers a {@link TechnicalProcess} for the workspace <em>before</em> any
+   * The streaming Start: registers a {@link WorkspaceProcessTracker.Handle} for the workspace <em>before</em> any
    * work runs (so the very first {@code docker run} line is captured), spawns {@link
-   * #ensureContainer(String, String, TechnicalProcess)} on a worker thread, and returns the process
+   * #ensureContainer(String, String, WorkspaceProcessTracker.Handle)} on a worker thread, and returns the process
    * id immediately. The browser watches the work — including the asynchronous service auto-start
    * phase — over the process's SSE stream; failures surface there (and in {@code
    * workspace.runtimeError}), not as an HTTP error. Throws 404 in-request when the workspace
@@ -944,7 +939,7 @@ public class WorkspaceService {
                     .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
                     .orElseThrow(
                         () -> new NotFoundException("Workspace not found: " + workspaceId)));
-    TechnicalProcess process = processes.begin(repoId, workspaceId);
+    WorkspaceProcessTracker.Handle process = tracker(repoId, workspaceId);
     processExecutor.submit(
         () -> {
           try {
@@ -952,12 +947,14 @@ public class WorkspaceService {
           } catch (RuntimeException e) {
             // Surface the failure in the stream: settle the open segment failed (appending the
             // message) and emit done. Idempotent — a no-op if the process already ended.
-            process.failProvision(e.getMessage());
+            if (process != null) {
+              process.failProvision(e.getMessage());
+            }
             LOG.debugf(
                 e, "Streamed ensure-container failed for workspace %s/%s", repoId, workspaceId);
           }
         });
-    return process.id();
+    return process == null ? null : process.id();
   }
 
   /**
@@ -988,7 +985,7 @@ public class WorkspaceService {
                         .orElseThrow(
                             () -> new NotFoundException("Workspace not found: " + workspaceId)));
     requireCleanForRecreate(workspaceId);
-    TechnicalProcess process = processes.begin(repoId, workspaceId);
+    WorkspaceProcessTracker.Handle process = tracker(repoId, workspaceId);
     processExecutor.submit(
         () -> {
           try {
@@ -1004,12 +1001,14 @@ public class WorkspaceService {
             // image.
             ensureContainer(repoId, workspaceId, process);
           } catch (RuntimeException e) {
-            process.failProvision(e.getMessage());
+            if (process != null) {
+              process.failProvision(e.getMessage());
+            }
             LOG.debugf(
                 e, "Streamed recreate-container failed for workspace %s/%s", repoId, workspaceId);
           }
         });
-    return process.id();
+    return process == null ? null : process.id();
   }
 
   /**
@@ -1035,14 +1034,14 @@ public class WorkspaceService {
   }
 
   /**
-   * {@link #ensureContainer(String, String)} with an optional {@link TechnicalProcess} receiving
+   * {@link #ensureContainer(String, String)} with an optional {@link WorkspaceProcessTracker.Handle} receiving
    * the work as streamed segments. With a process attached, every outcome also ends the process:
    * the already-running short-circuit completes it as a no-op, a provision failure fails it, and a
    * successful start hands the process id to the async bootstrap-then-service phase via {@link
    * WorkspaceContainerEventPublisher#fireStarted(String, String, String, boolean)} — the process
    * then reaches {@code done} only once the bootstrap chain and the auto-started services settle.
    */
-  private void ensureContainer(String repoId, String workspaceId, TechnicalProcess process) {
+  private void ensureContainer(String repoId, String workspaceId, WorkspaceProcessTracker.Handle process) {
     String container = containers.containerName(workspaceId, repoId);
 
     // Load branch/parent and short-circuit a live container, in its own transaction.
@@ -1130,12 +1129,13 @@ public class WorkspaceService {
                 wt.status = WorkspaceStatus.ABANDONED;
                 wt.resolvedAt = Instant.now();
                 wt.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
-                // The second termination path (beside doDiscard): the workspace is only
-                // soft-deleted, so the draft's FK cascade never fires — hard-delete it here too, or
-                // it orphans.
-                workspacePromptDraftRepository.deleteByWorkspaceId(wt.id);
-                workspacePromptAttachmentRepository.deleteByWorkspaceId(wt.id);
                 recordEvent(wt, WorkspaceEventType.ABANDONED, wt.branch, null, null);
+                // The second termination path (beside doDiscard). The workspace is only
+                // soft-deleted, so no FK cascade fires for the rows other contexts hang off it —
+                // they clean up on this event, inside this transaction.
+                workspaceResolvedEvent.fire(
+                    new WorkspaceResolved(
+                        repoId, workspaceId, wt.id, WorkspaceStatus.ABANDONED));
               });
       // The branch is gone, so any persisted /workspace volume is orphaned work — reap it. The
       // container is already absent on this path (we passed the isRunning/exists branches), so no
@@ -1299,10 +1299,7 @@ public class WorkspaceService {
 
   @Transactional
   public MergeResult mergeWorkspace(String repoId, String workspaceId, String target) {
-    Repository repo =
-        repositoryRepository
-            .findByIdOptional(repoId)
-            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    var repo = repositories.require(repoId);
 
     Workspace workspace =
         workspaceRepository
@@ -1354,12 +1351,9 @@ public class WorkspaceService {
       throw new BadRequestException("Invalid source branch: " + source);
     }
 
-    Repository repo =
-        repositoryRepository
-            .findByIdOptional(repoId)
-            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    var repo = repositories.require(repoId);
 
-    String resolvedTarget = (target == null || target.isBlank()) ? repo.mainBranch : target;
+    String resolvedTarget = (target == null || target.isBlank()) ? repo.mainBranch() : target;
     if (resolvedTarget == null || resolvedTarget.isBlank() || resolvedTarget.startsWith("-")) {
       throw new BadRequestException("Invalid target branch: " + target);
     }
@@ -1383,7 +1377,7 @@ public class WorkspaceService {
       // now (before any source cleanup — target and source are distinct branches).
       notifyIncomingMerge(repoId, resolvedTarget);
       Path originPath = Path.of(dataDir, repoId, "origin");
-      if (canCleanupBranch(repoId, originPath, source, repo.mainBranch)) {
+      if (canCleanupBranch(repoId, originPath, source, repo.mainBranch())) {
         doCleanupBranch(repoId, source, result);
         cleanedUp = true;
       }
@@ -1404,13 +1398,10 @@ public class WorkspaceService {
 
   @Transactional
   public void cleanupBranch(String repoId, String branch, String result) {
-    Repository repo =
-        repositoryRepository
-            .findByIdOptional(repoId)
-            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    var repo = repositories.require(repoId);
 
     Path originPath = Path.of(dataDir, repoId, "origin");
-    if (!canCleanupBranch(repoId, originPath, branch, repo.mainBranch)) {
+    if (!canCleanupBranch(repoId, originPath, branch, repo.mainBranch())) {
       throw new BadRequestException(
           "Branch '"
               + branch
@@ -1508,9 +1499,7 @@ public class WorkspaceService {
    * working tree is dirty, which surfaces as a 400.
    */
   public String fastForwardWorkspace(String repoId, String workspaceId) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    repositories.require(repoId);
 
     Workspace workspace =
         workspaceRepository
@@ -1559,9 +1548,7 @@ public class WorkspaceService {
    */
   @Transactional
   public String updateWorkspaceFromParent(String repoId, String workspaceId) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    repositories.require(repoId);
 
     Workspace workspace =
         workspaceRepository
@@ -1618,9 +1605,7 @@ public class WorkspaceService {
 
   @Transactional
   public void discardWorkspace(String repoId, String workspaceId, String result) {
-    repositoryRepository
-        .findByIdOptional(repoId)
-        .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    repositories.require(repoId);
 
     Workspace workspace =
         workspaceRepository
@@ -1678,17 +1663,26 @@ public class WorkspaceService {
           branch,
           null,
           null);
-      // The prompt draft (and its attachment rows) is pure pre-launch composition state, not a
-      // durable record like the history events — so it is hard-deleted with the workspace (its FK
-      // cascade never fires because the workspace row is only soft-deleted).
-      workspacePromptDraftRepository.deleteByWorkspaceId(workspace.id);
-      workspacePromptAttachmentRepository.deleteByWorkspaceId(workspace.id);
-      metadataService.deleteWorkspaceMetadata(repoId, workspace.workspaceId);
+      // Pre-launch composition state (prompt drafts, their attachments) is not a durable record
+      // like the history events, and its FK cascade never fires because the workspace row is only
+      // soft-deleted. Whoever owns those tables drops them on this event, in this transaction.
+      workspaceResolvedEvent.fire(
+          new WorkspaceResolved(repoId, workspace.workspaceId, workspace.id, resolution));
+      workspaceMetadata.delete(repoId, workspace.workspaceId);
     } catch (InternalServerErrorException e) {
       throw e;
     } catch (Exception e) {
       throw new InternalServerErrorException("Git discard failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * A tracking handle for a streamed operation, or {@code null} when no {@link
+   * WorkspaceProcessTracker} is installed — every call site already treats null as "run it
+   * unnarrated", which is the pre-streaming behaviour.
+   */
+  private WorkspaceProcessTracker.Handle tracker(String repoId, String workspaceId) {
+    return processes.isResolvable() ? processes.get().begin(repoId, workspaceId) : null;
   }
 
   private Path findWorkspacePathForBranch(String repoId, String branch) {

@@ -2,7 +2,7 @@ package eu.wohlben.qits.workspaces.daemonhost;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.workspaces.control.AgentActivityState;
-import eu.wohlben.qits.domain.command.control.CommandService;
+import eu.wohlben.qits.workspaces.control.AgentSessionReporter;
 import eu.wohlben.qits.workspaces.control.ProvisionResult;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
 import eu.wohlben.qits.workspaces.control.WorkspaceAgentActivity;
@@ -45,6 +45,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
 import io.quarkus.websockets.next.WebSocketConnection;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
@@ -106,12 +107,12 @@ public class WorkspaceDaemonRegistry
 
   /**
    * The session-lineage sink for the {@code SessionStart} activity hook — the behaviour-preserving
-   * half of retiring the old direct-to-host {@code /agent-session} hook. {@code service} depends on
-   * {@code domain}, so this framework-free service is injected directly (the Kimi ACP launch path
-   * already calls it in-JVM). Guarded at the call site so a bad/late report can't tear down the
-   * control socket.
+   * half of retiring the old direct-to-host {@code /agent-session} hook. Optional, because the
+   * lineage belongs to the commands context: absent simply drops the report, leaving the
+   * agent-activity rollup below untouched. Guarded at the call site either way, so a bad or late
+   * report can't tear down the control socket.
    */
-  @Inject CommandService commandService;
+  @Inject Instance<AgentSessionReporter> agentSessions;
 
   /**
    * Last working-tree cleanliness each live daemon reported ({@link GitStatus}). In-memory only —
@@ -310,7 +311,7 @@ public class WorkspaceDaemonRegistry
   /**
    * Handle one agent-activity report into its two sinks. First (behaviour-preserving) sink: a
    * {@code SessionStart} still records the session-lineage row via {@link
-   * CommandService#reportAgentSession} — the same DB write the retired direct {@code
+   * AgentSessionReporter#reportAgentSession} — the same DB write the retired direct {@code
    * /agent-session} hook produced, now driven off this daemon frame. Wrapped in try/catch (it
    * throws {@code BadRequestException}/{@code NotFoundException} for an invalid session id or an
    * unknown/stopped command) so an escape can't close the control socket, mirroring {@link
@@ -330,8 +331,12 @@ public class WorkspaceDaemonRegistry
     String repoId = client != null ? client.repoId : null;
     if ("SessionStart".equals(activity.hookEvent()) && activity.sessionId() != null) {
       try {
-        commandService.reportAgentSession(
-            activity.commandId(), activity.sessionId(), activity.transcriptPath());
+        if (agentSessions.isResolvable()) {
+          agentSessions
+              .get()
+              .reportAgentSession(
+                  activity.commandId(), activity.sessionId(), activity.transcriptPath());
+        }
       } catch (RuntimeException e) {
         LOG.debugf(
             "agent-session lineage report failed for command %s: %s",

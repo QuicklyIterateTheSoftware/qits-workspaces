@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspaces.control;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -154,8 +155,16 @@ public class WorkspaceContainerFactory {
    * self-clone name-addressed ({@code /git/<projectId>/<name>}) — the addressing that lets
    * committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part 1).
    * Injected as {@code QITS_WORKSPACE_DAEMON_PROJECT_ID}/{@code …_REPO_NAME}.
+   *
+   * <p>Optional: with no implementation present both env vars stay blank and the daemon
+   * id-addresses instead, which is the same fallback an unresolvable repo already takes.
    */
-  @Inject RepositoryNameResolver nameResolver;
+  @Inject Instance<RepositoryAddressResolver> nameResolver;
+
+  /** The repo's project-scoped name, or empty when unresolvable or no resolver is installed. */
+  private Optional<RepositoryAddressResolver.ProjectScopedName> scopedName(String repoId) {
+    return nameResolver.isResolvable() ? nameResolver.get().resolve(repoId) : Optional.empty();
+  }
 
   /**
    * Resolves the address a container uses to reach qits — the same host {@code workspace-daemon}
@@ -213,7 +222,7 @@ public class WorkspaceContainerFactory {
   /**
    * The {@code qits.*} labels a per-workspace {@code /workspace} volume carries — {@code
    * qits.managed=workspace-volume} (the reconcile filter) plus {@code qits.project} (resolved from
-   * the repo via {@link RepositoryNameResolver}) and the same repo/workspace/branch/parent identity
+   * the repo via {@link RepositoryAddressResolver}) and the same repo/workspace/branch/parent identity
    * the container labels carry, so a dangling volume is human-readable and matchable to its row.
    * Ordered (LinkedHashMap) only for stable argv/log output.
    */
@@ -233,10 +242,7 @@ public class WorkspaceContainerFactory {
    * The project id a repo belongs to (blank when unresolved), for the {@code qits.project} label.
    */
   private String resolveProjectId(String repoId) {
-    return nameResolver
-        .resolve(repoId)
-        .map(RepositoryNameResolver.ProjectScopedName::projectId)
-        .orElse("");
+    return scopedName(repoId).map(RepositoryAddressResolver.ProjectScopedName::projectId).orElse("");
   }
 
   /**
@@ -300,19 +306,19 @@ public class WorkspaceContainerFactory {
     // relative submodule urls resolve natively in-container. Blank when the repo has no project —
     // the
     // daemon then id-addresses (/git/<repositoryId>), mirroring cloneUrl's fallback.
-    Optional<RepositoryNameResolver.ProjectScopedName> scopedName = nameResolver.resolve(repoId);
+    Optional<RepositoryAddressResolver.ProjectScopedName> scopedName = scopedName(repoId);
     // The owning project id, also as a label so it mirrors the per-workspace volume's qits.project
     // (the volume labels carry it for dangling-volume reconcile; the container carries it for
     // symmetry). Blank when the repo has no project.
     container.label(
         "qits.project",
-        scopedName.map(RepositoryNameResolver.ProjectScopedName::projectId).orElse(""));
+        scopedName.map(RepositoryAddressResolver.ProjectScopedName::projectId).orElse(""));
     container.env(
         "QITS_WORKSPACE_DAEMON_PROJECT_ID",
-        scopedName.map(RepositoryNameResolver.ProjectScopedName::projectId).orElse(""));
+        scopedName.map(RepositoryAddressResolver.ProjectScopedName::projectId).orElse(""));
     container.env(
         "QITS_WORKSPACE_DAEMON_REPO_NAME",
-        scopedName.map(RepositoryNameResolver.ProjectScopedName::name).orElse(""));
+        scopedName.map(RepositoryAddressResolver.ProjectScopedName::name).orElse(""));
     // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
     container.env(
         "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN", String.valueOf(bootstrapAutorunEnabled));

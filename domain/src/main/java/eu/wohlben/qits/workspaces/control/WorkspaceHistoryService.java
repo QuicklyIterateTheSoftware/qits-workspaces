@@ -1,8 +1,7 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.domain.command.mapper.CommandMapper;
-import eu.wohlben.qits.domain.command.persistence.CommandRepository;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
+import eu.wohlben.qits.workspaces.dto.WorkspaceCommandDto;
 import eu.wohlben.qits.workspaces.dto.WorkspaceEventDto;
 import eu.wohlben.qits.workspaces.dto.WorkspaceHistoryDetailDto;
 import eu.wohlben.qits.workspaces.dto.WorkspaceHistoryDto;
@@ -10,6 +9,7 @@ import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.entity.WorkspaceEvent;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceEventRepository;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceRepository;
+import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -28,9 +28,11 @@ public class WorkspaceHistoryService {
 
   @Inject WorkspaceEventRepository workspaceEventRepository;
 
-  @Inject CommandRepository commandRepository;
-
-  @Inject CommandMapper commandMapper;
+  /**
+   * Optional: commands are their own context. Absent yields an empty command list rather than an
+   * error — a workspace's narrative and timeline are this context's own, and stand without it.
+   */
+  @Inject Instance<WorkspaceCommandHistory> commandHistory;
 
   @Transactional
   public List<WorkspaceHistoryDto> list(String repoId) {
@@ -50,7 +52,7 @@ public class WorkspaceHistoryService {
             .map(WorkspaceHistoryService::toEventDto)
             .toList();
     var commands =
-        commandRepository.findByWorkspace(id).stream().map(commandMapper::toDto).toList();
+        commandHistory.isResolvable() ? commandHistory.get().commandsFor(id) : List.<WorkspaceCommandDto>of();
     return new WorkspaceHistoryDetailDto(
         workspace.id,
         workspace.workspaceId,
@@ -80,7 +82,7 @@ public class WorkspaceHistoryService {
 
   private Workspace requireWorkspace(String repoId, Long id) {
     Workspace workspace = workspaceRepository.findById(id);
-    if (workspace == null || !workspace.repository.id.equals(repoId)) {
+    if (workspace == null || !workspace.repositoryId.equals(repoId)) {
       throw new NotFoundException("Workspace not found: " + id);
     }
     return workspace;

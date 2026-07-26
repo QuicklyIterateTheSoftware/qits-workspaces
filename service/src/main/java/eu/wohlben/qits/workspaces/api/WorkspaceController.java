@@ -1,19 +1,10 @@
 package eu.wohlben.qits.workspaces.api;
 
-import eu.wohlben.qits.domain.process.control.TechnicalProcessRegistry;
-import eu.wohlben.qits.workspaces.control.CommitService;
-import eu.wohlben.qits.workspaces.control.ComponentMapService;
-import eu.wohlben.qits.workspaces.control.DetectionService;
-import eu.wohlben.qits.workspaces.control.ResolveConflictService;
-import eu.wohlben.qits.workspaces.control.WorkspaceFilesService;
+import eu.wohlben.qits.workspaces.control.WorkspaceProcessTracker;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
-import eu.wohlben.qits.workspaces.dto.CommitLogDto;
-import eu.wohlben.qits.workspaces.dto.ComponentMapDto;
-import eu.wohlben.qits.workspaces.dto.DetectionDto;
-import eu.wohlben.qits.workspaces.dto.LazyDirDto;
 import eu.wohlben.qits.workspaces.dto.WorkspaceDto;
-import eu.wohlben.qits.workspaces.dto.WorkspaceFileContentDto;
 import eu.wohlben.qits.workspaces.mapper.WorkspaceMapper;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -23,10 +14,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 @Path("/repositories/{repoId}/workspaces")
@@ -36,19 +24,14 @@ public class WorkspaceController {
 
   @Inject WorkspaceService workspaceService;
 
-  @Inject CommitService commitService;
-
-  @Inject ResolveConflictService resolveConflictService;
-
-  @Inject WorkspaceFilesService workspaceFilesService;
-
-  @Inject ComponentMapService componentMapService;
-
-  @Inject DetectionService detectionService;
-
   @Inject WorkspaceMapper workspaceMapper;
 
-  @Inject TechnicalProcessRegistry technicalProcesses;
+  /**
+   * Optional, like everywhere else this context touches the technical-process framework: with no
+   * tracker installed {@code /active-process} answers null, which is already its "none is live"
+   * response.
+   */
+  @Inject Instance<WorkspaceProcessTracker> technicalProcesses;
 
   public static record ListWorkspacesRequest() {
     public record Response(List<Entry> entries) {
@@ -137,7 +120,9 @@ public class WorkspaceController {
   public ActiveProcessRequest.Response activeProcess(
       @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
     return new ActiveProcessRequest.Response(
-        technicalProcesses.activeFor(repoId, workspaceId).orElse(null));
+        technicalProcesses.isResolvable()
+            ? technicalProcesses.get().activeFor(repoId, workspaceId).orElse(null)
+            : null);
   }
 
   /**
@@ -222,12 +207,6 @@ public class WorkspaceController {
     return new FastForwardWorkspaceRequest.Response(output);
   }
 
-  @GET
-  @Path("/{workspaceId}/incoming-commits")
-  public CommitLogDto incomingCommits(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    return commitService.listIncomingCommits(repoId, workspaceId);
-  }
 
   public static record UpdateFromParentRequest() {
     public record Response(String output) {}
@@ -241,31 +220,6 @@ public class WorkspaceController {
     return new UpdateFromParentRequest.Response(output);
   }
 
-  public static record ConflictingFilesRequest() {
-    public record Response(List<String> files) {}
-  }
-
-  @GET
-  @Path("/{workspaceId}/conflicts")
-  public ConflictingFilesRequest.Response conflicts(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    return new ConflictingFilesRequest.Response(
-        resolveConflictService.listConflictingFiles(repoId, workspaceId));
-  }
-
-  public static record ResolveConflictRequest() {
-    /** The resolution workspace to watch Claude work in, and the launched command that runs it. */
-    public record Response(String workspaceId, String branch, String commandId) {}
-  }
-
-  @POST
-  @Path("/{workspaceId}/resolve-conflict")
-  public ResolveConflictRequest.Response resolveConflict(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    var result = resolveConflictService.resolveConflict(repoId, workspaceId);
-    return new ResolveConflictRequest.Response(
-        result.workspaceId(), result.branch(), result.commandId());
-  }
 
   public static record DiscardWorkspaceRequest(String result) {
     public record Response(boolean success) {}
@@ -282,74 +236,4 @@ public class WorkspaceController {
     return new DiscardWorkspaceRequest.Response(true);
   }
 
-  public static record ListWorkspaceFilesRequest() {
-    public record Response(List<String> paths, List<LazyDirDto> lazyDirs, String generation) {}
-  }
-
-  @GET
-  @Path("/{workspaceId}/files")
-  public ListWorkspaceFilesRequest.Response listFiles(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
-      @QueryParam("path") String path) {
-    WorkspaceFilesService.Listing listing =
-        workspaceFilesService.listFiles(repoId, workspaceId, path);
-    List<LazyDirDto> lazyDirs =
-        listing.lazyDirs().stream()
-            .map(
-                dir ->
-                    new LazyDirDto(
-                        dir.path(), dir.childCount(), lazyDirHref(repoId, workspaceId, dir.path())))
-            .toList();
-    return new ListWorkspaceFilesRequest.Response(listing.paths(), lazyDirs, listing.generation());
-  }
-
-  /**
-   * The self-referential {@code /files?path=…} link the client follows to open a lazy directory.
-   */
-  private static String lazyDirHref(String repoId, String workspaceId, String dirPath) {
-    return "/api/repositories/"
-        + repoId
-        + "/workspaces/"
-        + workspaceId
-        + "/files?path="
-        + URLEncoder.encode(dirPath, StandardCharsets.UTF_8);
-  }
-
-  @GET
-  @Path("/{workspaceId}/files/content")
-  public WorkspaceFileContentDto fileContent(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
-      @QueryParam("path") String path) {
-    return workspaceFilesService.readFile(repoId, workspaceId, path);
-  }
-
-  /**
-   * The workspace's component map — every {@code @Component} in the working tree with its selector
-   * and source files — so a web-view pick can be attributed to the code that renders it. Scanned
-   * lazily and cached against the working tree's state; a tree without components yields an empty
-   * map, never an error.
-   */
-  @GET
-  @Path("/{workspaceId}/component-map")
-  public ComponentMapDto componentMap(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    return componentMapService.componentMap(repoId, workspaceId);
-  }
-
-  /**
-   * The workspace's framework/project/test-link detection metadata, computed once over the working
-   * tree: the detected projects (pom-refined labels), every framework's resolved membership path
-   * set (the client's filter input), and the source→test link graph with runner kinds. Consumed by
-   * the file browser instead of re-deriving detection from path strings; {@code /files} stays a
-   * pure filesystem transport. Cached against the working tree's state; a tree with no recognised
-   * framework yields empty lists, never an error.
-   */
-  @GET
-  @Path("/{workspaceId}/detection")
-  public DetectionDto detection(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    return detectionService.detect(repoId, workspaceId);
-  }
 }

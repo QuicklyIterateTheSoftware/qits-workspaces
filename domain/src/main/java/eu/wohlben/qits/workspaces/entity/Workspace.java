@@ -7,9 +7,7 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Lob;
-import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import org.hibernate.annotations.CreationTimestamp;
@@ -17,10 +15,15 @@ import org.hibernate.annotations.CreationTimestamp;
 /**
  * A workspace, soft-deleted: cleanup/discard removes the on-disk workspace and branch but keeps
  * this row as the persistent record of the unit of work — its {@link #status}, the markdown {@link
- * #preamble} (why it was created) and {@link #result} (how it ended), and (via the {@code
- * Command.workspace} FK) the commands that ran in it. Its {@link WorkspaceEvent} timeline records
- * what happened. There is no DB unique constraint on {@code (repository, workspaceId)} — resolved
- * rows accumulate; the service enforces at most one {@code ACTIVE} workspace per id.
+ * #preamble} (why it was created) and {@link #result} (how it ended). Its {@link WorkspaceEvent}
+ * timeline records what happened. There is no DB unique constraint on {@code (repositoryId,
+ * workspaceId)} — resolved rows accumulate; the service enforces at most one {@code ACTIVE}
+ * workspace per id.
+ *
+ * <p>Rows in other bounded contexts that belong to a workspace (commands, bootstrap runs, prompt
+ * drafts) reference it by id and are not reachable from here. Because the delete is soft, no FK
+ * cascade ever fires for them; {@link eu.wohlben.qits.workspaces.control.WorkspaceResolved} is the
+ * event they clean up on.
  */
 @Entity
 @Table(name = "workspace")
@@ -31,9 +34,15 @@ public class Workspace extends PanacheEntityBase {
   @Column(name = "workspace_id", nullable = false)
   public String workspaceId;
 
-  @ManyToOne(optional = false)
-  @JoinColumn(name = "repository_id", nullable = false)
-  public Repository repository;
+  /**
+   * The owning repository, by <strong>id only</strong>. Deliberately not a JPA {@code @ManyToOne}:
+   * this context owns its own datasource and Flyway lineage (the {@code artifacts}/{@code ci}
+   * precedent), so it can hold no foreign key into another context's tables. A repository deleted
+   * elsewhere simply leaves its workspaces behind as dangling history; {@link RepositoryLookup} is
+   * how the owning application is consulted about one.
+   */
+  @Column(name = "repository_id", nullable = false)
+  public String repositoryId;
 
   @Column(name = "parent_id")
   public String parent;
