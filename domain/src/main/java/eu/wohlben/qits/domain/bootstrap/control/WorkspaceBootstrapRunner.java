@@ -247,7 +247,8 @@ public class WorkspaceBootstrapRunner {
                     .orElseThrow(
                         () ->
                             new NotFoundException(
-                                "Bootstrap step not declared in .qits-config.yml: " + stepId)))
+                                "Bootstrap step not declared in the workspace qits config: "
+                                    + stepId)))
         .orElse(stepId);
   }
 

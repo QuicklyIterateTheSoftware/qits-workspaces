@@ -173,7 +173,8 @@ public class ServiceSupervisor {
             .findFirst()
             .orElseThrow(
                 () ->
-                    new NotFoundException("Service not declared in .qits-config.yml: " + daemonId));
+                    new NotFoundException(
+                        "Service not declared in the workspace qits config: " + daemonId));
     Key key = new Key(repoId, workspaceId, daemonId);
     Instance existing = instances.get(key);
     if (existing != null && isLive(existing.status)) {
