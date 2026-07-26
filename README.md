@@ -1,8 +1,9 @@
 # qits-workspaces
 
 The **host side** of qits workspaces: the workspace entity and its lifecycle, container
-orchestration, host-side git against the bare origin, the workspace-daemon registry, and the routes
-over them.
+orchestration, host-side git against the bare origin, the workspace-daemon registry, dev-server
+supervision, the bootstrap-chain surface, the technical-process framework, prompt composition,
+feature capture, and the routes over all of it.
 
 A workspace is a branch ref in a repository's bare origin **plus** a per-workspace container that
 clones that branch into `/workspace`. This repo owns everything about that from the host's side of
@@ -33,10 +34,18 @@ the consuming application implements:
 | Port | Required? | Absent means |
 |---|---|---|
 | `RepositoryLookup` | **yes** | won't start — an app without it is misconfigured |
-| `WorkspaceProcessTracker` | no | the same work runs unnarrated; `technicalProcessId` is null |
 | `RepositoryAddressResolver` | no | the daemon id-addresses `/git/<repositoryId>` (its own fallback) |
 | `WorkspaceCommandHistory` | no | a workspace's history shows no commands |
 | `AgentSessionReporter` | no | `SessionStart` lineage is not forwarded |
+| `WorkspaceTerminalSessions` | no | the interactive service terminal refuses the upgrade; the live log is unaffected |
+| `WorkspaceChatInbox` | no | service events are spooled instead of delivered — the same path as "no chat is running" |
+| `WorkspaceProcessTracker` | *implemented here* | `TechnicalProcessRegistry` is the default; the port stays so an application can substitute its own |
+
+One port points the **other way**: `LogLineClassifier` (with `LogSeverity`) is *implemented* here
+and consumed by the command context's log persister, so a workspace's `?severity=` filter and the
+LOG_LEVEL observer agree on what an error is. An application running both registers this
+implementation there. `CommandOutputSink` is the same idea in miniature — a shape handed out, not a
+service called.
 
 In the other direction this context publishes `WorkspaceResolved` when a workspace is integrated or
 abandoned. Because the delete is **soft**, no FK cascade ever fires for rows other contexts hang off
@@ -55,23 +64,34 @@ whichever commit first makes it consume this jar must delete them in the same ch
 
 ## What is deliberately *not* here
 
-Moving to the daemon (it already runs in the container, so these become in-container work with a
-REST surface reachable through the gateway):
+**Already in the daemon**, which is why they are absent here rather than pending:
 
-- file access (`/files`, `/files/content`) — today `docker exec find/cat/realpath`
-- framework detection and the component map (`/detection`, `/component-map`)
-- the bootstrap chain — the daemon already owns execution; only the host's awaiter remained
-- prompt drafts and attachments
-- `.qits-config.yml` parsing — the daemon's `ConfigParser` is the same parser
-- periodic checkpoint push — superseded by the daemon's own auto-push
+- file access (`/files`, `/files/content`) — the daemon's `workspace-daemon-files` module, `java.nio`
+  where the host shelled `docker exec find/cat/realpath`
+- framework detection and the component map (`/detection`, `/component-map`) —
+  `workspace-daemon-detection`
+- bootstrap chain *execution* — the daemon's `BootstrapRunner`. The host's awaiter, the run record
+  and the surface over it are here (`WorkspaceBootstrapRunner`, `workspace_bootstrap_run`)
+- dev-server *execution* — the daemon's `ServiceSupervisor`. The host's projection of it, the event
+  feed and the proxy are here (`ServiceSupervisor`, `service_event`, `ServiceProxyRoute`)
+- `.config/qits/repository.yml` parsing — the daemon's `ConfigParser`. This context holds the shape
+  (`QitsConfig`) and reads it back over the socket (`WorkspaceConfigReader`), never the file
+- periodic checkpoint push — deleted rather than relocated; the daemon's `OriginSync` pushes per
+  commit within ~500ms, so the sweep was redundant
 
 Staying with their own contexts: repositories, projects, commits and conflict resolution, commands,
-agents, telemetry, feature flows, capture, and the technical-process framework.
+agents, telemetry and feature flows.
 
 Still host-side but *should* follow the file/detection work into the daemon: `containerGit` and its
 callers (`fast-forward`, `update-from-parent`, `pushBranch`, `isFullyPushed`) still shell git into
 the container. Migrating them needs new wire messages on both sides, so it was kept out of the
 extraction rather than smuggled into it.
+
+Not asserted anywhere any more, dropped when their setup could not come along: the
+`CommandRegistry` PTY attach path (`ServiceAttachTerminalTest`), the delivery half of the agent sink
+(now `WorkspaceChatInbox`'s contract), the repository-delete cascade onto `workspace_bootstrap_run`
+(it starts in another database), and the depth-2 submodule closure
+(`WorkspaceSubmoduleProvisionTest` — its fixtures belong to qits-projects).
 
 Not covered anywhere yet: **startup reconciliation** of workspaces against the live container set
 (containerless-but-live-branch → STOPPED, dangling-volume reaping). That logic lives in the

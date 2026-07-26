@@ -12,7 +12,10 @@
     </parent>
 
     <!-- The workspaces DOMAIN: entity, persistence, dto, mapper, control, and the framework-free
-         SPIs the in-container workspace-daemon implements from the service side. A plain library
+         SPIs the in-container workspace-daemon implements from the service side. Six of the
+         monorepo's aggregates collapsed onto one package per layer: the workspace half of
+         domain.repository, plus domain.service (host-side dev-server supervision), domain.bootstrap,
+         domain.process, domain.capture and domain.workspace. A plain library
          jar in the shape of the monorepo's `artifacts`/`ci`/`epics` modules — NO web, NO JAX-RS,
          NO websockets; those live in the sibling `service` module.
 

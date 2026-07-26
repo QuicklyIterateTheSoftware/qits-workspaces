@@ -8,8 +8,10 @@
          qits-backend monorepo). The HOST side of workspaces: the workspace entity and its lifecycle,
          container orchestration (docker run/stop/rm/volumes), host-side git against the bare origin,
          the framework-free workspace-daemon SPIs, the workspace registry, and the routes over them.
-         Everything that runs INSIDE the container — file access, framework detection, the bootstrap
-         chain, prompt drafts — belongs to qits-workspace-daemon and is deliberately absent.
+         Everything that RUNS inside the container — file access, framework detection, and the
+         execution of the bootstrap chain and the dev servers — belongs to qits-workspace-daemon and
+         is deliberately absent. The host's side of those (the awaiter, the run records, the event
+         feed, the proxy, the surfaces) is here; see README.md.
 
          DELIBERATELY ITS OWN GAV, unlike the qits-workspace-daemon extraction which kept
          eu.wohlben:qits so its children's <parent> resolved unchanged. That works when the child

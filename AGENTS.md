@@ -21,10 +21,13 @@ is no split package:
 - `domain/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the
   sense that matters: no JAX-RS, no websockets. Entities are Panache active-record with public
   fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
-- `service/` — `api` (JAX-RS + SSE), `daemonhost` (the control socket and registry).
+- `service/` — `api` (JAX-RS + SSE, including the raw vertx routes), `daemonhost` (the control
+  socket and registry).
 
-`control/` is flat on purpose. The monorepo split it across `domain.repository.control` and
-`domain.workspace.control` to break a cycle that does not exist here.
+`control/` is flat on purpose, and deliberately stayed flat as the context grew: the monorepo split
+it across `domain.repository`, `domain.workspace`, `domain.service`, `domain.bootstrap`,
+`domain.process` and `domain.capture` to break cycles that do not exist here. Six aggregates, one
+package per layer.
 
 ## Adding a dependency on another context
 
@@ -39,6 +42,12 @@ id; the two are in different databases and a foreign key cannot span them.
 
 `domain/src/main/resources/db/workspaces/migration/`, hand-written, its own lineage on its own
 datasource. Never touch the monorepo's `db/migration` — that is a different database.
+
+The lineage is `V1` (workspace, workspace_event) then `V2` (service_event,
+workspace_bootstrap_run, workspace_prompt_draft, workspace_prompt_attachment). `V1`'s header says
+the `V2` tables were deliberately left out; that was true when it was written and is not any more —
+`V2`'s header explains why. Extend, never renumber, and never edit an applied file's body: Flyway
+checksums it.
 
 Remember that workspace rows are **soft-deleted**. A child table in another context gets no cascade;
 publish through `WorkspaceResolved` instead, and fire it synchronously inside the resolving
