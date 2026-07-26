@@ -54,10 +54,15 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
   }
 
   /**
-   * The chain the daemon would see: the fake checkout's {@code .qits-config.yml} bootstrap list.
+   * The chain the daemon would see: the fake checkout's committed config bootstrap list, from the
+   * default {@code .config/qits/repository.yml} or the legacy {@code .qits-config.yml}.
    */
   private List<QitsConfig.BootstrapDecl> readChain(String repoId, String workspaceId) {
-    Path config = Path.of(dataDir, repoId, "workspaces", workspaceId, QitsConfigParser.CONFIG_PATH);
+    Path checkout = Path.of(dataDir, repoId, "workspaces", workspaceId);
+    Path config = checkout.resolve(QitsConfigParser.CONFIG_PATH);
+    if (!Files.exists(config)) {
+      config = checkout.resolve(QitsConfigParser.LEGACY_CONFIG_PATH);
+    }
     if (!Files.exists(config)) {
       return List.of();
     }
