@@ -1,0 +1,198 @@
+package eu.wohlben.qits.domain.service.control;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import eu.wohlben.qits.domain.project.control.ProjectService;
+import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
+import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
+import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.repository.control.RepositoryService;
+import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
+import eu.wohlben.qits.domain.repository.control.WorkspaceService;
+import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
+import eu.wohlben.qits.domain.repository.entity.WorkspaceRuntimeStatus;
+import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
+import eu.wohlben.qits.domain.service.entity.ServiceStatus;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The container&#8594;service <em>stop</em> coupling: a {@code WorkspaceContainerStopping} event
+ * settles a workspace's live services STOPPED (INFO, no crash) instead of leaving them to be
+ * misread as a crash and resurrected — deterministically, since the container's imminent {@code rm}
+ * may beat the daemon's own STOPPED event. On a graceful stop the daemon is also asked to signal
+ * each service for a clean flush. The kill-switch case is {@link ServiceSettleKillSwitchTest}. The
+ * host is a pure projection; a {@link FakeWorkspaceServiceDriver} plays the daemon. Definitions are
+ * config-declared, staged into the {@link FakeWorkspaceConfigReader}.
+ */
+@QuarkusTest
+@TestProfile(ServiceLifecycleCouplerSettleTest.TestProfile.class)
+public class ServiceLifecycleCouplerSettleTest {
+
+  public static class TestProfile implements QuarkusTestProfile {
+    @Override
+    public Map<String, String> getConfigOverrides() {
+      try {
+        Path tempDir = Files.createTempDirectory("qits-daemon-settle-test-repos");
+        return Map.of(
+            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.services.autostop-enabled", "true",
+            // Keep auto-start OFF so these tests isolate the settle direction; start manually.
+            "qits.services.autostart-enabled", "false");
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }
+  }
+
+  private static final long AWAIT_MILLIS = 15_000;
+
+  @Inject ProjectService projectService;
+  @Inject RepositoryService repositoryService;
+  @Inject WorkspaceService workspaceService;
+  @Inject FakeWorkspaceConfigReader configReader;
+  @Inject FakeWorkspaceServiceDriver driver;
+  @Inject ServiceSupervisor supervisor;
+  @Inject WorkspaceContainerEventPublisher containerEvents;
+  @Inject ContainerRuntime containers;
+
+  @BeforeEach
+  void resetFakes() {
+    configReader.clear(); // the fake is a shared singleton across this class's test methods
+    driver.reset();
+  }
+
+  private String repoWithWorkspace() throws Exception {
+    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
+    var project = projectService.create("Settle Project", null);
+    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
+    workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    return repo.id;
+  }
+
+  private String createService(String repoId, String name, String command, RestartPolicy policy) {
+    configReader.setConfig(
+        "work",
+        new QitsConfig(
+            null,
+            null,
+            null,
+            List.of(
+                new QitsConfig.ServiceDecl(
+                    name, name, null, command, null, null, false, policy, 3, "TERM", null, null,
+                    null)),
+            null));
+    return name;
+  }
+
+  private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
+    return supervisor.effectiveServices(repoId, "work").stream()
+        .filter(i -> i.definition().id().equals(serviceId))
+        .findFirst()
+        .orElse(null);
+  }
+
+  private ServiceInstanceDto awaitStatus(String repoId, String serviceId, ServiceStatus expected)
+      throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
+    ServiceInstanceDto last = null;
+    while (System.currentTimeMillis() < deadline) {
+      last = instanceOf(repoId, serviceId);
+      if (last != null && last.status() == expected) {
+        return last;
+      }
+      Thread.sleep(50);
+    }
+    throw new AssertionError("Timed out waiting for " + expected + "; last state: " + last);
+  }
+
+  @Test
+  public void stoppingEventSettlesReadyServiceWithoutCrashOrRelaunch() throws Exception {
+    String repoId = repoWithWorkspace();
+    String serviceId = createService(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
+    supervisor.start(repoId, "work", serviceId);
+    driver.sink().onState(repoId, "work", "dev", "READY", null);
+    awaitStatus(repoId, serviceId, ServiceStatus.READY);
+
+    // A deliberate container stop: settle, don't crash.
+    containerEvents.fireStopping(repoId, "work", true);
+
+    ServiceInstanceDto settled = awaitStatus(repoId, serviceId, ServiceStatus.STOPPED);
+    assertEquals(0, settled.restartCount(), "a settled service is not restarted");
+    assertTrue(
+        driver.signalled().contains("dev"), "a graceful settle asks the daemon to signal a flush");
+
+    // It stays STOPPED — no crash path, no resurrection.
+    Thread.sleep(300);
+    assertEquals(
+        ServiceStatus.STOPPED,
+        instanceOf(repoId, serviceId).status(),
+        "the settled service is not resurrected");
+  }
+
+  @Test
+  public void stoppingEventSettlesARestartingInstance() throws Exception {
+    String repoId = repoWithWorkspace();
+    String serviceId = createService(repoId, "flaky", "sh -c 'exit 1'", RestartPolicy.ON_FAILURE);
+    supervisor.start(repoId, "work", serviceId);
+    // Play the daemon dropping it into RESTARTING (the daemon owns the backoff).
+    driver.sink().onState(repoId, "work", "flaky", "CRASHED", 1);
+    driver.sink().onState(repoId, "work", "flaky", "RESTARTING", 1);
+    awaitStatus(repoId, serviceId, ServiceStatus.RESTARTING);
+
+    containerEvents.fireStopping(repoId, "work", true);
+
+    awaitStatus(repoId, serviceId, ServiceStatus.STOPPED);
+    Thread.sleep(300);
+    assertEquals(
+        ServiceStatus.STOPPED,
+        instanceOf(repoId, serviceId).status(),
+        "settling a RESTARTING instance leaves it STOPPED");
+  }
+
+  @Test
+  public void stopContainerDoesNotResurrectItsSettledService() throws Exception {
+    String repoId = repoWithWorkspace();
+    String serviceId = createService(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
+    // A real running container to stop — the projection start no longer provisions one (the daemon
+    // owns execution), so this test that exercises WorkspaceService.stopContainer provisions it.
+    workspaceService.ensureContainer(repoId, "work");
+    supervisor.start(repoId, "work", serviceId);
+    driver.sink().onState(repoId, "work", "dev", "READY", null);
+    awaitStatus(repoId, serviceId, ServiceStatus.READY);
+    String container = containers.containerName("work", repoId);
+
+    // A deliberate stop must settle the service synchronously (before the container is paused/
+    // removed) so nothing reads the disappearance as a crash to resurrect.
+    workspaceService.stopContainer(repoId, "work");
+
+    Thread.sleep(300);
+    // A graceful stop PAUSES in place (docker stop, lossless) rather than removing the container.
+    assertTrue(containers.exists(container), "the paused container is kept, not removed");
+    assertFalse(
+        containers.isRunning(container), "the deliberately stopped container is not resurrected");
+    WorkspaceDto dto =
+        workspaceService.listWorkspaces(repoId).stream()
+            .filter(w -> "work".equals(w.workspaceId()))
+            .findFirst()
+            .orElseThrow();
+    assertEquals(
+        WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus(), "the workspace stays STOPPED");
+    assertEquals(
+        ServiceStatus.STOPPED,
+        instanceOf(repoId, serviceId).status(),
+        "and its service stays STOPPED");
+  }
+}
