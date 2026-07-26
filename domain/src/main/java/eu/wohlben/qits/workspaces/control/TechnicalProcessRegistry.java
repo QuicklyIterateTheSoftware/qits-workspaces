@@ -28,7 +28,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * rides only the process's own SSE stream.
  */
 @ApplicationScoped
-public class TechnicalProcessRegistry {
+public class TechnicalProcessRegistry implements WorkspaceProcessTracker {
 
   /** How long a completed process stays subscribable (full replay + immediate done) before 404. */
   @ConfigProperty(name = "qits.process.done-ttl-ms", defaultValue = "60000")
@@ -85,6 +85,7 @@ public class TechnicalProcessRegistry {
   }
 
   /** Register a new process for a workspace; the newest one is the workspace's active process. */
+  @Override
   public TechnicalProcess begin(String repoId, String workspaceId) {
     String id = UUID.randomUUID().toString();
     TechnicalProcess process = new TechnicalProcess(id, repoId, workspaceId, this::onDone);
@@ -198,6 +199,7 @@ public class TechnicalProcessRegistry {
   }
 
   /** The id of the workspace's currently-running process, if any (cleared on done). */
+  @Override
   public Optional<String> activeFor(String repoId, String workspaceId) {
     return Optional.ofNullable(activeByWorkspace.get(workspaceKey(repoId, workspaceId)));
   }

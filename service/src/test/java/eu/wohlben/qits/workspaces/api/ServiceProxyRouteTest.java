@@ -5,11 +5,11 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspaces.control.ProjectService;
+import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
+import eu.wohlben.qits.workspaces.control.TestOrigin;
 import eu.wohlben.qits.workspaces.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.workspaces.control.FakeWorkspaceServiceDriver;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
-import eu.wohlben.qits.workspaces.control.RepositoryService;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import eu.wohlben.qits.workspaces.control.ServiceSupervisor;
 import eu.wohlben.qits.workspaces.control.RestartPolicy;
@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -74,10 +75,10 @@ public class ServiceProxyRouteTest {
 
   private static final long AWAIT_MILLIS = 15_000;
 
-  @Inject ProjectService projectService;
+  @Inject FakeRepositoryLookup repositories;
 
-  @Inject RepositoryService repositoryService;
-
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
   @Inject WorkspaceService workspaceService;
 
   @Inject FakeWorkspaceConfigReader configReader;
@@ -142,9 +143,9 @@ public class ServiceProxyRouteTest {
    * config when the start registers it.
    */
   private Setup startService(String basePath) throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Proxy Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
     // Unique per setup: the proxy/supervisor key instances by (workspaceId, serviceId) alone, so a
     // fixed id would collide with a previous test's stopped instance ("work" repeats across repos).
     String serviceId = SERVICE_NAME + "-" + serviceSeq.incrementAndGet();
@@ -170,11 +171,11 @@ public class ServiceProxyRouteTest {
                     new QitsConfig.WebViewDecl(echoServer.actualPort(), null, basePath),
                     null)), // healthChecks
             null));
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
     // The proxy origin resolves against a real (fake) container; provision it before READY.
-    workspaceService.ensureContainer(repo.id, "work");
-    supervisor.start(repo.id, "work", serviceId);
-    return new Setup(repo.id, serviceId);
+    workspaceService.ensureContainer(repoId, "work");
+    supervisor.start(repoId, "work", serviceId);
+    return new Setup(repoId, serviceId);
   }
 
   /** Bring a started service READY by playing the service event the supervisor projects. */

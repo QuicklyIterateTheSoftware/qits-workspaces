@@ -20,8 +20,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * each step's phase/output/outcome to the {@link StepSink} exactly as the daemon's {@code
  * BootstrapRunner} does over the socket.
  *
- * <p>The real daemon parses its own checkout; this fake mirrors that with the kept {@link
- * QitsConfigParser} over the fake checkout path. Per-step timeout is <b>not</b> reproduced (that is
+ * <p>The real daemon parses its own checkout; this fake mirrors that with a minimal read of the
+ * {@code bootstrap:} block over the fake checkout path (see {@link #readChain}). Per-step timeout is <b>not</b> reproduced (that is
  * the daemon module's {@code BootstrapRunnerTest}); registered as a {@link Mock} so every
  * {@code @QuarkusTest} exercising the runner wiring gets the chain without a real container or
  * daemon. Keep the {@code domain}/{@code service} copies in sync (cli never bootstraps).
@@ -52,13 +52,92 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
   }
 
   /**
-   * The chain the daemon would run. Always empty here: reading and parsing the committed config is
-   * the daemon's job now, and its parser did not come along with this extraction — nor did the
-   * bootstrap-chain tests, which moved to the daemon with the behaviour they covered. Every
-   * surviving test only needs the chain to terminate.
+   * The chain the daemon would run, read from the fake checkout's committed config.
+   *
+   * <p>The real daemon parses its own checkout with its own {@code ConfigParser}. That parser is
+   * daemon-side, and the monorepo's host-side {@code QitsConfigParser} belongs to the repositories
+   * context and brings snakeyaml with it — neither is in this jar. So this reads only the {@code
+   * bootstrap:} block, and only the fixed shape the tests write (one {@code - name:} per step, with
+   * {@code execute:} and optional {@code check:}, single-quoted scalars). Anything richer is the
+   * daemon module's {@code ConfigParserTest}, not this fake's business.
    */
   private List<QitsConfig.BootstrapDecl> readChain(String repoId, String workspaceId) {
+    Path checkout = Path.of(dataDir, repoId, "workspaces", workspaceId);
+    for (String candidate : List.of(".config/qits/repository.yml", ".qits-config.yml")) {
+      Path file = checkout.resolve(candidate);
+      if (Files.isRegularFile(file)) {
+        try {
+          return parseBootstrap(Files.readAllLines(file));
+        } catch (java.io.IOException e) {
+          throw new IllegalStateException("unreadable staged config: " + file, e);
+        }
+      }
+    }
     return List.of();
+  }
+
+  /** The {@code bootstrap:} list, in file order. */
+  private static List<QitsConfig.BootstrapDecl> parseBootstrap(List<String> lines) {
+    List<QitsConfig.BootstrapDecl> steps = new java.util.ArrayList<>();
+    boolean inBootstrap = false;
+    String name = null;
+    String execute = null;
+    String check = null;
+    for (String raw : lines) {
+      String line = raw.stripTrailing();
+      if (line.isBlank()) {
+        continue;
+      }
+      if (!line.startsWith(" ")) {
+        if (name != null) {
+          steps.add(new QitsConfig.BootstrapDecl(null, name, null, execute, check, null));
+          name = null;
+          execute = null;
+          check = null;
+        }
+        inBootstrap = line.stripTrailing().equals("bootstrap:");
+        continue;
+      }
+      if (!inBootstrap) {
+        continue;
+      }
+      String entry = line.strip();
+      if (entry.startsWith("- ")) {
+        if (name != null) {
+          steps.add(new QitsConfig.BootstrapDecl(null, name, null, execute, check, null));
+          execute = null;
+          check = null;
+        }
+        entry = entry.substring(2).strip();
+      }
+      int colon = entry.indexOf(':');
+      if (colon < 0) {
+        continue;
+      }
+      String key = entry.substring(0, colon).strip();
+      String value = unquote(entry.substring(colon + 1).strip());
+      switch (key) {
+        case "name" -> name = value;
+        case "execute" -> execute = value;
+        case "check" -> check = value;
+        default -> {
+          // not part of the chain shape these tests write
+        }
+      }
+    }
+    if (name != null) {
+      steps.add(new QitsConfig.BootstrapDecl(null, name, null, execute, check, null));
+    }
+    return List.copyOf(steps);
+  }
+
+  private static String unquote(String value) {
+    if (value.length() >= 2
+        && ((value.startsWith("'") && value.endsWith("'"))
+            || (value.startsWith("\"") && value.endsWith("\"")))) {
+      return value.substring(1, value.length() - 1);
+    }
+    return value;
   }
 
   /** Run the chain (or one named step) through the fake container, streaming to {@code sink}. */

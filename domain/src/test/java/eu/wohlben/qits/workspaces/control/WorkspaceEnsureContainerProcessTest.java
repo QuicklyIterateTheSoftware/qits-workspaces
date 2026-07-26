@@ -27,8 +27,7 @@ public class WorkspaceEnsureContainerProcessTest {
 
   private static final long AWAIT_MILLIS = 15_000;
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
   @Inject TechnicalProcessRegistry registry;
   @Inject GitExecutor git;
@@ -55,11 +54,11 @@ public class WorkspaceEnsureContainerProcessTest {
   }
 
   private String repoWithWorkspace(String workspaceId) throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Process Project " + workspaceId, null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, workspaceId, "master", workspaceId);
-    return repo.id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, workspaceId, "master", workspaceId);
+    return repoId;
   }
 
   private TechnicalProcess awaitTerminal(String processId) throws InterruptedException {

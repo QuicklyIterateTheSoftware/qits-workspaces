@@ -35,7 +35,7 @@ import java.util.function.Consumer;
  * a replay marks the elided middle — {@code npm install} output is large, and the head (the command
  * banner) plus the tail (the failure) are the informative parts.
  */
-public final class TechnicalProcess {
+public final class TechnicalProcess implements WorkspaceProcessTracker.Handle {
 
   /** A subscriber to the frame stream — the service module adapts this to an SSE {@code Multi}. */
   public interface Listener {

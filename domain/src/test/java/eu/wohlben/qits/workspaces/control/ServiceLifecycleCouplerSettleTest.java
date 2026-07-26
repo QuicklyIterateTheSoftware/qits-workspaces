@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -50,8 +51,10 @@ public class ServiceLifecycleCouplerSettleTest {
 
   private static final long AWAIT_MILLIS = 15_000;
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
+
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
   @Inject FakeWorkspaceServiceDriver driver;
@@ -66,11 +69,11 @@ public class ServiceLifecycleCouplerSettleTest {
   }
 
   private String repoWithWorkspace() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Settle Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    return repo.id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
+    return repoId;
   }
 
   private String createService(String repoId, String name, String command, RestartPolicy policy) {

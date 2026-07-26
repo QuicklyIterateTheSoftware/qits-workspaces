@@ -74,8 +74,7 @@ public class WorkspaceBootstrapRunnerTest {
 
   private static final long AWAIT_MILLIS = 20_000;
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceBootstrapRunner runner;
@@ -102,14 +101,14 @@ public class WorkspaceBootstrapRunnerTest {
    * given), and adds a lazy {@code work} workspace forked off that master (no container yet).
    */
   private String repoWithWorkspace(String name, String configYaml) throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create(name, null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
     if (configYaml != null) {
-      commitConfig(repo.id, configYaml);
+      commitConfig(repoId, configYaml);
     }
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    return repo.id;
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
+    return repoId;
   }
 
   /** Commit {@code .qits-config.yml} onto the origin's master, so workspace forks carry it. */
@@ -375,25 +374,11 @@ public class WorkspaceBootstrapRunnerTest {
     awaitServiceStatus(repoId, serviceId, ServiceStatus.STARTING);
   }
 
-  @Test
-  public void repositoryWithRecordedBootstrapRunDeletesCleanly() throws Exception {
-    // A FAILED chain still records the run row — and conveniently never fires ready, so this test
-    // leaves no async coupler pass behind.
-    String repoId = repoWithWorkspace("Bootstrap Delete", chainYaml("install=exit 3"));
-
-    workspaceService.ensureContainer(repoId, "work");
-    awaitOutcome(repoId, "install", BootstrapOutcome.FAILED); // a workspace_bootstrap_run row
-    // exists
-
-    // Deleting the repository cascade-deletes its workspace rows; without `on delete cascade` on
-    // the
-    // bootstrap-run FK this fails with a referential-integrity violation the moment a run is
-    // recorded (the V32 command_agent_session bug class).
-    repositoryService.delete(repoId);
-
-    assertThrows(
-        eu.wohlben.qits.workspaces.error.NotFoundException.class,
-        () -> repositoryService.get(repoId),
-        "the repository (and its cascaded bootstrap-run rows) is gone");
-  }
+  // DROPPED IN EXTRACTION: repositoryWithRecordedBootstrapRunDeletesCleanly.
+  // It asserted that deleting a *repository* cascade-deletes its workspace rows and, through
+  // workspace_bootstrap_run's `on delete cascade`, the runs recorded against them (the V32
+  // command_agent_session bug class). Repositories live in another context and another database
+  // here, so there is no repositoryService.delete to call and no cross-database cascade to fire.
+  // The FK and its `on delete cascade` are still in V2; what is now unasserted is the *repository*
+  // half of the chain, and it belongs in qits-projects beside the delete that starts it.
 }

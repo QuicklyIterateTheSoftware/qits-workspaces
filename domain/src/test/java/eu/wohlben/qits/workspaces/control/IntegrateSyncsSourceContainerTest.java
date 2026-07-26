@@ -41,8 +41,7 @@ public class IntegrateSyncsSourceContainerTest {
     }
   }
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
@@ -51,9 +50,10 @@ public class IntegrateSyncsSourceContainerTest {
   String dataDir;
 
   private String clonedRepo() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Integrate Sync Project", null);
-    return repositoryService.cloneRepository(fixtureUrl, null, project).id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    return repoId;
   }
 
   @Test

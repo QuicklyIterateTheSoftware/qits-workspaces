@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import eu.wohlben.qits.workspaces.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
+import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
+import eu.wohlben.qits.workspaces.control.TestOrigin;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -60,41 +62,27 @@ public class WorkspaceBootstrapControllerTest {
 
   @Inject WorkspaceService workspaceService;
 
+  @Inject FakeRepositoryLookup repositories;
+
+  /**
+   * The committed config's default location, inlined: the parser that owns the constant
+   * (QitsConfigParser) belongs to the repositories context, and the daemon's own ConfigParser is
+   * the one that actually reads this path at runtime.
+   */
+  private static final String CONFIG_PATH = ".config/qits/repository.yml";
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
-
-  private final String fixtureUrl;
-
-  public WorkspaceBootstrapControllerTest() throws Exception {
-    fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-  }
 
   @BeforeEach
   void resetStagedConfig() {
     configReader.clear();
   }
 
-  private String repoWithWorkspace() {
-    String projectId =
-        given()
-            .contentType(ContentType.JSON)
-            .body(
-                new ProjectController.CreateProjectRequest(
-                    "WS Bootstrap Project", null, null, null))
-            .post("/api/projects")
-            .then()
-            .statusCode(200)
-            .extract()
-            .path("project.id");
-    String repoId =
-        given()
-            .contentType(ContentType.JSON)
-            .body(new ProjectController.CreateProjectRepositoryRequest(fixtureUrl, null, null))
-            .post("/api/projects/" + projectId + "/repositories")
-            .then()
-            .statusCode(200)
-            .extract()
-            .path("repository.id");
+  private String repoWithWorkspace() throws Exception {
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
     given()
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest("work", "master", "work", null))
@@ -126,7 +114,7 @@ public class WorkspaceBootstrapControllerTest {
     }
     Path config =
         Path.of(dataDir, repoId, "workspaces", "work")
-            .resolve(eu.wohlben.qits.workspaces.control.QitsConfigParser.CONFIG_PATH);
+            .resolve(CONFIG_PATH);
     Files.createDirectories(config.getParent());
     Files.writeString(config, yaml.toString());
     stageChain(steps);
@@ -157,7 +145,7 @@ public class WorkspaceBootstrapControllerTest {
   }
 
   @Test
-  public void listShowsChainWithNullLastRunBeforeAnyRun() {
+  public void listShowsChainWithNullLastRunBeforeAnyRun() throws Exception {
     String repoId = repoWithWorkspace();
     stageChain(
         new QitsConfig.BootstrapDecl(null, "install", null, "echo install", null, null),

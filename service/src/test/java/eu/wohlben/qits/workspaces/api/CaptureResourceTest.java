@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.workspaces.control.CaptureService;
+import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
+import eu.wohlben.qits.workspaces.control.TestOrigin;
+import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import eu.wohlben.qits.workspaces.dto.CaptureContent;
 import eu.wohlben.qits.workspaces.entity.Workspace;
 import io.quarkus.test.junit.QuarkusTest;
@@ -25,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 @QuarkusTest
@@ -52,46 +56,29 @@ public class CaptureResourceTest {
 
   @Inject CaptureService captureService;
 
-  // testing-repo has a branch literally named `feature` (blocks feature/* refs → dash fallback);
-  // testing-repo-quarkus-angular has feature/* branches but no bare `feature` (normal slash shape).
-  private final String fixtureUrl;
-  private final String slashSafeFixtureUrl;
+  @Inject FakeRepositoryLookup repositories;
+  @Inject WorkspaceService workspaceService;
 
-  public CaptureResourceTest() throws Exception {
-    fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    slashSafeFixtureUrl =
-        getClass().getResource("/fixtures/testing-repo-quarkus-angular.git").toURI().getPath();
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
+
+  /**
+   * A resolvable repository with a bare origin on disk, replacing the monorepo's create-project +
+   * clone-fixture pair of REST calls into the projects context.
+   *
+   * <p>{@code withFeatureBranch} is what the two fixture bares used to encode: {@code
+   * testing-repo.git} had a branch literally named {@code feature} (which blocks {@code feature/*}
+   * and forces capture's dash fallback), {@code testing-repo-quarkus-angular.git} did not.
+   */
+  private String repository(boolean withFeatureBranch) throws Exception {
+    String repoId = TestOrigin.create(dataDir, withFeatureBranch);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    return repoId;
   }
 
-  private String createProjectAndRepository() {
-    return createProjectAndRepository(fixtureUrl);
-  }
-
-  private String createProjectAndRepository(String repoUrl) {
-    String projectId =
-        given()
-            .contentType(ContentType.JSON)
-            .body(
-                new eu.wohlben.qits.workspaces.api.ProjectController.CreateProjectRequest(
-                    "Capture Project", null, null, null))
-            .when()
-            .post("/api/projects")
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .extract()
-            .path("project.id");
-
-    return given()
-        .contentType(ContentType.JSON)
-        .body(
-            new eu.wohlben.qits.workspaces.api.ProjectController.CreateProjectRepositoryRequest(
-                repoUrl, null, null))
-        .when()
-        .post("/api/projects/" + projectId + "/repositories")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .extract()
-        .path("repository.id");
+  private String repository() throws Exception {
+    return repository(true);
   }
 
   private static byte[] payload(String repoId) {
@@ -161,8 +148,8 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testCaptureCreatesBranchWorkspaceAndGoal() {
-    String repoId = createProjectAndRepository();
+  public void testCaptureCreatesBranchWorkspaceAndGoal() throws Exception {
+    String repoId = repository();
 
     var response =
         given()
@@ -225,9 +212,9 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testSameInstantCapturesGetSuffixedNames() {
+  public void testSameInstantCapturesGetSuffixedNames() throws Exception {
     // The slash-safe fixture (no bare `feature` branch) exercises the normal feature/<ts> shape.
-    String repoId = createProjectAndRepository(slashSafeFixtureUrl);
+    String repoId = repository(false);
     // Straight through the service seam with one fixed instant — a REST-level double post would
     // flake at minute boundaries.
     Instant fixed = Instant.parse("2026-07-14T12:00:11Z");
@@ -242,7 +229,8 @@ public class CaptureResourceTest {
     assertEquals("feature/2026-07-14-1200-2", second.branch);
     assertEquals("feature-2026-07-14-1200-2", second.workspaceId);
     assertEquals("feature/2026-07-14-1200-3", third.branch);
-    assertEquals("main", first.parent);
+    // TestOrigin's main branch, where the monorepo fixture's was `main`.
+    assertEquals("master", first.parent);
 
     given()
         .when()
@@ -252,8 +240,8 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testUnknownOrMissingRepositoryIs404AndCreatesNothing() {
-    String repoId = createProjectAndRepository();
+  public void testUnknownOrMissingRepositoryIs404AndCreatesNothing() throws Exception {
+    String repoId = repository();
 
     Map<String, Object> unknownRepo = new LinkedHashMap<>();
     unknownRepo.put("identity", identity(UUID.randomUUID().toString(), null));
@@ -283,8 +271,8 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testOversizedPayloadIs413AndCreatesNothing() {
-    String repoId = createProjectAndRepository();
+  public void testOversizedPayloadIs413AndCreatesNothing() throws Exception {
+    String repoId = repository();
 
     // (a) identity-encoded body over the 8192-byte cap
     Map<String, Object> big = new LinkedHashMap<>();
@@ -320,8 +308,8 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testGzipAndIdentityEncodingsBothAccepted() {
-    String repoId = createProjectAndRepository();
+  public void testGzipAndIdentityEncodingsBothAccepted() throws Exception {
+    String repoId = repository();
 
     given()
         .contentType(ContentType.JSON)
@@ -342,8 +330,8 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testCorsIsOpenOnCapturePathOnly() {
-    String repoId = createProjectAndRepository();
+  public void testCorsIsOpenOnCapturePathOnly() throws Exception {
+    String repoId = repository();
 
     // Preflight answers permissively.
     given()
@@ -401,8 +389,8 @@ public class CaptureResourceTest {
   }
 
   @Test
-  public void testStateLessCaptureOmitsStateSection() {
-    String repoId = createProjectAndRepository();
+  public void testStateLessCaptureOmitsStateSection() throws Exception {
+    String repoId = repository();
 
     Map<String, Object> root = new LinkedHashMap<>();
     root.put("identity", identity(repoId, null));

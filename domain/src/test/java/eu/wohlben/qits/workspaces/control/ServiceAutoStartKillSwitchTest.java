@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -39,8 +40,10 @@ public class ServiceAutoStartKillSwitchTest {
     }
   }
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
+
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
   @Inject FakeWorkspaceServiceDriver driver;
@@ -50,10 +53,10 @@ public class ServiceAutoStartKillSwitchTest {
   @Test
   public void killSwitchSuppressesAutoStart() throws Exception {
     driver.reset();
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("KillSwitch Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
     String serviceId = "auto";
     configReader.setConfig(
         "work",
@@ -79,13 +82,13 @@ public class ServiceAutoStartKillSwitchTest {
                     null)),
             null));
 
-    containerEvents.fireStarted(repo.id, "work");
+    containerEvents.fireStarted(repoId, "work");
 
     // Give the async observer ample time to (not) act, then confirm nothing launched — the service
     // is still listed, but as an unstarted STOPPED placeholder.
     Thread.sleep(1500);
     ServiceInstanceDto instance =
-        supervisor.effectiveServices(repo.id, "work").stream()
+        supervisor.effectiveServices(repoId, "work").stream()
             .filter(i -> i.definition().id().equals(serviceId))
             .findFirst()
             .orElseThrow();

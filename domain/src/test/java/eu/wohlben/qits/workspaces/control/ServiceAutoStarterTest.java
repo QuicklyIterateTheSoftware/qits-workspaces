@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -51,8 +52,10 @@ public class ServiceAutoStarterTest {
 
   private static final long AWAIT_MILLIS = 15_000;
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
+
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
   @Inject FakeWorkspaceServiceDriver driver;
@@ -71,11 +74,11 @@ public class ServiceAutoStarterTest {
 
   /** Clones the fixture and adds a lazy {@code work} workspace (no container yet). */
   private String repoWithWorkspace() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("AutoStart Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    return repo.id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
+    return repoId;
   }
 
   /** Add one auto-start/opt-out service to the workspace's staged config; returns its id. */

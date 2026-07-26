@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -47,8 +48,10 @@ public class ServiceProcessCorrelationTest {
 
   private static final long AWAIT_MILLIS = 15_000;
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
+
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
   @Inject FakeWorkspaceServiceDriver driver;
@@ -76,10 +79,10 @@ public class ServiceProcessCorrelationTest {
   public void streamedServiceLinesLandInTheStartProcessAndReadySettlesTheSegment()
       throws Exception {
     driver.reset();
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Service Process Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -103,16 +106,16 @@ public class ServiceProcessCorrelationTest {
                     null)),
             null));
 
-    String processId = workspaceService.beginEnsureContainer(repo.id, "work");
+    String processId = workspaceService.beginEnsureContainer(repoId, "work");
     TechnicalProcess process = registry.find(processId).orElseThrow();
 
     // Wait until the auto-start coupler pre-registered the process-tracked "web" projection
     // (STARTING) — only then does a streamed line/READY resolve to the process-linked instance.
-    awaitStatus(repo.id, "web", ServiceStatus.STARTING);
+    awaitStatus(repoId, "web", ServiceStatus.STARTING);
 
     // Play the daemon: it streams the service's startup output, then reports READY.
-    driver.sink().onLine(repo.id, "work", "web", "STDOUT", "hello-from-service");
-    driver.sink().onState(repo.id, "work", "web", "READY", null);
+    driver.sink().onLine(repoId, "work", "web", "STDOUT", "hello-from-service");
+    driver.sink().onState(repoId, "work", "web", "READY", null);
 
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     while (!process.isTerminal() && System.currentTimeMillis() < deadline) {

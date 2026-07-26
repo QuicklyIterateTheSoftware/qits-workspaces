@@ -3,7 +3,6 @@ package eu.wohlben.qits.workspaces.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspaces.dto.CommandDto;
 import eu.wohlben.qits.workspaces.dto.ServiceEventDto;
 import eu.wohlben.qits.workspaces.entity.ServiceEventKind;
 import eu.wohlben.qits.workspaces.entity.ServiceEventSeverity;
@@ -12,37 +11,39 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
- * The agent sink end to end: an event lands as one prefixed stream-json user message on the newest
- * running chat's stdin (visible via the live user echo on an attached sink), and with no chat
- * running it is spooled and handed to the next session.
+ * The half of the agent sink this context still owns: with nothing to deliver to, the event is
+ * formatted, spooled, and handed over exactly once.
+ *
+ * <p>The monorepo's sibling case — an event landing as one prefixed stream-json user turn on the
+ * newest running chat's stdin — is <strong>not asserted anywhere any more</strong>. It needed
+ * {@code CommandService.launchChat} plus {@code CommandRegistry.attach}, and delivery is now
+ * {@link WorkspaceChatInbox}'s contract, so the assertion belongs beside that port's
+ * implementation in the command context.
  */
 @QuarkusTest
 public class ServiceAgentNotifierTest {
 
-  @Inject ProjectService projectService;
+  @Inject FakeRepositoryLookup repositories;
 
-  @Inject RepositoryService repositoryService;
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
 
   @Inject WorkspaceService workspaceService;
-
-  @Inject CommandService commandService;
-
-  @Inject CommandRegistry commandRegistry;
 
   @Inject ServiceAgentNotifier notifier;
 
   @Inject ServiceEventSpool spool;
 
   private String repoWithWorkspace() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Notify Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    return repo.id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
+    return repoId;
   }
 
   private static ServiceEventDto event(String repoId, String summary, String excerpt) {
@@ -62,64 +63,6 @@ public class ServiceAgentNotifierTest {
         null,
         null,
         Instant.now());
-  }
-
-  @Test
-  public void deliversToTheNewestRunningChatAsAPrefixedUserMessage() throws Exception {
-    String repoId = repoWithWorkspace();
-    // A stand-in chat process that stays alive with stdin open (no real claude in tests).
-    CommandDto chat =
-        commandService.launchChat(repoId, "work", "Claude chat", "sleep 10", Map.of());
-    try {
-      // chatSend echoes the injected turn into the unified live stream (ring + broadcast; user
-      // echoes are no longer persisted — the durable record is the transcript import), so the
-      // message (with its [service:…] prefix) must reach an attached sink.
-      CapturingSink sink = new CapturingSink();
-      assertTrue(commandRegistry.attach(chat.id(), sink), "the chat must accept a sink");
-
-      notifier.deliver(event(repoId, "NPE in handler", "stacktrace-here"));
-
-      String streamed = awaitSinkContaining(sink, "[service:dev-server]");
-      assertTrue(
-          streamed.contains("stacktrace-here"),
-          "the log excerpt travels with the message: " + streamed);
-      assertEquals(
-          List.of(),
-          spool.drain(repoId, "work"),
-          "a delivered event must not additionally be spooled");
-    } finally {
-      commandRegistry.terminate(chat.id());
-    }
-  }
-
-  private static final class CapturingSink implements CommandOutputSink {
-    private final StringBuilder received = new StringBuilder();
-
-    @Override
-    public synchronized void write(String data) {
-      received.append(data);
-    }
-
-    @Override
-    public boolean isOpen() {
-      return true;
-    }
-
-    synchronized String text() {
-      return received.toString();
-    }
-  }
-
-  private String awaitSinkContaining(CapturingSink sink, String needle)
-      throws InterruptedException {
-    for (int i = 0; i < 40; i++) {
-      String text = sink.text();
-      if (text.contains(needle)) {
-        return text;
-      }
-      Thread.sleep(50);
-    }
-    throw new AssertionError("sink never received '" + needle + "': " + sink.text());
   }
 
   @Test

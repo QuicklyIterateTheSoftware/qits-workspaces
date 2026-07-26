@@ -31,6 +31,20 @@ public final class TestOrigin {
    * and a merge between them is a real merge.
    */
   public static String create(String dataDir) throws Exception {
+    return create(dataDir, true);
+  }
+
+  /**
+   * As {@link #create(String)}, but {@code withFeatureBranch=false} leaves {@code master} alone in
+   * the ref namespace.
+   *
+   * <p>A branch literally named {@code feature} blocks every {@code refs/heads/feature/*}, because
+   * git's ref namespace is filesystem-like — so the two shapes of a generated branch name
+   * ({@code feature/<ts>} vs. the {@code feature-<ts>} fallback) need two different origins to
+   * exercise. The monorepo got the second shape from a second fixture bare
+   * ({@code testing-repo-quarkus-angular.git}); here it is a flag.
+   */
+  public static String create(String dataDir, boolean withFeatureBranch) throws Exception {
     String repoId = UUID.randomUUID().toString();
     // Absolute: dataDir is relative in tests (target/...), and `git remote add`
     // would otherwise resolve it against the throwaway work dir, not the module.
@@ -45,12 +59,14 @@ public final class TestOrigin {
       commit(work, "README.md", "# test repo\n", "initial commit");
       run(work.toFile(), "git", "push", "-q", "origin", "master");
 
-      // feature forks HERE, so it lacks master's second commit and vice versa.
-      run(work.toFile(), "git", "switch", "-q", "-c", "feature");
-      commit(work, "feature.txt", "feature side\n", "feature commit");
-      run(work.toFile(), "git", "push", "-q", "origin", "feature");
+      if (withFeatureBranch) {
+        // feature forks HERE, so it lacks master's second commit and vice versa.
+        run(work.toFile(), "git", "switch", "-q", "-c", "feature");
+        commit(work, "feature.txt", "feature side\n", "feature commit");
+        run(work.toFile(), "git", "push", "-q", "origin", "feature");
+        run(work.toFile(), "git", "switch", "-q", "master");
+      }
 
-      run(work.toFile(), "git", "switch", "-q", "master");
       commit(work, "master.txt", "master side\n", "second master commit");
       run(work.toFile(), "git", "push", "-q", "origin", "master");
       return repoId;

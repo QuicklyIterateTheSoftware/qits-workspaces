@@ -41,8 +41,7 @@ public class WorkspaceBootstrapKillSwitchTest {
 
   private static final long AWAIT_MILLIS = 15_000;
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceReadyForServicesRecorder readyRecorder;
@@ -53,12 +52,12 @@ public class WorkspaceBootstrapKillSwitchTest {
 
   @Test
   public void killSwitchPassesFreshProvisionStraightThrough() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Bootstrap Kill Switch", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
     // A declared chain exists (committed before the workspace fork, so the checkout carries it) —
     // the kill switch, not its absence, is what suppresses the run.
-    Path origin = Path.of(dataDir, repo.id, "origin");
+    Path origin = Path.of(dataDir, repoId, "origin");
     Path worktree = Files.createTempDirectory("qits-config-commit");
     git.exec(null, "git", "clone", origin.toString(), worktree.toString());
     git.exec(worktree.toFile(), "git", "config", "user.email", "t@example.com");
@@ -69,20 +68,20 @@ public class WorkspaceBootstrapKillSwitchTest {
     git.exec(worktree.toFile(), "git", "add", ".qits-config.yml");
     git.exec(worktree.toFile(), "git", "commit", "-m", "stage qits config");
     git.exec(worktree.toFile(), "git", "push", "origin", "HEAD:master");
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
     readyRecorder.clear();
 
-    workspaceService.ensureContainer(repo.id, "work");
+    workspaceService.ensureContainer(repoId, "work");
 
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
-    while (System.currentTimeMillis() < deadline && readyRecorder.countFor(repo.id, "work") == 0) {
+    while (System.currentTimeMillis() < deadline && readyRecorder.countFor(repoId, "work") == 0) {
       Thread.sleep(50);
     }
     assertTrue(
-        readyRecorder.countFor(repo.id, "work") >= 1,
+        readyRecorder.countFor(repoId, "work") >= 1,
         "the switched-off runner still releases service auto-start");
     assertTrue(
-        bootstrapRunService.listForWorkspace(repo.id, "work").isEmpty(),
+        bootstrapRunService.listForWorkspace(repoId, "work").isEmpty(),
         "no bootstrap command ran");
   }
 }

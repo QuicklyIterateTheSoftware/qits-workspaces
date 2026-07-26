@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -37,8 +38,10 @@ public class ServiceSettleKillSwitchTest {
     }
   }
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
+
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;
   @Inject FakeWorkspaceServiceDriver driver;
@@ -48,10 +51,10 @@ public class ServiceSettleKillSwitchTest {
   @Test
   public void killSwitchSuppressesSettle() throws Exception {
     driver.reset();
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Settle KillSwitch Project", null);
-    var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    workspaceService.createWorkspace(repo.id, "work", "master", "work");
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
     String serviceId = "dev";
     configReader.setConfig(
         "work",
@@ -75,17 +78,17 @@ public class ServiceSettleKillSwitchTest {
                     null,
                     null)),
             null));
-    supervisor.start(repo.id, "work", serviceId);
-    driver.sink().onState(repo.id, "work", "dev", "READY", null);
+    supervisor.start(repoId, "work", serviceId);
+    driver.sink().onState(repoId, "work", "dev", "READY", null);
 
     // The settle event fires, but the kill switch means the coupler ignores it: the service (still
     // owned by the live daemon) stays READY rather than being settled STOPPED.
-    containerEvents.fireStopping(repo.id, "work", true);
+    containerEvents.fireStopping(repoId, "work", true);
 
     Thread.sleep(300);
     assertEquals(
         ServiceStatus.READY,
-        instanceOf(repo.id, serviceId).status(),
+        instanceOf(repoId, serviceId).status(),
         "kill switch off ⇒ the stopping event settles nothing");
   }
 
