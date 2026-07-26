@@ -1,6 +1,6 @@
-package eu.wohlben.qits.domain.daemon.dto;
+package eu.wohlben.qits.domain.service.dto;
 
-import eu.wohlben.qits.domain.daemon.entity.HealthCheckKind;
+import eu.wohlben.qits.domain.service.entity.HealthCheckKind;
 import java.time.Instant;
 
 /**

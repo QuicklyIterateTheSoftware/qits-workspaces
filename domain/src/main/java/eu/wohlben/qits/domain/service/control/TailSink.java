@@ -4,7 +4,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 /**
- * Keeps the last lines of a daemon's output so a crash event can carry the evidence ("here's the
+ * Keeps the last lines of a service's output so a crash event can carry the evidence ("here's the
  * stacktrace") without a DB read on the exit path.
  */
 final class TailSink extends LineFramingSink {

@@ -6,12 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
-import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
-import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
+import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
+import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpServer;
@@ -29,8 +29,8 @@ import org.junit.jupiter.api.Test;
  * Real-docker proof of <b>daemon-supervised services</b> (docs/epics/qits-workspace-daemon/ Part
  * 4): the native {@code workspace-daemon}, as the tail of its own boot sequence, starts the
  * auto-start service declared in {@code /workspace/.qits-config.yml} <em>itself</em> (no host
- * {@code docker exec tmux}), reports its lifecycle over the socket as {@link DaemonEvent}s, and —
- * on a {@link SignalDaemon} stop — group-kills the whole session <b>including a backgrounded
+ * {@code docker exec tmux}), reports its lifecycle over the socket as {@link ServiceTransition}s,
+ * and — on a {@link SignalService} stop — group-kills the whole session <b>including a backgrounded
  * fork</b> via {@code pkill -s}, with no {@code /proc} scan.
  *
  * <p>Reuses {@link DaemonBootstrapIT}'s standalone-Vert.x approach: one server plays the control
@@ -69,8 +69,8 @@ public class DaemonServiceIT {
     CompletableFuture<Hello> helloReceived = new CompletableFuture<>();
     CompletableFuture<Provisioned> provisioned = new CompletableFuture<>();
     CompletableFuture<ProvisionFailed> failed = new CompletableFuture<>();
-    CompletableFuture<DaemonEvent> ready = new CompletableFuture<>();
-    CompletableFuture<DaemonEvent> stopped = new CompletableFuture<>();
+    CompletableFuture<ServiceTransition> ready = new CompletableFuture<>();
+    CompletableFuture<ServiceTransition> stopped = new CompletableFuture<>();
     CopyOnWriteArrayList<String> states = new CopyOnWriteArrayList<>();
 
     HttpServer server = vertx.createHttpServer();
@@ -93,19 +93,20 @@ public class DaemonServiceIT {
                     case Hello hello -> helloReceived.complete(hello);
                     case Provisioned p -> provisioned.complete(p);
                     case ProvisionFailed f -> failed.complete(f);
-                    case DaemonEvent event -> {
+                    case ServiceTransition event -> {
                       states.add(event.id() + ":" + event.state());
                       if ("web".equals(event.id())) {
-                        if (DaemonEvent.State.READY.equals(event.state()) && !ready.isDone()) {
+                        if (ServiceTransition.State.READY.equals(event.state())
+                            && !ready.isDone()) {
                           ready.complete(event);
                           // Play qits: once the service is up, ask the daemon to stop it.
                           ws.writeTextMessage(
                               new JsonObject(
                                       DaemonCodec.encode(
-                                          new SignalDaemon(
+                                          new SignalService(
                                               UUID.randomUUID().toString(), "web", "TERM")))
                                   .encode());
-                        } else if (DaemonEvent.State.STOPPED.equals(event.state())) {
+                        } else if (ServiceTransition.State.STOPPED.equals(event.state())) {
                           stopped.complete(event);
                         }
                       }
@@ -158,7 +159,7 @@ public class DaemonServiceIT {
           pgrepCount(container, "sleep " + FORK_MARKER) >= 2,
           "the service and its fork should be running before the stop");
 
-      // The SignalDaemon we sent on READY stops it; the daemon reports STOPPED...
+      // The SignalService we sent on READY stops it; the daemon reports STOPPED...
       stopped.get(30, TimeUnit.SECONDS);
       // ...and reaped the WHOLE session, including the backgrounded fork — proven by pgrep, with no
       // host /proc scan or `docker exec kill` issued by this test.

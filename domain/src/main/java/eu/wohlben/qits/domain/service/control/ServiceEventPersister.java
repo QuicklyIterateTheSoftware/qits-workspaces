@@ -10,7 +10,7 @@ import jakarta.transaction.Transactional;
 import java.util.UUID;
 
 /**
- * Writes one published event as a {@code daemon_event} row. Isolated in its own bean so {@code
+ * Writes one published event as a {@code service_event} row. Isolated in its own bean so {@code
  * ServiceEventService} invokes it through the CDI proxy (publish runs on supervisor/scheduler
  * threads with no request context — same pattern as {@code CommandLogBatchPersister}).
  */
@@ -19,7 +19,7 @@ public class ServiceEventPersister {
 
   private static final int MAX_SUMMARY_CHARS = 2000;
 
-  @Inject ServiceEventRepository daemonEventRepository;
+  @Inject ServiceEventRepository serviceEventRepository;
 
   @Transactional
   @ActivateRequestContext
@@ -44,6 +44,6 @@ public class ServiceEventPersister {
     entity.anchorTo = event.anchorTo();
     entity.sourceEpoch = event.sourceEpoch();
     entity.timestamp = event.timestamp();
-    daemonEventRepository.persist(entity);
+    serviceEventRepository.persist(entity);
   }
 }

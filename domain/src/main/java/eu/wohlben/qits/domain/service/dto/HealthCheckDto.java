@@ -1,8 +1,8 @@
-package eu.wohlben.qits.domain.daemon.dto;
+package eu.wohlben.qits.domain.service.dto;
 
-import eu.wohlben.qits.domain.daemon.entity.HealthCheckKind;
+import eu.wohlben.qits.domain.service.entity.HealthCheckKind;
 
-/** One healthcheck of a daemon definition, as returned to clients. */
+/** One healthcheck of a service definition, as returned to clients. */
 public record HealthCheckDto(
     String name,
     HealthCheckKind kind,

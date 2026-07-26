@@ -15,12 +15,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 /**
- * Covers the interactive-terminal seam of tmux-backed daemons (Increment 2): {@link
- * ContainerRuntime#attachDaemonCommand} plus the ordinary {@link CommandRegistry} PTY path together
- * give a live attach that streams the running daemon's output and accepts input/resize, and whose
- * termination cleans up without touching the daemon. Real tmux behavior is exercised by the
- * extended real-docker IT; here the fake runtime emulates the attach with a {@code tail -f}, so the
- * wiring — spawn → stream → input/resize → terminate — is verified without a terminal multiplexer.
+ * Covers the interactive-terminal seam of tmux-backed services (Increment 2): {@link
+ * ContainerRuntime#attachServiceCommand} plus the ordinary {@link CommandRegistry} PTY path
+ * together give a live attach that streams the running service's output and accepts input/resize,
+ * and whose termination cleans up without touching the daemon. Real tmux behavior is exercised by
+ * the extended real-docker IT; here the fake runtime emulates the attach with a {@code tail -f}, so
+ * the wiring — spawn → stream → input/resize → terminate — is verified without a terminal
+ * multiplexer.
  */
 @QuarkusTest
 public class ServiceAttachTerminalTest {
@@ -54,7 +55,7 @@ public class ServiceAttachTerminalTest {
   }
 
   @Test
-  public void attachStreamsTheDaemonOutputAndTerminatesCleanly() throws Exception {
+  public void attachStreamsTheServiceOutputAndTerminatesCleanly() throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Attach Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
@@ -63,22 +64,23 @@ public class ServiceAttachTerminalTest {
     workspaceService.ensureContainer(repo.id, "work");
     String container = containers.containerName("work", repo.id);
 
-    // Start a daemon session directly (the supervisor's follower isn't needed to prove the attach):
+    // Start a service session directly (the supervisor's follower isn't needed to prove the
+    // attach):
     // it prints a recognizable marker line the attach must stream.
-    String daemonId = "attach-daemon-1";
+    String serviceId = "attach-service-1";
     String script = "while true; do echo attach-marker; sleep 0.2; done";
-    containers.startDaemon(container, daemonId, script, Map.of("QITS_SERVICE_ID", daemonId));
-    assertTrue(containers.daemonAlive(container, daemonId), "the daemon session is running");
+    containers.startService(container, serviceId, script, Map.of("QITS_SERVICE_ID", serviceId));
+    assertTrue(containers.serviceAlive(container, serviceId), "the service session is running");
 
-    String sessionId = "daemon-attach-test";
+    String sessionId = "service-attach-test";
     CapturingSink sink = new CapturingSink();
     try {
-      // The exact wiring DaemonTerminalSocket uses: an ordinary registry PTY running the runtime's
+      // The exact wiring ServiceTerminalSocket uses: an ordinary registry PTY running the runtime's
       // attach command, with no-op exit/log listeners (the follower owns persistence).
       registry.spawn(
           sessionId,
           container,
-          containers.attachDaemonCommand(daemonId),
+          containers.attachServiceCommand(serviceId),
           Map.of("TERM", "xterm-256color"),
           (id, exitCode, terminatedManually) -> {},
           (id, sequence, channel, content, timestamp) -> {},
@@ -86,7 +88,7 @@ public class ServiceAttachTerminalTest {
 
       assertTrue(
           awaitContains(sink, "attach-marker"),
-          "the attach streams the running daemon's live output");
+          "the attach streams the running service's live output");
       assertTrue(registry.isRunning(sessionId), "the attach session is live");
       // Input and resize are accepted by the live PTY (a tail ignores stdin, but the call
       // succeeds).
@@ -99,18 +101,18 @@ public class ServiceAttachTerminalTest {
     assertTrue(awaitStopped(sessionId), "terminating the attach removes it from the registry");
     // The daemon itself is untouched: killing the attach client only detaches it.
     assertTrue(
-        containers.daemonAlive(container, daemonId), "the daemon keeps running after detach");
+        containers.serviceAlive(container, serviceId), "the daemon keeps running after detach");
 
-    containers.killDaemon(container, daemonId);
+    containers.killService(container, serviceId);
     // Poll rather than snapshot: a SIGKILL'd detached process can linger briefly (zombie until
-    // reaped) under suite load, and daemonAlive reads ProcessHandle.isAlive.
-    assertTrue(awaitDaemonDead(container, daemonId), "kill tears the daemon session down");
+    // reaped) under suite load, and serviceAlive reads ProcessHandle.isAlive.
+    assertTrue(awaitServiceDead(container, serviceId), "kill tears the service session down");
   }
 
-  private boolean awaitDaemonDead(String container, String daemonId) throws InterruptedException {
+  private boolean awaitServiceDead(String container, String serviceId) throws InterruptedException {
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     while (System.currentTimeMillis() < deadline) {
-      if (!containers.daemonAlive(container, daemonId)) {
+      if (!containers.serviceAlive(container, serviceId)) {
         return true;
       }
       Thread.sleep(50);

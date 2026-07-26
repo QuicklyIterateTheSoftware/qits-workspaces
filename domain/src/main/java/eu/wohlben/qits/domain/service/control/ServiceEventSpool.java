@@ -8,10 +8,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Per-workspace buffer of agent-bound daemon messages that had no running chat session to land in.
+ * Per-workspace buffer of agent-bound service messages that had no running chat session to land in.
  * {@code AgentLaunchService} drains it when a chat starts, so events that happened while nobody was
  * listening still reach the next session as seed context. In-memory, bounded, best-effort — the
- * durable trail is the event feed and the daemon command logs.
+ * durable trail is the event feed and the service command logs.
  */
 @ApplicationScoped
 public class ServiceEventSpool {

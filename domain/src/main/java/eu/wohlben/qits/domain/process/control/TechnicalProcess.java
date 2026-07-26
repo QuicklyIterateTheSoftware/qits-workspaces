@@ -23,9 +23,9 @@ import java.util.function.Consumer;
  * detach freely while the work keeps running.
  *
  * <p>Completion is a two-part predicate: the synchronous provision phase settles via {@link
- * #finishProvision}, and the asynchronous daemon phase (running on the CDI async observer thread)
- * is declared via {@link #expectDaemons} and settles one {@code daemon:<name>} segment per
- * auto-started daemon. The terminal {@code done} frame fires once both parts are in — or
+ * #finishProvision}, and the asynchronous service phase (running on the CDI async observer thread)
+ * is declared via {@link #expectServices} and settles one {@code service:<name>} segment per
+ * auto-started service. The terminal {@code done} frame fires once both parts are in — or
  * immediately on a provision failure. All mutation happens under the process monitor, so a freshly
  * attached listener never interleaves replayed and live frames (same trade-off as {@code
  * CommandSession}: a stuck listener briefly stalls the producer; dead listeners are pruned on the
@@ -57,9 +57,9 @@ public final class TechnicalProcess {
   /** A runaway single line is truncated to this many characters. */
   private static final int MAX_LINE_CHARS = 16 * 1024;
 
-  /** The segment name prefix for per-daemon startup segments. */
-  public static String daemonSegment(String daemonName) {
-    return "daemon:" + daemonName;
+  /** The segment name prefix for per-service startup segments. */
+  public static String serviceSegment(String serviceName) {
+    return "service:" + serviceName;
   }
 
   private static final class Segment {
@@ -90,7 +90,7 @@ public final class TechnicalProcess {
   private final AtomicLong seq = new AtomicLong();
 
   private Boolean provisionOk; // null while the synchronous provision phase is still running
-  private Set<String> expectedDaemonSegments; // null until the daemon phase declared its set
+  private Set<String> expectedServiceSegments; // null until the service phase declared its set
   private boolean terminal;
   private boolean doneOk;
 
@@ -230,8 +230,8 @@ public final class TechnicalProcess {
   }
 
   /**
-   * The synchronous provision phase is over. On failure the process ends immediately (the daemon
-   * phase never happens); on success it ends once the daemon phase settles too.
+   * The synchronous provision phase is over. On failure the process ends immediately (the service
+   * phase never happens); on success it ends once the service phase settles too.
    */
   public synchronized void finishProvision(boolean ok) {
     if (terminal || provisionOk != null) {
@@ -290,19 +290,19 @@ public final class TechnicalProcess {
   }
 
   /**
-   * Declare the asynchronous daemon phase's full set of auto-started daemons (by daemon name; may
-   * be empty), opening one {@code daemon:<name>} segment per entry. Called exactly once, before the
-   * first daemon start, so {@code done} can never fire between two daemons' settlements. The first
-   * declaration wins.
+   * Declare the asynchronous service phase's full set of auto-started services (by service name;
+   * may be empty), opening one {@code service:<name>} segment per entry. Called exactly once,
+   * before the first service start, so {@code done} can never fire between two services'
+   * settlements. The first declaration wins.
    */
-  public synchronized void expectDaemons(Collection<String> daemonNames) {
-    if (terminal || expectedDaemonSegments != null) {
+  public synchronized void expectServices(Collection<String> serviceNames) {
+    if (terminal || expectedServiceSegments != null) {
       return;
     }
-    expectedDaemonSegments = new LinkedHashSet<>();
-    for (String name : daemonNames) {
-      String segment = daemonSegment(name);
-      expectedDaemonSegments.add(segment);
+    expectedServiceSegments = new LinkedHashSet<>();
+    for (String name : serviceNames) {
+      String segment = serviceSegment(name);
+      expectedServiceSegments.add(segment);
       openSegment(segment);
     }
     maybeFinish();
@@ -310,7 +310,7 @@ public final class TechnicalProcess {
 
   /**
    * Complete a process whose work turned out to be a no-op (e.g. the container was already
-   * running): one informational segment, no daemon phase, immediate {@code done ok}.
+   * running): one informational segment, no service phase, immediate {@code done ok}.
    */
   public synchronized void completeNoOp(String segmentName, String note) {
     if (terminal) {
@@ -319,12 +319,12 @@ public final class TechnicalProcess {
     openSegment(segmentName);
     appendLine(segmentName, note);
     settleSegment(segmentName, true);
-    expectDaemons(List.of());
+    expectServices(List.of());
     finishProvision(true);
   }
 
   /**
-   * Backstop for a process that never converges (e.g. a daemon stuck {@code STARTING} on a ready
+   * Backstop for a process that never converges (e.g. a service stuck {@code STARTING} on a ready
    * pattern that never matches): force the terminal {@code done failed} frame without settling the
    * still-open segments. No-op once terminal.
    */
@@ -337,10 +337,10 @@ public final class TechnicalProcess {
   }
 
   private void maybeFinish() {
-    if (terminal || provisionOk == null || !provisionOk || expectedDaemonSegments == null) {
+    if (terminal || provisionOk == null || !provisionOk || expectedServiceSegments == null) {
       return;
     }
-    for (String segmentName : expectedDaemonSegments) {
+    for (String segmentName : expectedServiceSegments) {
       Segment segment = segments.get(segmentName);
       if (segment == null || segment.ok == null) {
         return;

@@ -11,7 +11,7 @@ import jakarta.persistence.Table;
 import java.time.Instant;
 
 /**
- * One durable daemon event: a supervisor transition or an observer finding, written as it is
+ * One durable service event: a supervisor transition or an observer finding, written as it is
  * published so the history survives the JVM (last night's crash, what the classifier saw, what was
  * sent to the agent). Everything is a snapshot — {@code commandId} is a plain column, not an FK,
  * because command rows can be deleted while the event should stay inspectable. The anchor columns
@@ -21,7 +21,7 @@ import java.time.Instant;
  * copy).
  */
 @Entity
-@Table(name = "daemon_event")
+@Table(name = "service_event")
 public class ServiceEvent extends PanacheEntityBase {
 
   @Id public String id;
@@ -32,10 +32,10 @@ public class ServiceEvent extends PanacheEntityBase {
   @Column(name = "workspace_id", nullable = false)
   public String workspaceId;
 
-  @Column(name = "daemon_id", nullable = false)
+  @Column(name = "service_id", nullable = false)
   public String serviceId;
 
-  @Column(name = "daemon_name", nullable = false)
+  @Column(name = "service_name", nullable = false)
   public String serviceName;
 
   @Enumerated(EnumType.STRING)

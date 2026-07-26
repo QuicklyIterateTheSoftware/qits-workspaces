@@ -1,10 +1,10 @@
 package eu.wohlben.qits.domain.service.mapper;
 
-import eu.wohlben.qits.domain.daemon.dto.HealthCheckDto;
-import eu.wohlben.qits.domain.daemon.dto.WebViewDto;
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.repository.control.QitsConfig;
+import eu.wohlben.qits.domain.service.dto.HealthCheckDto;
 import eu.wohlben.qits.domain.service.dto.ServiceDefinitionDto;
+import eu.wohlben.qits.domain.service.dto.WebViewDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import java.util.Map;

@@ -3,11 +3,11 @@ package eu.wohlben.qits.domain.process.control;
 import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 
 /**
- * Adapts a command's raw chunked output (the daemon follower pipeline fans chunks out to {@link
+ * Adapts a command's raw chunked output (the service follower pipeline fans chunks out to {@link
  * CommandOutputSink}s) into per-line appends on one {@link TechnicalProcess} segment. Frames on
  * {@code '\n'} with a trailing {@code '\r'} stripped, like {@code CommandSession}'s audit-log
  * framer. Reports closed once its segment settled (or the process ended), so the fan-out prunes it
- * and a chatty daemon stops feeding an already-decided segment.
+ * and a chatty service stops feeding an already-decided segment.
  */
 public final class SegmentLineSink implements CommandOutputSink {
 

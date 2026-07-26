@@ -14,11 +14,11 @@ import java.util.List;
 import org.jboss.logging.Logger;
 
 /**
- * The hub daemon events flow through: every published event is persisted as a {@code daemon_event}
- * row (synchronously — events are throttled and low-volume, and a durable row is the point) and
- * everything above INFO is forwarded to the agent sink. The write replaces the old in-memory ring:
- * with the row committed before publish returns, the DB is the feed. A persistence failure is
- * logged and does not block the agent notification.
+ * The hub service events flow through: every published event is persisted as a {@code
+ * service_event} row (synchronously — events are throttled and low-volume, and a durable row is the
+ * point) and everything above INFO is forwarded to the agent sink. The write replaces the old
+ * in-memory ring: with the row committed before publish returns, the DB is the feed. A persistence
+ * failure is logged and does not block the agent notification.
  */
 @ApplicationScoped
 public class ServiceEventService {
@@ -27,9 +27,9 @@ public class ServiceEventService {
 
   @Inject ServiceEventPersister persister;
 
-  @Inject ServiceEventRepository daemonEventRepository;
+  @Inject ServiceEventRepository serviceEventRepository;
 
-  @Inject ServiceEventMapper daemonEventMapper;
+  @Inject ServiceEventMapper serviceEventMapper;
 
   @Inject ServiceAgentNotifier agentNotifier;
 
@@ -39,15 +39,15 @@ public class ServiceEventService {
     try {
       persister.persist(event);
     } catch (RuntimeException e) {
-      LOG.warnf(e, "Failed to persist daemon event: %s", event.summary());
+      LOG.warnf(e, "Failed to persist service event: %s", event.summary());
     }
     changePublisher.fire(
-        event.repoId(), event.workspaceId(), WorkspaceChangeHint.Topic.DAEMON_EVENTS);
+        event.repoId(), event.workspaceId(), WorkspaceChangeHint.Topic.SERVICE_EVENTS);
     if (event.severity() != null && event.severity() != ServiceEventSeverity.INFO) {
       try {
         agentNotifier.deliver(event);
       } catch (RuntimeException e) {
-        LOG.warnf(e, "Agent notification failed for daemon event: %s", event.summary());
+        LOG.warnf(e, "Agent notification failed for service event: %s", event.summary());
       }
     }
   }
@@ -62,10 +62,10 @@ public class ServiceEventService {
       String source,
       int page,
       int pageSize) {
-    return daemonEventRepository
+    return serviceEventRepository
         .find(repoId, workspaceId, severity, since, source, page, pageSize)
         .stream()
-        .map(daemonEventMapper::toDto)
+        .map(serviceEventMapper::toDto)
         .toList();
   }
 }

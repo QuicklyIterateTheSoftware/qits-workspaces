@@ -1,8 +1,6 @@
 package eu.wohlben.qits.domain.service.dto;
 
-import eu.wohlben.qits.domain.daemon.dto.HealthCheckDto;
-import eu.wohlben.qits.domain.daemon.dto.WebViewDto;
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import java.util.List;
 import java.util.Map;
 

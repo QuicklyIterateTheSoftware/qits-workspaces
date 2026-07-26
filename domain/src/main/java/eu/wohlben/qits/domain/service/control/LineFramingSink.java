@@ -4,7 +4,7 @@ import eu.wohlben.qits.domain.command.control.CommandOutputSink;
 import java.util.regex.Pattern;
 
 /**
- * Base for daemon observers: adapts the registry's raw-chunk {@link CommandOutputSink} fan-out to
+ * Base for service observers: adapts the registry's raw-chunk {@link CommandOutputSink} fan-out to
  * per-line consumption. PTY output is byte-framed and full of ANSI escapes, so chunks are
  * reassembled into lines and stripped of escape sequences before {@link #onLine}. Always open —
  * observers live exactly as long as the session that fans out to them.

@@ -15,7 +15,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
- * The durable event feed: published events land as {@code daemon_event} rows (no in-memory ring
+ * The durable event feed: published events land as {@code service_event} rows (no in-memory ring
  * anywhere in the path) and come back from {@code GET /api/service-events} newest first, narrowed
  * by the severity/source/workspace filters.
  */
@@ -36,7 +36,7 @@ public class ServiceEventControllerTest {
     return new ServiceEventDto(
         repoId,
         "work",
-        "daemon-1",
+        "service-1",
         "dev-server",
         kind,
         severity,

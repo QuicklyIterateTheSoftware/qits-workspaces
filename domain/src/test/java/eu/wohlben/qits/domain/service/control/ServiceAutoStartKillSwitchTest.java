@@ -3,7 +3,6 @@ package eu.wohlben.qits.domain.service.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
@@ -12,6 +11,7 @@ import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -62,7 +62,7 @@ public class ServiceAutoStartKillSwitchTest {
     var project = projectService.create("KillSwitch Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    String daemonId = "auto";
+    String serviceId = "auto";
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -71,7 +71,7 @@ public class ServiceAutoStartKillSwitchTest {
             null,
             List.of(
                 new QitsConfig.ServiceDecl(
-                    daemonId,
+                    serviceId,
                     "auto",
                     null,
                     "sleep 300",
@@ -93,8 +93,8 @@ public class ServiceAutoStartKillSwitchTest {
     // is still listed, but as an unstarted STOPPED placeholder.
     Thread.sleep(1500);
     ServiceInstanceDto instance =
-        supervisor.effectiveDaemons(repo.id, "work").stream()
-            .filter(i -> i.daemon().id().equals(daemonId))
+        supervisor.effectiveServices(repo.id, "work").stream()
+            .filter(i -> i.definition().id().equals(serviceId))
             .findFirst()
             .orElseThrow();
     assertEquals(

@@ -5,7 +5,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
@@ -13,6 +12,7 @@ import eu.wohlben.qits.domain.repository.control.QitsConfig;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.service.control.ServiceSupervisor;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -57,7 +57,7 @@ public class ServiceProxyRouteTest {
     @Override
     public Map<String, String> getConfigOverrides() {
       try {
-        Path tempDir = Files.createTempDirectory("qits-daemon-proxy-test-repos");
+        Path tempDir = Files.createTempDirectory("qits-service-proxy-test-repos");
         return Map.of("qits.repositories.data-dir", tempDir.toString());
       } catch (Exception e) {
         throw new RuntimeException(e);
@@ -90,8 +90,9 @@ public class ServiceProxyRouteTest {
   private HttpServer echoServer;
   private final AtomicInteger echoHits = new AtomicInteger();
   // Static: JUnit instantiates the class per test method, so an instance counter would reset and
-  // every test would stage the same id (the proxy keys instances by (workspaceId, daemonId) alone).
-  private static final AtomicInteger daemonSeq = new AtomicInteger();
+  // every test would stage the same id (the proxy keys instances by (workspaceId, serviceId)
+  // alone).
+  private static final AtomicInteger serviceSeq = new AtomicInteger();
   private final java.util.concurrent.atomic.AtomicReference<String> lastHostHeader =
       new java.util.concurrent.atomic.AtomicReference<>();
 
@@ -140,13 +141,13 @@ public class ServiceProxyRouteTest {
    * staged before the workspace so the supervisor resolves the definition from the in-container
    * config when the start registers it.
    */
-  private Setup startDaemon(String basePath) throws Exception {
+  private Setup startService(String basePath) throws Exception {
     String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
     var project = projectService.create("Proxy Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
-    // Unique per setup: the proxy/supervisor key instances by (workspaceId, daemonId) alone, so a
+    // Unique per setup: the proxy/supervisor key instances by (workspaceId, serviceId) alone, so a
     // fixed id would collide with a previous test's stopped instance ("work" repeats across repos).
-    String daemonId = SERVICE_NAME + "-" + daemonSeq.incrementAndGet();
+    String serviceId = SERVICE_NAME + "-" + serviceSeq.incrementAndGet();
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -155,7 +156,7 @@ public class ServiceProxyRouteTest {
             null,
             List.of(
                 new QitsConfig.ServiceDecl(
-                    daemonId,
+                    serviceId,
                     SERVICE_NAME,
                     null,
                     "sleep 300",
@@ -172,27 +173,27 @@ public class ServiceProxyRouteTest {
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
     // The proxy origin resolves against a real (fake) container; provision it before READY.
     workspaceService.ensureContainer(repo.id, "work");
-    supervisor.start(repo.id, "work", daemonId);
-    return new Setup(repo.id, daemonId);
+    supervisor.start(repo.id, "work", serviceId);
+    return new Setup(repo.id, serviceId);
   }
 
-  /** Bring a started service READY by playing the daemon event the supervisor projects. */
-  private Setup setUpReadyDaemon(String basePath) throws Exception {
-    Setup setup = startDaemon(basePath);
+  /** Bring a started service READY by playing the service event the supervisor projects. */
+  private Setup setUpReadyService(String basePath) throws Exception {
+    Setup setup = startService(basePath);
     driver.sink().onState(setup.repoId(), "work", SERVICE_NAME, "READY", null);
     awaitStatus(setup, ServiceStatus.READY);
     return setup;
   }
 
-  private record Setup(String repoId, String daemonId) {}
+  private record Setup(String repoId, String serviceId) {}
 
   private void awaitStatus(Setup setup, ServiceStatus expected) throws InterruptedException {
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     ServiceStatus last = null;
     while (System.currentTimeMillis() < deadline) {
       last =
-          supervisor.effectiveDaemons(setup.repoId(), "work").stream()
-              .filter(i -> i.daemon().id().equals(setup.daemonId()))
+          supervisor.effectiveServices(setup.repoId(), "work").stream()
+              .filter(i -> i.definition().id().equals(setup.serviceId()))
               .findFirst()
               .map(i -> i.status())
               .orElse(null);
@@ -206,7 +207,7 @@ public class ServiceProxyRouteTest {
 
   private void stopQuietly(Setup setup) {
     try {
-      supervisor.stop(setup.repoId(), "work", setup.daemonId());
+      supervisor.stop(setup.repoId(), "work", setup.serviceId());
       // The daemon owns the process — it reports STOPPED, which the projection settles.
       driver.sink().onState(setup.repoId(), "work", SERVICE_NAME, "STOPPED", 0);
       awaitStatus(setup, ServiceStatus.STOPPED);
@@ -217,9 +218,9 @@ public class ServiceProxyRouteTest {
 
   @Test
   public void forwardsVerbatimRedirectsBareKeyAndRefusesAfterStop() throws Exception {
-    Setup setup = setUpReadyDaemon(null);
+    Setup setup = setUpReadyService(null);
     try {
-      String base = "/service/work/" + setup.daemonId();
+      String base = "/service/work/" + setup.serviceId();
 
       // Verbatim passthrough: the origin sees the unstripped path and query.
       given()
@@ -263,7 +264,7 @@ public class ServiceProxyRouteTest {
     // Stopped: the instance still resolves, but the proxy answers 502 instead of forwarding.
     int hitsBefore = echoHits.get();
     given()
-        .get("/service/work/" + setup.daemonId() + "/")
+        .get("/service/work/" + setup.serviceId() + "/")
         .then()
         .statusCode(502)
         .body(containsString("not running"));
@@ -276,10 +277,10 @@ public class ServiceProxyRouteTest {
     // must present the origin's Host as `localhost` (always allow-listed by Angular's dev server)
     // instead of the container's DNS name (rejected with "This host is not allowed"). TCP still
     // targets the fixed origin; only the Host/:authority header is rewritten.
-    Setup setup = setUpReadyDaemon(null);
+    Setup setup = setUpReadyService(null);
     try {
       given()
-          .get("/service/work/" + setup.daemonId() + "/index.html")
+          .get("/service/work/" + setup.serviceId() + "/index.html")
           .then()
           .statusCode(200)
           .body(containsString("echo:"));
@@ -296,9 +297,9 @@ public class ServiceProxyRouteTest {
   public void basePathPrefixedRequestsForwardVerbatim() throws Exception {
     // A service with a webView.basePath serves under /service/{w}/{d}/app/ — the proxy stays a dumb
     // passthrough; the extra sub-path is part of the verbatim-forwarded path, never stripped.
-    Setup setup = setUpReadyDaemon("app");
+    Setup setup = setUpReadyService("app");
     try {
-      String servedBase = "/service/work/" + setup.daemonId() + "/app";
+      String servedBase = "/service/work/" + setup.serviceId() + "/app";
       given()
           .get(servedBase + "/main.js")
           .then()
@@ -319,13 +320,13 @@ public class ServiceProxyRouteTest {
   }
 
   @Test
-  public void startingDaemonGetsTheAutoRefreshingSplash() throws Exception {
+  public void startingServiceGetsTheAutoRefreshingSplash() throws Exception {
     // A service that never reports READY stays in STARTING (the daemon isn't played to READY here).
-    Setup setup = startDaemon(null);
+    Setup setup = startService(null);
     try {
       String body =
           given()
-              .get("/service/work/" + setup.daemonId() + "/")
+              .get("/service/work/" + setup.serviceId() + "/")
               .then()
               .statusCode(200)
               .extract()

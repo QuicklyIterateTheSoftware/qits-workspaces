@@ -3,7 +3,6 @@ package eu.wohlben.qits.domain.service.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
@@ -12,6 +11,7 @@ import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The container&#8594;service coupling under the pure-projection host (docs/issues/resolved/
  * 2026-07-25_host-side-service-supervision-should-move-to-daemon.md): a container-started event
- * (via the bootstrap pass-through to {@code WorkspaceReadyForDaemons}) registers a projection for
+ * (via the bootstrap pass-through to {@code WorkspaceReadyForServices}) registers a projection for
  * the workspace config's auto-start services and asks the daemon to start them, leaves the opt-out
  * ones untouched, tolerates an already-running instance without blocking the rest, and is gated by
  * the kill switch (off by default in tests — this class re-enables it via its profile; the
@@ -45,7 +45,7 @@ public class ServiceAutoStarterTest {
     @Override
     public Map<String, String> getConfigOverrides() {
       try {
-        Path tempDir = Files.createTempDirectory("qits-daemon-autostart-test-repos");
+        Path tempDir = Files.createTempDirectory("qits-service-autostart-test-repos");
         return Map.of(
             "qits.repositories.data-dir",
             tempDir.toString(),
@@ -87,7 +87,7 @@ public class ServiceAutoStarterTest {
   }
 
   /** Add one auto-start/opt-out service to the workspace's staged config; returns its id. */
-  private String createDaemon(String repoId, String name, boolean autoStart) {
+  private String createService(String repoId, String name, boolean autoStart) {
     staged.add(
         new QitsConfig.ServiceDecl(
             name,
@@ -107,19 +107,19 @@ public class ServiceAutoStarterTest {
     return name;
   }
 
-  private ServiceInstanceDto instanceOf(String repoId, String daemonId) {
-    return supervisor.effectiveDaemons(repoId, "work").stream()
-        .filter(i -> i.daemon().id().equals(daemonId))
+  private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
+    return supervisor.effectiveServices(repoId, "work").stream()
+        .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElse(null);
   }
 
-  private ServiceInstanceDto awaitStatus(String repoId, String daemonId, ServiceStatus expected)
+  private ServiceInstanceDto awaitStatus(String repoId, String serviceId, ServiceStatus expected)
       throws InterruptedException {
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     ServiceInstanceDto last = null;
     while (System.currentTimeMillis() < deadline) {
-      last = instanceOf(repoId, daemonId);
+      last = instanceOf(repoId, serviceId);
       if (last != null && last.status() == expected) {
         return last;
       }
@@ -131,8 +131,8 @@ public class ServiceAutoStarterTest {
   @Test
   public void startedEventAsksTheDaemonToStartAutoStartsAndSkipsOptOuts() throws Exception {
     String repoId = repoWithWorkspace();
-    String autoId = createDaemon(repoId, "auto", true);
-    String optOutId = createDaemon(repoId, "manual-only", false);
+    String autoId = createService(repoId, "auto", true);
+    String optOutId = createService(repoId, "manual-only", false);
 
     containerEvents.fireStarted(repoId, "work");
 
@@ -140,7 +140,7 @@ public class ServiceAutoStarterTest {
     // start it...
     awaitStatus(repoId, autoId, ServiceStatus.STARTING);
     assertTrue(driver.started().contains("auto"), "the daemon was asked to start the auto-start");
-    // ...while the opt-out service was never touched — effectiveDaemons still lists it, but as an
+    // ...while the opt-out service was never touched — effectiveServices still lists it, but as an
     // unstarted STOPPED placeholder.
     assertEquals(
         ServiceStatus.STOPPED,
@@ -156,8 +156,8 @@ public class ServiceAutoStarterTest {
   @Test
   public void alreadyLiveInstanceIsToleratedAndDoesNotBlockOthers() throws Exception {
     String repoId = repoWithWorkspace();
-    String firstId = createDaemon(repoId, "first", true);
-    String secondId = createDaemon(repoId, "second", true);
+    String firstId = createService(repoId, "first", true);
+    String secondId = createService(repoId, "second", true);
 
     // Start the first service manually and bring it READY, so the auto-start pass hits an
     // already-running instance.
@@ -183,7 +183,7 @@ public class ServiceAutoStarterTest {
     // The projection host never re-enters container provisioning on start (unlike the retired tmux
     // supervisor), so a single container-started event yields exactly one start request, no storm.
     String repoId = repoWithWorkspace();
-    String autoId = createDaemon(repoId, "auto", true);
+    String autoId = createService(repoId, "auto", true);
 
     containerEvents.fireStarted(repoId, "work");
     awaitStatus(repoId, autoId, ServiceStatus.STARTING);
@@ -199,7 +199,7 @@ public class ServiceAutoStarterTest {
   public void manualStartStillWorksWithAutoStartOff() throws Exception {
     // Auto-start is opt-out per service, but manual start/stop stays available for any service.
     String repoId = repoWithWorkspace();
-    String optOutId = createDaemon(repoId, "manual-only", false);
+    String optOutId = createService(repoId, "manual-only", false);
 
     supervisor.start(repoId, "work", optOutId);
     assertTrue(driver.started().contains("manual-only"), "a manual start asks the daemon");

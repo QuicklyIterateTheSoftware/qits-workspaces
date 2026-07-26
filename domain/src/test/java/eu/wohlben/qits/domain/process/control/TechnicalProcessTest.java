@@ -64,7 +64,7 @@ class TechnicalProcessTest {
     process.appendLine("clone", "done.");
     process.settleSegment("clone", true);
     process.finishProvision(true);
-    process.expectDaemons(List.of());
+    process.expectServices(List.of());
 
     assertEquals(
         List.of(
@@ -83,29 +83,29 @@ class TechnicalProcessTest {
   }
 
   @Test
-  void doneWaitsForEveryExpectedDaemonSegmentToSettle() {
+  void doneWaitsForEveryExpectedServiceSegmentToSettle() {
     TechnicalProcess process = process();
     process.finishProvision(true);
     assertFalse(process.isTerminal(), "no daemon declaration yet — must stay open");
 
-    process.expectDaemons(List.of("web", "worker"));
+    process.expectServices(List.of("web", "worker"));
     assertFalse(process.isTerminal());
 
-    process.settleSegment(TechnicalProcess.daemonSegment("web"), true);
+    process.settleSegment(TechnicalProcess.serviceSegment("web"), true);
     assertFalse(process.isTerminal());
 
-    process.settleSegment(TechnicalProcess.daemonSegment("worker"), true);
+    process.settleSegment(TechnicalProcess.serviceSegment("worker"), true);
     assertTrue(process.isTerminal());
   }
 
   @Test
-  void aCrashedDaemonYieldsDoneFailed() {
+  void aCrashedServiceYieldsDoneFailed() {
     TechnicalProcess process = process();
     RecordingListener listener = new RecordingListener();
     process.attach(listener);
     process.finishProvision(true);
-    process.expectDaemons(List.of("web"));
-    process.settleSegment(TechnicalProcess.daemonSegment("web"), false);
+    process.expectServices(List.of("web"));
+    process.settleSegment(TechnicalProcess.serviceSegment("web"), false);
 
     assertTrue(process.isTerminal());
     assertEquals("failed", listener.frames.get(listener.frames.size() - 1).status());
@@ -119,7 +119,7 @@ class TechnicalProcessTest {
     process.openSegment("clone");
     process.failProvision("Clone into container failed: boom");
 
-    assertTrue(process.isTerminal(), "provision failure ends without any daemon phase");
+    assertTrue(process.isTerminal(), "provision failure ends without any service phase");
     TechnicalProcessFrame settle =
         listener.frames.stream()
             .filter(f -> "segment-settled".equals(f.kind()))

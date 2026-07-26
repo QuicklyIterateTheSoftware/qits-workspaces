@@ -2,7 +2,6 @@ package eu.wohlben.qits.domain.service.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceServiceDriver;
@@ -11,6 +10,7 @@ import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceContainerEventPublisher;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -60,7 +60,7 @@ public class ServiceSettleKillSwitchTest {
     var project = projectService.create("Settle KillSwitch Project", null);
     var repo = repositoryService.cloneRepository(fixtureUrl, null, project);
     workspaceService.createWorkspace(repo.id, "work", "master", "work");
-    String daemonId = "dev";
+    String serviceId = "dev";
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -69,7 +69,7 @@ public class ServiceSettleKillSwitchTest {
             null,
             List.of(
                 new QitsConfig.ServiceDecl(
-                    daemonId,
+                    serviceId,
                     "dev",
                     null,
                     "sleep 300",
@@ -83,7 +83,7 @@ public class ServiceSettleKillSwitchTest {
                     null,
                     null)),
             null));
-    supervisor.start(repo.id, "work", daemonId);
+    supervisor.start(repo.id, "work", serviceId);
     driver.sink().onState(repo.id, "work", "dev", "READY", null);
 
     // The settle event fires, but the kill switch means the coupler ignores it: the service (still
@@ -93,13 +93,13 @@ public class ServiceSettleKillSwitchTest {
     Thread.sleep(300);
     assertEquals(
         ServiceStatus.READY,
-        instanceOf(repo.id, daemonId).status(),
+        instanceOf(repo.id, serviceId).status(),
         "kill switch off ⇒ the stopping event settles nothing");
   }
 
-  private ServiceInstanceDto instanceOf(String repoId, String daemonId) {
-    return supervisor.effectiveDaemons(repoId, "work").stream()
-        .filter(i -> i.daemon().id().equals(daemonId))
+  private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
+    return supervisor.effectiveServices(repoId, "work").stream()
+        .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElseThrow();
   }

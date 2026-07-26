@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
@@ -16,6 +15,7 @@ import eu.wohlben.qits.domain.repository.control.RepositoryService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -92,15 +92,15 @@ public class ServiceSupervisorProjectionTest {
     return name;
   }
 
-  private ServiceInstanceDto instanceOf(String repoId, String daemonId) {
-    return supervisor.effectiveDaemons(repoId, "work").stream()
-        .filter(d -> d.daemon().id().equals(daemonId))
+  private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
+    return supervisor.effectiveServices(repoId, "work").stream()
+        .filter(d -> d.definition().id().equals(serviceId))
         .findFirst()
         .orElseThrow();
   }
 
-  private ServiceStatus statusOf(String repoId, String daemonId) {
-    return instanceOf(repoId, daemonId).status();
+  private ServiceStatus statusOf(String repoId, String serviceId) {
+    return instanceOf(repoId, serviceId).status();
   }
 
   @Test
@@ -166,7 +166,7 @@ public class ServiceSupervisorProjectionTest {
   }
 
   @Test
-  void oneRunningInstancePerWorkspaceAndDaemon() throws Exception {
+  void oneRunningInstancePerWorkspaceAndService() throws Exception {
     String repoId = repoWithWorkspace();
     String id = createService("single", "sleep 30");
 
@@ -174,7 +174,7 @@ public class ServiceSupervisorProjectionTest {
     assertThrows(
         BadRequestException.class,
         () -> supervisor.start(repoId, "work", id),
-        "second start of the same (workspace, daemon) must be rejected");
+        "second start of the same (workspace, service) must be rejected");
   }
 
   @Test
@@ -192,7 +192,7 @@ public class ServiceSupervisorProjectionTest {
         "/service/work/" + id + "/app/",
         ready.proxyPath(),
         "the served base is the proxy prefix plus the basePath (entryPath is not part of it)");
-    assertEquals("greeting", ready.daemon().webView().entryPath());
+    assertEquals("greeting", ready.definition().webView().entryPath());
 
     var target = supervisor.proxyTarget("work", id);
     assertTrue(target.isPresent(), "a live web-viewable service has a proxy target");
@@ -202,8 +202,8 @@ public class ServiceSupervisorProjectionTest {
     assertEquals(new ProxyOrigin("127.0.0.1", 8123), target.get().origin());
 
     assertTrue(
-        supervisor.proxyTarget("work", "no-such-daemon").isEmpty(),
-        "unknown daemon id resolves to nothing");
+        supervisor.proxyTarget("work", "no-such-service").isEmpty(),
+        "unknown service id resolves to nothing");
 
     supervisor.stop(repoId, "work", id);
     driver.sink().onState(repoId, "work", "web", "STOPPED", 0);

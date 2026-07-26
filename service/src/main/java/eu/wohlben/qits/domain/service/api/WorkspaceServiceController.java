@@ -15,8 +15,8 @@ import java.util.List;
 /**
  * The runtime surface of services in one workspace: the config-declared services with their
  * supervised status (all of them, running or not — the everything-visible convention) and
- * start/stop. {@code {daemonId}} path params carry the config-declared service {@code id:}
- * (defaulting to its name). The event feed moved to the durable {@code /daemon-events} endpoint.
+ * start/stop. {@code {serviceId}} path params carry the config-declared service {@code id:}
+ * (defaulting to its name). The event feed moved to the durable {@code /service-events} endpoint.
  */
 @Path("/repositories/{repoId}/workspaces/{workspaceId}/services")
 @Produces(MediaType.APPLICATION_JSON)
@@ -35,7 +35,7 @@ public class WorkspaceServiceController {
   public ListWorkspaceServicesRequest.Response list(
       @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
     var entries =
-        serviceSupervisor.effectiveDaemons(repoId, workspaceId).stream()
+        serviceSupervisor.effectiveServices(repoId, workspaceId).stream()
             .map(ListWorkspaceServicesRequest.Response.Entry::new)
             .toList();
     return new ListWorkspaceServicesRequest.Response(entries);
@@ -46,12 +46,13 @@ public class WorkspaceServiceController {
   }
 
   @POST
-  @Path("/{daemonId}/start")
+  @Path("/{serviceId}/start")
   public StartServiceRequest.Response start(
       @PathParam("repoId") String repoId,
       @PathParam("workspaceId") String workspaceId,
-      @PathParam("daemonId") String daemonId) {
-    return new StartServiceRequest.Response(serviceSupervisor.start(repoId, workspaceId, daemonId));
+      @PathParam("serviceId") String serviceId) {
+    return new StartServiceRequest.Response(
+        serviceSupervisor.start(repoId, workspaceId, serviceId));
   }
 
   public static record StopServiceRequest() {
@@ -59,11 +60,11 @@ public class WorkspaceServiceController {
   }
 
   @POST
-  @Path("/{daemonId}/stop")
+  @Path("/{serviceId}/stop")
   public StopServiceRequest.Response stop(
       @PathParam("repoId") String repoId,
       @PathParam("workspaceId") String workspaceId,
-      @PathParam("daemonId") String daemonId) {
-    return new StopServiceRequest.Response(serviceSupervisor.stop(repoId, workspaceId, daemonId));
+      @PathParam("serviceId") String serviceId) {
+    return new StopServiceRequest.Response(serviceSupervisor.stop(repoId, workspaceId, serviceId));
   }
 }

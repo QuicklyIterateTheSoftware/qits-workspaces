@@ -4,7 +4,7 @@ import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
 import java.util.Optional;
 
 /**
- * Classifies a batch of daemon log lines into an error/warning finding (or nothing). The default
+ * Classifies a batch of service log lines into an error/warning finding (or nothing). The default
  * implementation ({@link LogLevelClassifier}) works purely locally off the lines' own severity
  * tokens; the interface is the extension point a future model-backed classifier would implement —
  * deliberately not built today: qits makes no outbound API calls from log observation.

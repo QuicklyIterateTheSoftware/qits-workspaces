@@ -22,21 +22,21 @@ import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * The daemon web-view reverse proxy: {@code /service/{workspaceId}/{daemonId}/*} on the qits origin
- * forwards to the daemon's dev server, reached by the workspace container's DNS name on the shared
- * {@code qits-net} network — verbatim passthrough, no prefix stripping (the one rewrite is the
- * {@code Host} header, see {@link #hostRewrite}). The dev server itself serves under the prefix (it
- * was launched with {@code QITS_PUBLIC_BASE}, see {@link ServiceProxyPath}), so assets and the HMR
- * websocket stay inside it; vertx-http-proxy forwards WebSocket upgrades by default. Because the
- * frame shares the qits origin, the UI's DOM picker reads {@code iframe.contentDocument} directly —
- * no injection.
+ * The service web-view reverse proxy: {@code /service/{workspaceId}/{serviceId}/*} on the qits
+ * origin forwards to the service's dev server, reached by the workspace container's DNS name on the
+ * shared {@code qits-net} network — verbatim passthrough, no prefix stripping (the one rewrite is
+ * the {@code Host} header, see {@link #hostRewrite}). The dev server itself serves under the prefix
+ * (it was launched with {@code QITS_PUBLIC_BASE}, see {@link ServiceProxyPath}), so assets and the
+ * HMR websocket stay inside it; vertx-http-proxy forwards WebSocket upgrades by default. Because
+ * the frame shares the qits origin, the UI's DOM picker reads {@code iframe.contentDocument}
+ * directly — no injection.
  *
  * <p>Security posture: the origin is resolved exclusively from supervisor state — the container
- * name and port come from the daemon definition recorded at launch, never from any request
+ * name and port come from the service definition recorded at launch, never from any request
  * component; unknown keys 404 without connecting anywhere (the SSRF constraints from the feature
  * doc). Two accepted consequences, both bounded by the existing trust model ("qits runs these apps
  * as processes with the user's privileges"): the framed app's JS runs same-origin with qits, and
- * every web-viewable daemon is reachable by anyone who can reach qits itself. Note {@code
+ * every web-viewable service is reachable by anyone who can reach qits itself. Note {@code
  * /service/*} is a raw router route, so websockets-next's {@code SameOriginUpgradeCheck} does not
  * guard it — but the global {@code QitsAuthPolicy} (auth-core) does: in every auth build variant
  * this route requires an authenticated identity like the rest of the UI surface (the oauth session
@@ -51,7 +51,7 @@ public class ServiceProxyRoute {
   @Inject ServiceSupervisor supervisor;
 
   /**
-   * Only relevant when qits itself runs under a path prefix (a qits-in-qits daemon bridges {@code
+   * Only relevant when qits itself runs under a path prefix (a qits-in-qits service bridges {@code
    * -Dquarkus.http.root-path}): the route below is registered on the root-path-mounted router, so
    * it matches relative to the prefix — but {@code rc.request().path()} returns the FULL path, so
    * the segment parse must strip the prefix first. {@code "/"} (the normal deployment) strips
@@ -74,11 +74,11 @@ public class ServiceProxyRoute {
     String[] segments =
         path.substring(rootPrefix.length() + ServiceProxyPath.PREFIX.length()).split("/", 3);
     if (segments.length < 2 || segments[0].isEmpty() || segments[1].isEmpty()) {
-      respond(rc, 404, "No daemon here.");
+      respond(rc, 404, "No service here.");
       return;
     }
     String workspaceId = segments[0];
-    String daemonId = segments[1];
+    String serviceId = segments[1];
 
     if (segments.length == 2) {
       // Redirect the bare /service/{w}/{d} to the trailing-slash form so relative URLs inside the
@@ -92,17 +92,17 @@ public class ServiceProxyRoute {
     }
 
     // The request stays untouched while the supervisor lookup runs off the event loop (its monitor
-    // can be held for the duration of a daemon launch); the proxy resumes it when forwarding.
+    // can be held for the duration of a service launch); the proxy resumes it when forwarding.
     rc.request().pause();
     rc.vertx()
-        .executeBlocking(() -> supervisor.proxyTarget(workspaceId, daemonId))
-        .onFailure(e -> respond(rc, 502, "Daemon lookup failed."))
+        .executeBlocking(() -> supervisor.proxyTarget(workspaceId, serviceId))
+        .onFailure(e -> respond(rc, 502, "Service lookup failed."))
         .onSuccess(target -> route(rc, target));
   }
 
   private void route(RoutingContext rc, Optional<ServiceSupervisor.ProxyTarget> target) {
     if (target.isEmpty()) {
-      respond(rc, 404, "No web-viewable daemon here.");
+      respond(rc, 404, "No web-viewable service here.");
       return;
     }
     ServiceStatus status = target.get().status();
@@ -112,7 +112,7 @@ public class ServiceProxyRoute {
           respond(
               rc,
               502,
-              "The daemon is not running (" + status + ") — start it from the workspace page.");
+              "The service is not running (" + status + ") — start it from the workspace page.");
       case READY -> {
         ProxyOrigin origin = target.get().origin();
         if (origin == null) {
@@ -161,7 +161,7 @@ public class ServiceProxyRoute {
             + "<meta http-equiv=\"refresh\" content=\"2\">"
             + "<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;"
             + "justify-content:center;height:100vh;margin:0;color:#666}</style></head>"
-            + "<body><p>daemon is "
+            + "<body><p>service is "
             + status.name().toLowerCase()
             + "… this page refreshes automatically</p></body></html>";
     rc.response().setStatusCode(200).putHeader("Content-Type", "text/html").end(html);

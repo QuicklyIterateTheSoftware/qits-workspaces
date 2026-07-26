@@ -1,8 +1,5 @@
 package eu.wohlben.qits.domain.service.control;
 
-import eu.wohlben.qits.domain.daemon.dto.HealthCheckDto;
-import eu.wohlben.qits.domain.daemon.dto.HealthCheckState;
-import eu.wohlben.qits.domain.daemon.dto.HealthCheckStatusDto;
 import eu.wohlben.qits.domain.error.BadRequestException;
 import eu.wohlben.qits.domain.error.NotFoundException;
 import eu.wohlben.qits.domain.process.control.TechnicalProcess;
@@ -10,6 +7,9 @@ import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.ProxyOrigin;
 import eu.wohlben.qits.domain.repository.control.WorkspaceConfigReader;
 import eu.wohlben.qits.domain.repository.control.WorkspaceServiceDriver;
+import eu.wohlben.qits.domain.service.dto.HealthCheckDto;
+import eu.wohlben.qits.domain.service.dto.HealthCheckState;
+import eu.wohlben.qits.domain.service.dto.HealthCheckStatusDto;
 import eu.wohlben.qits.domain.service.dto.ServiceDefinitionDto;
 import eu.wohlben.qits.domain.service.dto.ServiceEventDto;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
@@ -34,14 +34,14 @@ import org.jboss.logging.Logger;
  * Host-side <b>projection</b> of the in-container {@code workspace-daemon}'s services (dev
  * servers). The daemon is the sole executor <em>and</em> supervisor: it spawns each declared
  * service, applies the restart policy with backoff, group-kills escaped forks, and pushes every
- * lifecycle transition home as a {@code DaemonEvent} over the control socket
+ * lifecycle transition home as a {@code ServiceTransition} over the control socket
  * (docs/epics/qits-workspace-daemon/ Part 4). This class keeps no process of its own — it
  * {@linkplain #subscribeProjection subscribes} once at startup and mirrors the streamed events onto
  * a thin display state machine ({@code STARTING → READY → RESTARTING → CRASHED → STOPPED}),
- * settling {@code daemon:<name>} process segments and resolving the web-view proxy origin. The only
- * outbound operations are the <b>subsequent</b> ones the daemon can't self-initiate: a {@linkplain
- * #start manual start} and a {@linkplain #stop stop signal}, both delegated over the {@link
- * WorkspaceServiceDriver}. Auto-start is entirely daemon-driven (the tail of its own boot
+ * settling {@code service:<name>} process segments and resolving the web-view proxy origin. The
+ * only outbound operations are the <b>subsequent</b> ones the daemon can't self-initiate: a
+ * {@linkplain #start manual start} and a {@linkplain #stop stop signal}, both delegated over the
+ * {@link WorkspaceServiceDriver}. Auto-start is entirely daemon-driven (the tail of its own boot
  * sequence), so the host never instructs it.
  *
  * <p>There is no host-execution fallback: a workspace with no live daemon simply cannot run a
@@ -64,7 +64,7 @@ public class ServiceSupervisor {
   private static final class Instance {
     final String repoId;
     final String workspaceId;
-    ServiceDefinitionDto daemon;
+    ServiceDefinitionDto definition;
     ServiceStatus status = ServiceStatus.STOPPED;
     int restartCount;
     boolean stopRequested;
@@ -73,7 +73,7 @@ public class ServiceSupervisor {
     TailSink tail;
 
     /**
-     * Where the daemon web-view proxy connects to reach the daemon's {@code webView.port} inside
+     * Where the service web-view proxy connects to reach the daemon's {@code webView.port} inside
      * the container — its DNS name + port on the shared network. Null when the daemon isn't
      * web-viewable; re-resolved each time the service reports READY.
      */
@@ -81,19 +81,19 @@ public class ServiceSupervisor {
 
     /**
      * The technical process tracking the container start that auto-started this instance, or null
-     * for manual/adopted starts. Its {@code daemon:<name>} segment receives the settle summary on
+     * for manual/adopted starts. Its {@code service:<name>} segment receives the settle summary on
      * the first terminal-ish transition (READY/CRASHED/STOPPED).
      */
     TechnicalProcess process;
 
-    Instance(String repoId, String workspaceId, ServiceDefinitionDto daemon) {
+    Instance(String repoId, String workspaceId, ServiceDefinitionDto definition) {
       this.repoId = repoId;
       this.workspaceId = workspaceId;
-      this.daemon = daemon;
+      this.definition = definition;
     }
   }
 
-  private record Key(String repoId, String workspaceId, String daemonId) {}
+  private record Key(String repoId, String workspaceId, String serviceId) {}
 
   private final Map<Key, Instance> instances = new ConcurrentHashMap<>();
 
@@ -148,17 +148,19 @@ public class ServiceSupervisor {
   }
 
   /**
-   * Start {@code daemonId} (the config-declared {@code id:}) in the workspace. One running instance
-   * per (workspace, daemon) is enforced — "restart" beats two dev servers fighting over a port.
+   * Start {@code serviceId} (the config-declared {@code id:}) in the workspace. One running
+   * instance per (workspace, service) is enforced — "restart" beats two dev servers fighting over a
+   * port.
    */
-  public synchronized ServiceInstanceDto start(String repoId, String workspaceId, String daemonId) {
-    return start(repoId, workspaceId, daemonId, null);
+  public synchronized ServiceInstanceDto start(
+      String repoId, String workspaceId, String serviceId) {
+    return start(repoId, workspaceId, serviceId, null);
   }
 
   /**
    * {@link #start(String, String, String)} with an optional {@link TechnicalProcess}: the auto
-   * start path passes the container start's process so this daemon's startup settles into its
-   * {@code daemon:<name>} segment.
+   * start path passes the container start's process so this service's startup settles into its
+   * {@code service:<name>} segment.
    *
    * <p>Either way the host only <em>registers a projection</em>. An auto-start (process != null,
    * from the lifecycle coupler) needs no instruction — the daemon self-starts the service from its
@@ -166,22 +168,22 @@ public class ServiceSupervisor {
    * manual start (process == null) asks the daemon to start it now over the socket.
    */
   public synchronized ServiceInstanceDto start(
-      String repoId, String workspaceId, String daemonId, TechnicalProcess process) {
-    ServiceDefinitionDto daemon =
+      String repoId, String workspaceId, String serviceId, TechnicalProcess process) {
+    ServiceDefinitionDto definition =
         resolveDefinitions(workspaceId).stream()
-            .filter(d -> d.id().equals(daemonId))
+            .filter(d -> d.id().equals(serviceId))
             .findFirst()
             .orElseThrow(
                 () ->
                     new NotFoundException(
-                        "Service not declared in the workspace qits config: " + daemonId));
-    Key key = new Key(repoId, workspaceId, daemonId);
+                        "Service not declared in the workspace qits config: " + serviceId));
+    Key key = new Key(repoId, workspaceId, serviceId);
     Instance existing = instances.get(key);
     if (existing != null && isLive(existing.status)) {
       throw new BadRequestException(
-          "Daemon '" + daemon.name() + "' is already running in this workspace");
+          "Service '" + definition.name() + "' is already running in this workspace");
     }
-    Instance instance = new Instance(repoId, workspaceId, daemon);
+    Instance instance = new Instance(repoId, workspaceId, definition);
     instance.process = process;
     instance.tail = new TailSink();
     instance.status = ServiceStatus.STARTING;
@@ -189,7 +191,8 @@ public class ServiceSupervisor {
     if (process == null && !serviceDriver.isUnsatisfied()) {
       serviceDriver
           .get()
-          .startService(workspaceId, daemon.name(), daemon.startScript(), daemon.environment());
+          .startService(
+              workspaceId, definition.name(), definition.startScript(), definition.environment());
     }
     return toInstanceDto(instance, null, workspaceId);
   }
@@ -200,8 +203,8 @@ public class ServiceSupervisor {
    * settles. Without a live driver there is nothing to signal — settle STOPPED locally so the UI
    * doesn't hang on a service the host can no longer reach.
    */
-  public synchronized ServiceInstanceDto stop(String repoId, String workspaceId, String daemonId) {
-    Instance instance = instances.get(new Key(repoId, workspaceId, daemonId));
+  public synchronized ServiceInstanceDto stop(String repoId, String workspaceId, String serviceId) {
+    Instance instance = instances.get(new Key(repoId, workspaceId, serviceId));
     if (instance == null || !isLive(instance.status)) {
       throw new NotFoundException("Daemon is not running in this workspace");
     }
@@ -209,7 +212,7 @@ public class ServiceSupervisor {
     if (!serviceDriver.isUnsatisfied()) {
       serviceDriver
           .get()
-          .signalService(workspaceId, instance.daemon.name(), instance.daemon.stopSignal());
+          .signalService(workspaceId, instance.definition.name(), instance.definition.stopSignal());
     } else {
       transition(instance, ServiceStatus.STOPPED, ServiceEventSeverity.INFO, "stopped", null);
     }
@@ -242,7 +245,8 @@ public class ServiceSupervisor {
       if (graceful && !serviceDriver.isUnsatisfied()) {
         serviceDriver
             .get()
-            .signalService(workspaceId, instance.daemon.name(), instance.daemon.stopSignal());
+            .signalService(
+                workspaceId, instance.definition.name(), instance.definition.stopSignal());
       }
       transition(
           instance, ServiceStatus.STOPPED, ServiceEventSeverity.INFO, "workspace stopped", null);
@@ -250,7 +254,8 @@ public class ServiceSupervisor {
   }
 
   /** Every config-declared service of the workspace with its projected runtime state. */
-  public synchronized List<ServiceInstanceDto> effectiveDaemons(String repoId, String workspaceId) {
+  public synchronized List<ServiceInstanceDto> effectiveServices(
+      String repoId, String workspaceId) {
     List<ServiceDefinitionDto> definitions = resolveDefinitions(workspaceId);
     List<ServiceInstanceDto> result = new ArrayList<>(definitions.size());
     for (ServiceDefinitionDto definition : definitions) {
@@ -266,7 +271,8 @@ public class ServiceSupervisor {
    * so this always resolves for a web-viewable service; null only when it isn't web-viewable.
    */
   private void resolveOrigin(Instance instance) {
-    Integer httpPort = instance.daemon.webView() != null ? instance.daemon.webView().port() : null;
+    Integer httpPort =
+        instance.definition.webView() != null ? instance.definition.webView().port() : null;
     if (httpPort == null) {
       instance.origin = null;
       return;
@@ -276,19 +282,19 @@ public class ServiceSupervisor {
   }
 
   /**
-   * The live proxy target for a (workspaceId, daemonId) pair — the daemon web-view proxy's only
-   * lookup. {@code daemonId} is the config-declared service id, unique within the workspace's
+   * The live proxy target for a (workspaceId, serviceId) pair — the service web-view proxy's only
+   * lookup. {@code serviceId} is the config-declared service id, unique within the workspace's
    * config; scoped to the workspace by the pair lookup. The port comes exclusively from projection
    * state (never from any request component) and targets localhost — the SSRF constraint. A present
    * target with a null {@code origin} means the service isn't reachable (e.g. the container is
    * gone) — the proxy 502s.
    */
-  public synchronized Optional<ProxyTarget> proxyTarget(String workspaceId, String daemonId) {
+  public synchronized Optional<ProxyTarget> proxyTarget(String workspaceId, String serviceId) {
     for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
       Key key = entry.getKey();
-      if (key.workspaceId().equals(workspaceId) && key.daemonId().equals(daemonId)) {
+      if (key.workspaceId().equals(workspaceId) && key.serviceId().equals(serviceId)) {
         Instance instance = entry.getValue();
-        if (instance.daemon.webView() == null) {
+        if (instance.definition.webView() == null) {
           return Optional.empty();
         }
         return Optional.of(new ProxyTarget(instance.status, instance.origin));
@@ -307,23 +313,29 @@ public class ServiceSupervisor {
   }
 
   private ServiceInstanceDto toInstanceDto(
-      Instance instance, ServiceDefinitionDto definition, String workspaceId) {
-    ServiceDefinitionDto daemon = definition != null ? definition : instance.daemon;
+      Instance instance, ServiceDefinitionDto declared, String workspaceId) {
+    ServiceDefinitionDto definition = declared != null ? declared : instance.definition;
     String proxyPath =
-        daemon.webView() != null
-            ? ServiceProxyPath.servedBase(workspaceId, daemon.id(), daemon.webView().basePath())
+        definition.webView() != null
+            ? ServiceProxyPath.servedBase(
+                workspaceId, definition.id(), definition.webView().basePath())
             : null;
     if (instance == null) {
       return new ServiceInstanceDto(
-          daemon, ServiceStatus.STOPPED, 0, null, proxyPath, unknownHealth(daemon.healthChecks()));
+          definition,
+          ServiceStatus.STOPPED,
+          0,
+          null,
+          proxyPath,
+          unknownHealth(definition.healthChecks()));
     }
     return new ServiceInstanceDto(
-        daemon,
+        definition,
         instance.status,
         instance.restartCount,
         null,
         proxyPath,
-        unknownHealth(daemon.healthChecks()));
+        unknownHealth(definition.healthChecks()));
   }
 
   /**
@@ -353,13 +365,13 @@ public class ServiceSupervisor {
       String logExcerpt) {
     instance.status = status;
     settleProcessSegment(instance, status, summary);
-    changePublisher.fire(instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.DAEMONS);
+    changePublisher.fire(instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.SERVICES);
     events.publish(
         new ServiceEventDto(
             instance.repoId,
             instance.workspaceId,
-            instance.daemon.id(),
-            instance.daemon.name(),
+            instance.definition.id(),
+            instance.definition.name(),
             ServiceEventKind.STATUS_CHANGED,
             severity,
             status,
@@ -374,10 +386,10 @@ public class ServiceSupervisor {
   }
 
   /**
-   * Settle a process-tracked instance's {@code daemon:<name>} segment on the first decisive status:
-   * READY (or a deliberate STOPPED during the window) settles {@code ok}, CRASHED settles {@code
-   * failed} — with the transition summary appended as the segment's closing line. RESTARTING is
-   * deliberately not terminal: the segment stays open across the backoff and settles with the
+   * Settle a process-tracked instance's {@code service:<name>} segment on the first decisive
+   * status: READY (or a deliberate STOPPED during the window) settles {@code ok}, CRASHED settles
+   * {@code failed} — with the transition summary appended as the segment's closing line. RESTARTING
+   * is deliberately not terminal: the segment stays open across the backoff and settles with the
    * retry's outcome. Idempotent via the process's first-verdict-wins settle.
    */
   private static void settleProcessSegment(
@@ -385,7 +397,7 @@ public class ServiceSupervisor {
     if (instance.process == null) {
       return;
     }
-    String segment = TechnicalProcess.daemonSegment(instance.daemon.name());
+    String segment = TechnicalProcess.serviceSegment(instance.definition.name());
     switch (status) {
       case READY, STOPPED -> {
         instance.process.appendLine(segment, summary);
@@ -403,7 +415,7 @@ public class ServiceSupervisor {
 
   /**
    * Projects the in-container daemon's service events onto this supervisor's display state machine
-   * (SSE, {@code daemon:<name>} segment, web-view proxy origin), reusing {@link #transition}. The
+   * (SSE, {@code service:<name>} segment, web-view proxy origin), reusing {@link #transition}. The
    * daemon owns the process lifecycle, so nothing here spawns/restarts/polls — this only reflects
    * what it reports. Callbacks arrive on the control-socket thread; each synchronizes on the
    * supervisor monitor like every other transition path.
@@ -465,11 +477,12 @@ public class ServiceSupervisor {
         if (instance.tail != null) {
           instance.tail.write(line + "\n"); // feeds the crash excerpt on a later CRASHED transition
         }
-        // A process-tracked auto-start streams its startup output into the start's daemon segment,
-        // so "clone → bootstrap → daemons" shows the dev server booting. appendLine self-limits:
+        // A process-tracked auto-start streams its startup output into the start's service segment,
+        // so "clone → bootstrap → services" shows the dev server booting. appendLine self-limits:
         // it drops lines once the segment settles (READY/CRASHED) or the process is terminal.
         if (instance.process != null) {
-          instance.process.appendLine(TechnicalProcess.daemonSegment(instance.daemon.name()), line);
+          instance.process.appendLine(
+              TechnicalProcess.serviceSegment(instance.definition.name()), line);
         }
       }
     }
@@ -484,7 +497,7 @@ public class ServiceSupervisor {
     for (Instance instance : instances.values()) {
       if (instance.repoId.equals(repoId)
           && instance.workspaceId.equals(workspaceId)
-          && instance.daemon.name().equals(serviceName)) {
+          && instance.definition.name().equals(serviceName)) {
         return instance;
       }
     }

@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.ContainerRuntime;
 import eu.wohlben.qits.domain.repository.control.FakeWorkspaceConfigReader;
@@ -16,6 +15,7 @@ import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import eu.wohlben.qits.domain.repository.dto.WorkspaceDto;
 import eu.wohlben.qits.domain.repository.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.domain.service.dto.ServiceInstanceDto;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -82,7 +82,7 @@ public class ServiceLifecycleCouplerSettleTest {
     return repo.id;
   }
 
-  private String createDaemon(String repoId, String name, String command, RestartPolicy policy) {
+  private String createService(String repoId, String name, String command, RestartPolicy policy) {
     configReader.setConfig(
         "work",
         new QitsConfig(
@@ -97,19 +97,19 @@ public class ServiceLifecycleCouplerSettleTest {
     return name;
   }
 
-  private ServiceInstanceDto instanceOf(String repoId, String daemonId) {
-    return supervisor.effectiveDaemons(repoId, "work").stream()
-        .filter(i -> i.daemon().id().equals(daemonId))
+  private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
+    return supervisor.effectiveServices(repoId, "work").stream()
+        .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElse(null);
   }
 
-  private ServiceInstanceDto awaitStatus(String repoId, String daemonId, ServiceStatus expected)
+  private ServiceInstanceDto awaitStatus(String repoId, String serviceId, ServiceStatus expected)
       throws InterruptedException {
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     ServiceInstanceDto last = null;
     while (System.currentTimeMillis() < deadline) {
-      last = instanceOf(repoId, daemonId);
+      last = instanceOf(repoId, serviceId);
       if (last != null && last.status() == expected) {
         return last;
       }
@@ -121,15 +121,15 @@ public class ServiceLifecycleCouplerSettleTest {
   @Test
   public void stoppingEventSettlesReadyServiceWithoutCrashOrRelaunch() throws Exception {
     String repoId = repoWithWorkspace();
-    String daemonId = createDaemon(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
-    supervisor.start(repoId, "work", daemonId);
+    String serviceId = createService(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
+    supervisor.start(repoId, "work", serviceId);
     driver.sink().onState(repoId, "work", "dev", "READY", null);
-    awaitStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitStatus(repoId, serviceId, ServiceStatus.READY);
 
     // A deliberate container stop: settle, don't crash.
     containerEvents.fireStopping(repoId, "work", true);
 
-    ServiceInstanceDto settled = awaitStatus(repoId, daemonId, ServiceStatus.STOPPED);
+    ServiceInstanceDto settled = awaitStatus(repoId, serviceId, ServiceStatus.STOPPED);
     assertEquals(0, settled.restartCount(), "a settled service is not restarted");
     assertTrue(
         driver.signalled().contains("dev"), "a graceful settle asks the daemon to signal a flush");
@@ -138,40 +138,40 @@ public class ServiceLifecycleCouplerSettleTest {
     Thread.sleep(300);
     assertEquals(
         ServiceStatus.STOPPED,
-        instanceOf(repoId, daemonId).status(),
+        instanceOf(repoId, serviceId).status(),
         "the settled service is not resurrected");
   }
 
   @Test
   public void stoppingEventSettlesARestartingInstance() throws Exception {
     String repoId = repoWithWorkspace();
-    String daemonId = createDaemon(repoId, "flaky", "sh -c 'exit 1'", RestartPolicy.ON_FAILURE);
-    supervisor.start(repoId, "work", daemonId);
+    String serviceId = createService(repoId, "flaky", "sh -c 'exit 1'", RestartPolicy.ON_FAILURE);
+    supervisor.start(repoId, "work", serviceId);
     // Play the daemon dropping it into RESTARTING (the daemon owns the backoff).
     driver.sink().onState(repoId, "work", "flaky", "CRASHED", 1);
     driver.sink().onState(repoId, "work", "flaky", "RESTARTING", 1);
-    awaitStatus(repoId, daemonId, ServiceStatus.RESTARTING);
+    awaitStatus(repoId, serviceId, ServiceStatus.RESTARTING);
 
     containerEvents.fireStopping(repoId, "work", true);
 
-    awaitStatus(repoId, daemonId, ServiceStatus.STOPPED);
+    awaitStatus(repoId, serviceId, ServiceStatus.STOPPED);
     Thread.sleep(300);
     assertEquals(
         ServiceStatus.STOPPED,
-        instanceOf(repoId, daemonId).status(),
+        instanceOf(repoId, serviceId).status(),
         "settling a RESTARTING instance leaves it STOPPED");
   }
 
   @Test
   public void stopContainerDoesNotResurrectItsSettledService() throws Exception {
     String repoId = repoWithWorkspace();
-    String daemonId = createDaemon(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
+    String serviceId = createService(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
     // A real running container to stop — the projection start no longer provisions one (the daemon
     // owns execution), so this test that exercises WorkspaceService.stopContainer provisions it.
     workspaceService.ensureContainer(repoId, "work");
-    supervisor.start(repoId, "work", daemonId);
+    supervisor.start(repoId, "work", serviceId);
     driver.sink().onState(repoId, "work", "dev", "READY", null);
-    awaitStatus(repoId, daemonId, ServiceStatus.READY);
+    awaitStatus(repoId, serviceId, ServiceStatus.READY);
     String container = containers.containerName("work", repoId);
 
     // A deliberate stop must settle the service synchronously (before the container is paused/
@@ -192,7 +192,7 @@ public class ServiceLifecycleCouplerSettleTest {
         WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus(), "the workspace stays STOPPED");
     assertEquals(
         ServiceStatus.STOPPED,
-        instanceOf(repoId, daemonId).status(),
+        instanceOf(repoId, serviceId).status(),
         "and its service stays STOPPED");
   }
 }

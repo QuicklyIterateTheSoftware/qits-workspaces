@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.domain.repository.control.GitExecutor;
 import eu.wohlben.qits.domain.repository.control.RepositoryService;
-import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForDaemonsRecorder;
+import eu.wohlben.qits.domain.repository.control.WorkspaceReadyForServicesRecorder;
 import eu.wohlben.qits.domain.repository.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -20,7 +20,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * {@code qits.bootstrap.autorun-enabled=false} suppresses the provision-time chain — a fresh
- * provision passes straight through to daemon auto-start with no run recorded, even when the
+ * provision passes straight through to service auto-start with no run recorded, even when the
  * checkout declares a chain. Manual runs stay available (not covered here; they don't consult the
  * switch by construction).
  */
@@ -50,7 +50,7 @@ public class WorkspaceBootstrapKillSwitchTest {
   @Inject RepositoryService repositoryService;
   @Inject WorkspaceService workspaceService;
   @Inject BootstrapRunService bootstrapRunService;
-  @Inject WorkspaceReadyForDaemonsRecorder readyRecorder;
+  @Inject WorkspaceReadyForServicesRecorder readyRecorder;
   @Inject GitExecutor git;
 
   @ConfigProperty(name = "qits.repositories.data-dir")
@@ -85,7 +85,7 @@ public class WorkspaceBootstrapKillSwitchTest {
     }
     assertTrue(
         readyRecorder.countFor(repo.id, "work") >= 1,
-        "the switched-off runner still releases daemon auto-start");
+        "the switched-off runner still releases service auto-start");
     assertTrue(
         bootstrapRunService.listForWorkspace(repo.id, "work").isEmpty(),
         "no bootstrap command ran");

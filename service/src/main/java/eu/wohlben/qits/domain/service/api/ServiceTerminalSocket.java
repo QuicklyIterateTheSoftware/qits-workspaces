@@ -20,9 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.jboss.logging.Logger;
 
 /**
- * Opens an <em>interactive</em> browser terminal onto a running daemon by attaching a fresh PTY to
- * its detached tmux session ({@link ContainerRuntime#attachDaemonCommand}) and streaming it to
- * xterm.js. This is the terminal half of Increment 2 of tmux-backed daemons: the background {@code
+ * Opens an <em>interactive</em> browser terminal onto a running service by attaching a fresh PTY to
+ * its detached tmux session ({@link ContainerRuntime#attachServiceCommand}) and streaming it to
+ * xterm.js. This is the terminal half of Increment 2 of tmux-backed services: the background {@code
  * tail -F} follower keeps feeding the durable pipeline (observers, ready-pattern, per-line
  * persistence) as a <em>read-only</em> live log, while this socket gives real input/resize so the
  * user can drive full-screen apps (e.g. Quarkus dev's {@code [r]}/{@code [e]} keys).
@@ -31,14 +31,14 @@ import org.jboss.logging.Logger;
  * an already-running registry command and never kills it — the attach client here is <em>ephemeral
  * and owned by this connection</em>: {@code onOpen} spawns it, {@code onClose} terminates it.
  * Killing it (a {@code docker exec} client running {@code tmux attach}) only detaches the tmux
- * client; the detached daemon session on the {@code -L} socket keeps running.
+ * client; the detached service session on the {@code -L} socket keeps running.
  *
  * <p>Wire protocol matches {@code TerminalSocket}: the client sends {@code
  * {"type":"data","data":…}} for keystrokes and {@code {"type":"resize","cols":N,"rows":M}} for
  * size; the server sends raw PTY output as text frames. Cross-origin handshakes are rejected
  * globally by {@code SameOriginUpgradeCheck}.
  */
-@WebSocket(path = "/api/terminal/daemons/{repoId}/{workspaceId}/{daemonId}")
+@WebSocket(path = "/api/terminal/services/{repoId}/{workspaceId}/{serviceId}")
 public class ServiceTerminalSocket {
 
   private static final Logger LOG = Logger.getLogger(ServiceTerminalSocket.class);
@@ -57,22 +57,22 @@ public class ServiceTerminalSocket {
   public void onOpen(
       @PathParam("repoId") String repoId,
       @PathParam("workspaceId") String workspaceId,
-      @PathParam("daemonId") String daemonId,
+      @PathParam("serviceId") String serviceId,
       WebSocketConnection connection) {
     String container = containers.containerName(workspaceId, repoId);
-    if (!containers.exists(container) || !containers.daemonAlive(container, daemonId)) {
-      connection.sendTextAndAwait("\r\n\u001b[33mThis daemon is not running.\u001b[0m\r\n");
+    if (!containers.exists(container) || !containers.serviceAlive(container, serviceId)) {
+      connection.sendTextAndAwait("\r\n\u001b[33mThis service is not running.\u001b[0m\r\n");
       connection.closeAndAwait();
       return;
     }
-    String sessionId = "daemon-attach-" + connection.id();
+    String sessionId = "service-attach-" + connection.id();
     CommandOutputSink sink = new ConnectionSink(connection);
     // A per-connection PTY that runs `tmux attach` — no persistence (the follower owns the durable
     // log; a tmux redraw stream isn't line-framable), so exit/log are no-ops.
     registry.spawn(
         sessionId,
         container,
-        containers.attachDaemonCommand(daemonId),
+        containers.attachServiceCommand(serviceId),
         Map.of("TERM", "xterm-256color"),
         (id, exitCode, terminatedManually) -> {},
         (id, sequence, channel, content, timestamp) -> {},
@@ -96,7 +96,7 @@ public class ServiceTerminalSocket {
         registry.resize(sessionId, node.path("cols").asInt(80), node.path("rows").asInt(24));
       }
     } catch (IOException e) {
-      LOG.debugf(e, "Daemon terminal message parse failed for connection %s", connection.id());
+      LOG.debugf(e, "Service terminal message parse failed for connection %s", connection.id());
     }
   }
 
@@ -105,7 +105,7 @@ public class ServiceTerminalSocket {
     String sessionId = sessionIds.remove(connection.id());
     if (sessionId != null) {
       // Terminate the attach client (kill its process group) — that detaches the tmux client and
-      // leaves the detached daemon session running.
+      // leaves the detached service session running.
       registry.terminate(sessionId);
     }
   }

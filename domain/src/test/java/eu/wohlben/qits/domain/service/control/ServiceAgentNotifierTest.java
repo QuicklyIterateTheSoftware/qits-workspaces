@@ -55,7 +55,7 @@ public class ServiceAgentNotifierTest {
     return new ServiceEventDto(
         repoId,
         "work",
-        "daemon-1",
+        "service-1",
         "dev-server",
         ServiceEventKind.STATUS_CHANGED,
         ServiceEventSeverity.ERROR,
@@ -79,13 +79,13 @@ public class ServiceAgentNotifierTest {
     try {
       // chatSend echoes the injected turn into the unified live stream (ring + broadcast; user
       // echoes are no longer persisted — the durable record is the transcript import), so the
-      // message (with its [daemon:…] prefix) must reach an attached sink.
+      // message (with its [service:…] prefix) must reach an attached sink.
       CapturingSink sink = new CapturingSink();
       assertTrue(commandRegistry.attach(chat.id(), sink), "the chat must accept a sink");
 
       notifier.deliver(event(repoId, "NPE in handler", "stacktrace-here"));
 
-      String streamed = awaitSinkContaining(sink, "[daemon:dev-server]");
+      String streamed = awaitSinkContaining(sink, "[service:dev-server]");
       assertTrue(
           streamed.contains("stacktrace-here"),
           "the log excerpt travels with the message: " + streamed);
@@ -137,7 +137,7 @@ public class ServiceAgentNotifierTest {
     List<String> spooled = spool.drain(repoId, "work");
     assertEquals(1, spooled.size());
     assertTrue(
-        spooled.get(0).startsWith("[daemon:dev-server] ERROR: crashed (exit 1)"), spooled.get(0));
+        spooled.get(0).startsWith("[service:dev-server] ERROR: crashed (exit 1)"), spooled.get(0));
     assertTrue(spooled.get(0).contains("boom"), spooled.get(0));
     assertEquals(List.of(), spool.drain(repoId, "work"), "drain empties the spool");
   }
