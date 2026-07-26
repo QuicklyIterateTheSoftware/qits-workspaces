@@ -406,40 +406,40 @@ public class DockerExecutor implements ContainerRuntime {
     return infos;
   }
 
-  // --- Daemon sessions (tmux) -----------------------------------------------------------------
+  // --- Service sessions (tmux) -----------------------------------------------------------------
   //
-  // Each daemon runs in a detached tmux session on a dedicated socket (-L qits-<id>): a fresh
+  // Each service runs in a detached tmux session on a dedicated socket (-L qits-<id>): a fresh
   // server
-  // per daemon inherits this exec's -e env at first start with no shared-server staleness, and
-  // isolates daemons from one another. `pipe-pane` mirrors the pane to a logfile qits tails. Paths
-  // derive from the daemon id (a server-generated UUID — safe to interpolate); the startScript is
+  // per service inherits this exec's -e env at first start with no shared-server staleness, and
+  // isolates services from one another. `pipe-pane` mirrors the pane to a logfile qits tails. Paths
+  // derive from the service id (a server-generated UUID — safe to interpolate); the startScript is
   // never interpolated (it rides as the positional arg $1 to avoid quoting/injection issues).
 
-  /** Container-side run directory for daemon session state (logs, scripts, exit codes). */
-  private static final String DAEMON_DIR = "/tmp/qits-daemons";
+  /** Container-side run directory for service session state (logs, scripts, exit codes). */
+  private static final String SERVICE_DIR = "/tmp/qits-services";
 
-  private static String socket(String daemonId) {
-    return "qits-" + daemonId;
+  private static String socket(String serviceId) {
+    return "qits-" + serviceId;
   }
 
   @Override
-  public String daemonLogPath(String daemonId) {
-    return DAEMON_DIR + "/" + daemonId + ".log";
+  public String serviceLogPath(String serviceId) {
+    return SERVICE_DIR + "/" + serviceId + ".log";
   }
 
   @Override
-  public void startDaemon(
-      String container, String daemonId, String script, Map<String, String> env) {
-    String sock = socket(daemonId);
-    String base = DAEMON_DIR + "/" + daemonId;
+  public void startService(
+      String container, String serviceId, String script, Map<String, String> env) {
+    String sock = socket(serviceId);
+    String base = SERVICE_DIR + "/" + serviceId;
     // $1 is the untrusted startScript (written to a file, then run by the pane); everything else is
-    // built from the safe id. The pane records its exit code so daemonExitCode can tell a clean
+    // built from the safe id. The pane records its exit code so serviceExitCode can tell a clean
     // stop
     // from a crash. `new-session … \; pipe-pane` is one atomic tmux call so the pane's very first
     // line is mirrored (a separate pipe-pane races the pane's first output and would drop it).
     String launcher =
         "set -e; mkdir -p "
-            + DAEMON_DIR
+            + SERVICE_DIR
             + "; printf '%s\\n' \"$1\" > "
             + base
             + ".sh; tmux -L "
@@ -458,22 +458,22 @@ public class DockerExecutor implements ContainerRuntime {
             + base
             + ".log\"";
     ExecResult result =
-        exec(container, "/workspace", env, "bash", "-lc", launcher, "qits-daemon", script);
+        exec(container, "/workspace", env, "bash", "-lc", launcher, "qits-service", script);
     if (result.exitCode() != 0) {
       throw new InternalServerErrorException(
-          "Failed to start daemon session " + daemonId + ": " + result.output());
+          "Failed to start service session " + serviceId + ": " + result.output());
     }
   }
 
   @Override
-  public boolean daemonAlive(String container, String daemonId) {
+  public boolean serviceAlive(String container, String serviceId) {
     return exec(
                 container,
                 null,
                 Map.of(),
                 "tmux",
                 "-L",
-                socket(daemonId),
+                socket(serviceId),
                 "has-session",
                 "-t",
                 "main")
@@ -482,8 +482,8 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public Integer daemonExitCode(String container, String daemonId) {
-    ExecResult r = exec(container, null, Map.of(), "cat", DAEMON_DIR + "/" + daemonId + ".exit");
+  public Integer serviceExitCode(String container, String serviceId) {
+    ExecResult r = exec(container, null, Map.of(), "cat", SERVICE_DIR + "/" + serviceId + ".exit");
     if (r.exitCode() != 0) {
       return null;
     }
@@ -495,8 +495,8 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public boolean signalDaemon(String container, String daemonId, String signal) {
-    String sock = socket(daemonId);
+  public boolean signalService(String container, String serviceId, String signal) {
+    String sock = socket(serviceId);
     // The pane leader is the process-group leader (tmux #{pane_pid}); signal the whole group so a
     // compound script's children get it too. The signal name is a controlled value.
     String cmd =
@@ -510,8 +510,8 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public void killDaemon(String container, String daemonId) {
-    String sock = socket(daemonId);
+  public void killService(String container, String serviceId) {
+    String sock = socket(serviceId);
     // SIGKILL the pane's process group, then tear the server down. Both best-effort.
     String cmd =
         "p=$(tmux -L "
@@ -525,11 +525,11 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public String attachDaemonCommand(String daemonId) {
+  public String attachServiceCommand(String serviceId) {
     // `exec` so the docker-exec shell becomes the tmux client, keeping the pgid the registry
     // recorded valid; a group-kill on close then only detaches this client, never the detached
-    // daemon server on the -L socket.
-    return "exec tmux -L " + socket(daemonId) + " attach -t main";
+    // tmux server on the -L socket.
+    return "exec tmux -L " + socket(serviceId) + " attach -t main";
   }
 
   private static String emptyToNull(String s) {

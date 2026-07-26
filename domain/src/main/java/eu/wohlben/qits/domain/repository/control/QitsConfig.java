@@ -1,8 +1,8 @@
 package eu.wohlben.qits.domain.repository.control;
 
-import eu.wohlben.qits.domain.daemon.entity.HealthCheckKind;
-import eu.wohlben.qits.domain.daemon.entity.RestartPolicy;
 import eu.wohlben.qits.domain.repository.entity.RepositoryArchetype;
+import eu.wohlben.qits.domain.service.entity.HealthCheckKind;
+import eu.wohlben.qits.domain.service.entity.RestartPolicy;
 import java.util.List;
 import java.util.Map;
 
@@ -74,7 +74,7 @@ public record QitsConfig(
     }
   }
 
-  /** One {@code services[]} entry — a config-declared workspace service (dev daemon). */
+  /** One {@code services[]} entry — a config-declared workspace service (dev server). */
   public record ServiceDecl(
       String id,
       String name,

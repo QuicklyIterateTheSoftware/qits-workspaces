@@ -138,7 +138,7 @@ class WorkspaceContainerFactoryTest {
     assertSequence(argv, "--network", "qits-net");
     assertFalse(argv.contains("-p"), argv.toString());
     // The hard memory cap (--memory-swap equal, so the container can't swap past it either) —
-    // without it a dev daemon's JVMs size against the whole host's RAM and can OOM the host
+    // without it a dev server's JVMs size against the whole host's RAM and can OOM the host
     // (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md).
     assertSequence(argv, "--memory", "4g");
     assertSequence(argv, "--memory-swap", "4g");

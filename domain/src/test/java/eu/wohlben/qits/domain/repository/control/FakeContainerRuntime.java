@@ -34,8 +34,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * <p>Like real docker, operations against an <em>unknown</em> container (never {@code run}, or
  * already {@code rm}'d) fail instead of falling through to the host: {@code exec} returns a
  * non-zero {@code ExecResult}, {@code execArgv} yields an argv that fails when spawned, and {@code
- * startDaemon} throws. This is what catches a use-site that forgot {@code ensureContainer} now that
- * workspace creation no longer provisions eagerly.
+ * startService} throws. This is what catches a use-site that forgot {@code ensureContainer} now
+ * that workspace creation no longer provisions eagerly.
  *
  * <p>Stands in for the container-level env {@link WorkspaceContainerFactory} sets at {@code docker
  * run} by applying {@link GitIdentity#envMap()} under each call's own env (per-call entries win,
@@ -340,10 +340,10 @@ public class FakeContainerRuntime implements ContainerRuntime {
     return infos;
   }
 
-  // --- Daemon sessions: emulate the tmux model with a plain detached (setsid) host process
+  // --- Service sessions: emulate the tmux model with a plain detached (setsid) host process
   // --------
   //
-  // No tmux on the test host: a daemon session is a setsid'd shell (new session => group-killable
+  // No tmux on the test host: a service session is a setsid'd shell (new session => group-killable
   // and
   // detached, so it survives like the real tmux session) that runs the script with output
   // redirected
@@ -351,41 +351,41 @@ public class FakeContainerRuntime implements ContainerRuntime {
   // fresh
   // supervisor can reconcile a still-alive daemon exactly like it reads back tmux has-session.
 
-  private Path daemonRunDir() {
-    return Path.of(dataDir, ".qits-daemons").toAbsolutePath();
+  private Path serviceRunDir() {
+    return Path.of(dataDir, ".qits-services").toAbsolutePath();
   }
 
   @Override
-  public String daemonLogPath(String daemonId) {
-    return daemonRunDir().resolve(daemonId + ".log").toString();
+  public String serviceLogPath(String serviceId) {
+    return serviceRunDir().resolve(serviceId + ".log").toString();
   }
 
   @Override
-  public String attachDaemonCommand(String daemonId) {
+  public String attachServiceCommand(String serviceId) {
     // No tmux on the test host: an "attach" replays and follows the daemon's logfile, so the fake
     // yields a real streaming PTY (the follower's live view) without a terminal multiplexer. `exec`
     // keeps the recorded pgid valid for the on-close group-kill.
-    return "exec tail -n +1 -f " + daemonLogPath(daemonId);
+    return "exec tail -n +1 -f " + serviceLogPath(serviceId);
   }
 
   @Override
-  public void startDaemon(
-      String container, String daemonId, String script, Map<String, String> env) {
+  public void startService(
+      String container, String serviceId, String script, Map<String, String> env) {
     Info info = byName.get(container);
     if (info == null) {
-      // Mirror docker: DockerExecutor.startDaemon throws when its inner exec fails on an unknown
+      // Mirror docker: DockerExecutor.startService throws when its inner exec fails on an unknown
       // container.
       throw new IllegalStateException("No such container: " + container);
     }
     Path wd = info.dir();
     try {
-      Path dir = daemonRunDir();
+      Path dir = serviceRunDir();
       Files.createDirectories(dir);
-      Path sh = dir.resolve(daemonId + ".sh");
+      Path sh = dir.resolve(serviceId + ".sh");
       Files.writeString(sh, script);
-      String log = dir.resolve(daemonId + ".log").toString();
-      String pid = dir.resolve(daemonId + ".pid").toString();
-      String exit = dir.resolve(daemonId + ".exit").toString();
+      String log = dir.resolve(serviceId + ".log").toString();
+      String pid = dir.resolve(serviceId + ".pid").toString();
+      String exit = dir.resolve(serviceId + ".exit").toString();
       Files.deleteIfExists(Path.of(pid));
       Files.deleteIfExists(Path.of(exit));
       Files.writeString(Path.of(log), "");
@@ -414,7 +414,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
       pb.redirectOutput(java.lang.ProcessBuilder.Redirect.DISCARD);
       pb.redirectError(java.lang.ProcessBuilder.Redirect.DISCARD);
       pb.start();
-      // The pidfile is written by the detached shell; wait briefly so daemonAlive/stop see it.
+      // The pidfile is written by the detached shell; wait briefly so serviceAlive/stop see it.
       long deadline = System.currentTimeMillis() + 2000;
       while (System.currentTimeMillis() < deadline && !Files.exists(Path.of(pid))) {
         Thread.sleep(20);
@@ -423,12 +423,12 @@ public class FakeContainerRuntime implements ContainerRuntime {
       Thread.currentThread().interrupt();
       throw new RuntimeException(e);
     } catch (Exception e) {
-      throw new RuntimeException("fake startDaemon failed for " + daemonId, e);
+      throw new RuntimeException("fake startService failed for " + serviceId, e);
     }
   }
 
-  private Long daemonPid(String daemonId) {
-    Path pid = daemonRunDir().resolve(daemonId + ".pid");
+  private Long servicePid(String serviceId) {
+    Path pid = serviceRunDir().resolve(serviceId + ".pid");
     try {
       if (!Files.exists(pid)) {
         return null;
@@ -441,8 +441,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public boolean daemonAlive(String container, String daemonId) {
-    Long pid = daemonPid(daemonId);
+  public boolean serviceAlive(String container, String serviceId) {
+    Long pid = servicePid(serviceId);
     return pid != null && processRunning(pid);
   }
 
@@ -451,7 +451,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
    * {@code ProcessHandle.isAlive} counts zombies as alive, but a zombie is dead for everything the
    * fake models (it produces no output and holds no port; real docker's {@code tmux has-session}
    * would report the session gone). The distinction matters in sandboxes whose PID 1 never reaps
-   * (e.g. {@code sleep infinity}): a killed detached daemon reparents there and stays a zombie
+   * (e.g. {@code sleep infinity}): a killed detached service reparents there and stays a zombie
    * forever, which without this check reads as alive forever. See
    * docs/issues/resolved/2026-07-08_daemon-straggler-reap-test-fails-in-sandboxed-env.md.
    */
@@ -472,8 +472,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public Integer daemonExitCode(String container, String daemonId) {
-    Path exit = daemonRunDir().resolve(daemonId + ".exit");
+  public Integer serviceExitCode(String container, String serviceId) {
+    Path exit = serviceRunDir().resolve(serviceId + ".exit");
     try {
       if (!Files.exists(exit)) {
         return null;
@@ -485,8 +485,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public boolean signalDaemon(String container, String daemonId, String signal) {
-    Long pid = daemonPid(daemonId);
+  public boolean signalService(String container, String serviceId, String signal) {
+    Long pid = servicePid(serviceId);
     if (pid == null) {
       return false;
     }
@@ -494,8 +494,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public void killDaemon(String container, String daemonId) {
-    Long pid = daemonPid(daemonId);
+  public void killService(String container, String serviceId) {
+    Long pid = servicePid(serviceId);
     if (pid != null) {
       runCapturing(List.of("kill", "-s", "KILL", "--", "-" + pid));
     }

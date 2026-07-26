@@ -37,10 +37,10 @@ class WorkspaceEventBroadcasterTest {
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-1", Topic.DAEMON_EVENTS);
+    fire("repo-1", "wt-1", Topic.SERVICE_EVENTS);
 
     sub.awaitItems(1, Duration.ofSeconds(2));
-    assertEquals("daemon-events", sub.getItems().get(0));
+    assertEquals("service-events", sub.getItems().get(0));
   }
 
   @Test
@@ -56,7 +56,7 @@ class WorkspaceEventBroadcasterTest {
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-a", Topic.DAEMONS);
+    fire("repo-1", "wt-a", Topic.SERVICES);
 
     a.awaitItems(1, Duration.ofSeconds(2));
     assertEquals(1, a.getItems().size());
@@ -90,11 +90,11 @@ class WorkspaceEventBroadcasterTest {
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-1", Topic.DAEMONS);
+    fire("repo-1", "wt-1", Topic.SERVICES);
     fire("repo-1", "wt-1", Topic.COMMANDS);
 
     sub.awaitItems(2, Duration.ofSeconds(2));
-    assertTrue(sub.getItems().contains("daemons"));
+    assertTrue(sub.getItems().contains("services"));
     assertTrue(sub.getItems().contains("commands"));
   }
 
@@ -105,7 +105,7 @@ class WorkspaceEventBroadcasterTest {
             .subscribe("repo-1", "wt-1")
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
-    fire("repo-1", "wt-1", Topic.DAEMONS);
+    fire("repo-1", "wt-1", Topic.SERVICES);
     sub.awaitItems(1, Duration.ofSeconds(2));
     assertEquals(1, broadcaster.openChannelCount());
 
@@ -117,7 +117,7 @@ class WorkspaceEventBroadcasterTest {
   @Test
   void hintsForAWorkspaceWithNoSubscribersAreSafelyDropped() {
     // No subscriber for wt-gone: firing must not throw and must open no channel.
-    fire("repo-1", "wt-gone", Topic.DAEMONS);
+    fire("repo-1", "wt-gone", Topic.SERVICES);
     assertEquals(0, broadcaster.openChannelCount());
   }
 }

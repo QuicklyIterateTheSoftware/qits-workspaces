@@ -487,7 +487,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertTrue(seen.get(0).event().graceful(), "a graceful stop asks for a graceful settle");
     assertTrue(
         seen.get(0).containerExistedWhenObserved(),
-        "the stopping event fires before containers.stop — daemons settle while the container is"
+        "the stopping event fires before containers.stop — services settle while the container is"
             + " still present");
   }
 

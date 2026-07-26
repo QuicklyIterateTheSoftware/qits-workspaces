@@ -931,7 +931,7 @@ public class WorkspaceService {
    * The streaming Start: registers a {@link TechnicalProcess} for the workspace <em>before</em> any
    * work runs (so the very first {@code docker run} line is captured), spawns {@link
    * #ensureContainer(String, String, TechnicalProcess)} on a worker thread, and returns the process
-   * id immediately. The browser watches the work — including the asynchronous daemon auto-start
+   * id immediately. The browser watches the work — including the asynchronous service auto-start
    * phase — over the process's SSE stream; failures surface there (and in {@code
    * workspace.runtimeError}), not as an HTTP error. Throws 404 in-request when the workspace
    * doesn't exist, so a bad id still fails fast.
@@ -973,7 +973,7 @@ public class WorkspaceService {
    * and an UNKNOWN state (no live daemon, or none has reported yet) are <em>both</em> rejected with
    * a 400 — an unknowable tree is not a safe basis to destroy a container. The gate runs
    * synchronously so a bad request fails fast; the teardown+reprovision then streams like {@link
-   * #beginEnsureContainer}: best-effort push (preserve committed work) → settle daemons gracefully
+   * #beginEnsureContainer}: best-effort push (preserve committed work) → settle services gracefully
    * → {@code rm} the old container → {@link #ensureContainer} provisions a fresh one from the
    * durable branch (whose absent-container path re-runs {@link #provisionContainer}).
    */
@@ -995,7 +995,7 @@ public class WorkspaceService {
             // Preserve committed-but-unpushed work before the container is destroyed (the tree is
             // clean, so there is nothing uncommitted to lose — only local commits to back up).
             pushBranch(repoId, workspaceId, branch);
-            // Settle live daemons gracefully so their disappearance reads as deliberate, not a
+            // Settle live services gracefully so their disappearance reads as deliberate, not a
             // crash
             // the restart policy would resurrect — the same courtesy stopContainer/discard extend.
             containerEvents.fireStopping(repoId, workspaceId, true);
@@ -1038,9 +1038,9 @@ public class WorkspaceService {
    * {@link #ensureContainer(String, String)} with an optional {@link TechnicalProcess} receiving
    * the work as streamed segments. With a process attached, every outcome also ends the process:
    * the already-running short-circuit completes it as a no-op, a provision failure fails it, and a
-   * successful start hands the process id to the async bootstrap-then-daemon phase via {@link
+   * successful start hands the process id to the async bootstrap-then-service phase via {@link
    * WorkspaceContainerEventPublisher#fireStarted(String, String, String, boolean)} — the process
-   * then reaches {@code done} only once the bootstrap chain and the auto-started daemons settle.
+   * then reaches {@code done} only once the bootstrap chain and the auto-started services settle.
    */
   private void ensureContainer(String repoId, String workspaceId, TechnicalProcess process) {
     String container = containers.containerName(workspaceId, repoId);
@@ -1096,7 +1096,7 @@ public class WorkspaceService {
         QuarkusTransaction.requiringNew()
             .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
         // Cold -> RUNNING, but not a fresh provision: the clone (and its bootstrap state) survived,
-        // so the bootstrap runner passes straight through to daemon auto-start (async).
+        // so the bootstrap runner passes straight through to service auto-start (async).
         containerEvents.fireStarted(
             repoId, workspaceId, process == null ? null : process.id(), false);
         observeClientLiveness(repoId, workspaceId);
@@ -1154,7 +1154,7 @@ public class WorkspaceService {
       }
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
-      // Cold -> RUNNING off a fresh provision (bare clone): run the bootstrap chain, then daemon
+      // Cold -> RUNNING off a fresh provision (bare clone): run the bootstrap chain, then service
       // auto-start (async; the runner passes straight through when the chain is empty).
       containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id(), true);
       observeClientLiveness(repoId, workspaceId);
@@ -1261,7 +1261,7 @@ public class WorkspaceService {
             .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
             .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
     pushBranch(repoId, workspaceId, workspace.branch);
-    // Settle the workspace's daemons before the container stops, so a live daemon's disappearance
+    // Settle the workspace's services before the container stops, so a live service's disappearance
     // reads as a deliberate STOPPED (graceful: signal + grace) instead of a crash the restart
     // policy
     // would resurrect. Synchronous — completes while the container is still running.
@@ -1280,7 +1280,7 @@ public class WorkspaceService {
    * losing every uncommitted working-tree change and any unpushed commit, as its Shift-guarded
    * "loses uncommitted changes" contract promises. Distinct from {@link #discardWorkspace}
    * (Abandon), which additionally deletes the branch and soft-deletes the row. Settles any live
-   * daemons first (immediate — the container is being torn down) and leaves the workspace {@code
+   * services first (immediate — the container is being torn down) and leaves the workspace {@code
    * STOPPED} with no runtime error. No-op-safe if the container/volume are already gone (both
    * best-effort). The container is removed before the volume (docker refuses an in-use volume).
    */
@@ -1650,7 +1650,8 @@ public class WorkspaceService {
       // container and its /workspace volume survive), here we delete the container, its volume, AND
       // the branch right after, so preserving /workspace would be pointless — the operator asked to
       // throw this work away. Container first, then the volume (docker refuses an in-use volume).
-      // Settle any live daemons first (immediate — no graceful signal, the work is being discarded)
+      // Settle any live services first (immediate — no graceful signal, the work is being
+      // discarded)
       // so their disappearance doesn't read as a crash to be resurrected.
       containerEvents.fireStopping(repoId, workspace.workspaceId, false);
       containers.rm(containers.containerName(workspace.workspaceId, repoId));

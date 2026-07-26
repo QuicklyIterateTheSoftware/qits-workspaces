@@ -88,8 +88,8 @@ public class WorkspaceContainerFactory {
    * Hard memory cap for every workspace container ({@code --memory} + {@code --memory-swap} set to
    * the same value, so a container can neither exceed the cap nor swap-thrash the host past it).
    * Without it a container sees the whole host's RAM and every JVM inside sizes its default heap
-   * against that — a dev daemon (Maven launcher JVM + forked dev JVM + node dev server) can then
-   * OOM the entire host
+   * against that — a dev-server service (Maven launcher JVM + forked dev JVM + node dev server) can
+   * then OOM the entire host
    * (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md). With the
    * cgroup limit in place the JVMs size against it automatically (container support is default-on),
    * so no per-tool {@code -Xmx} plumbing is needed. Blank/absent disables the cap; the shipped
@@ -334,7 +334,7 @@ public class WorkspaceContainerFactory {
     container.env(
         "QITS_WORKSPACE_DAEMON_SERVICE_STOP_GRACE_MS", String.valueOf(serviceStopGraceMs));
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
-    // against the whole host's RAM and a dev daemon can OOM the host. Blank config disables a cap.
+    // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
     pidsLimit.filter(v -> !v.isBlank()).ifPresent(container::pidsLimit);
     cpus.filter(v -> !v.isBlank()).ifPresent(container::cpus);

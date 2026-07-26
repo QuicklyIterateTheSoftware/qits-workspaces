@@ -46,9 +46,9 @@ public interface WorkspaceServiceDriver {
   /**
    * Receives service events as the daemon streams them. Callbacks arrive on the socket thread and
    * carry {@code repoId} (which the backend learns from the daemon's {@code Hello}) so the host can
-   * resolve the service <em>name</em> the daemon reports to the repository-scoped daemon definition
-   * (its UUID, web-view port, etc.) it keys supervision state by — the daemon speaks names, the
-   * host keys by (repoId, workspaceId, id).
+   * resolve the service <em>name</em> the daemon reports to the repository-scoped service
+   * definition (its UUID, web-view port, etc.) it keys supervision state by — the daemon speaks
+   * names, the host keys by (repoId, workspaceId, id).
    */
   interface ServiceEventSink {
 

@@ -81,7 +81,7 @@ class WorkspaceChangeHintBusTest {
   }
 
   @Test
-  void publishingADaemonEventFiresADaemonEventsHint() throws InterruptedException {
+  void publishingAServiceEventFiresAServiceEventsHint() throws InterruptedException {
     serviceEventService.publish(
         new ServiceEventDto(
             "repo-de",
@@ -102,8 +102,8 @@ class WorkspaceChangeHintBusTest {
             Instant.now()));
 
     WorkspaceChangeHint hint = awaitHint("repo-de", 2000);
-    assertNotNull(hint, "publish() should fire a DAEMON_EVENTS hint");
-    assertEquals(Topic.DAEMON_EVENTS, hint.topic());
+    assertNotNull(hint, "publish() should fire a SERVICE_EVENTS hint");
+    assertEquals(Topic.SERVICE_EVENTS, hint.topic());
     assertEquals("wt-de", hint.workspaceId());
   }
 
@@ -141,18 +141,18 @@ class WorkspaceChangeHintBusTest {
     reader.start();
 
     Thread.sleep(400); // let the subscription settle before firing
-    publisher.fire("repo-sse", "wt-sse", Topic.DAEMONS);
+    publisher.fire("repo-sse", "wt-sse", Topic.SERVICES);
 
-    // Read frames until the "daemons" data line arrives (ignoring heartbeat/blank/comment lines).
+    // Read frames until the "services" data line arrives (ignoring heartbeat/blank/comment lines).
     long deadline = System.currentTimeMillis() + 3000;
     boolean seen = false;
     long remaining;
     while (!seen && (remaining = deadline - System.currentTimeMillis()) > 0) {
       String line = lines.poll(remaining, TimeUnit.MILLISECONDS);
-      if (line != null && line.startsWith("data:") && line.substring(5).trim().equals("daemons")) {
+      if (line != null && line.startsWith("data:") && line.substring(5).trim().equals("services")) {
         seen = true;
       }
     }
-    Assertions.assertTrue(seen, "expected a 'data: daemons' SSE frame over HTTP");
+    Assertions.assertTrue(seen, "expected a 'data: services' SSE frame over HTTP");
   }
 }

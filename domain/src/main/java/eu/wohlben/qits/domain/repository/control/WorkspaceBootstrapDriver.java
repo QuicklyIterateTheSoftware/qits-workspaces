@@ -19,15 +19,15 @@ import java.util.Optional;
  * way.
  *
  * <p>Distinct from {@link WorkspaceDaemonProvisioner} (clone) and {@link WorkspaceConfigReader}
- * (read): this one runs the chain. The host records the streamed outcomes and gates daemon
- * auto-start on {@link Result#ok()} — a failed chain withholds {@code WorkspaceReadyForDaemons}.
+ * (read): this one runs the chain. The host records the streamed outcomes and gates service
+ * auto-start on {@link Result#ok()} — a failed chain withholds {@code WorkspaceReadyForServices}.
  */
 public interface WorkspaceBootstrapDriver {
 
   /**
    * Await the daemon's autonomous boot-time bootstrap chain for {@code workspaceId}, feeding {@code
    * sink} as steps stream in. Returns {@link Optional#empty()} when no daemon becomes live within
-   * {@code connectTimeout} (the caller then withholds daemon auto-start — the chain never ran).
+   * {@code connectTimeout} (the caller then withholds service auto-start — the chain never ran).
    *
    * @param repoId the workspace's repository (the container key; the socket-backed impl awaits by
    *     {@code workspaceId} alone and ignores it)
@@ -49,7 +49,7 @@ public interface WorkspaceBootstrapDriver {
   Optional<Result> runBootstrap(
       String repoId, String workspaceId, String name, StepSink sink, Duration chainTimeout);
 
-  /** The chain-complete outcome: {@code ok} false means a step failed and daemons stay off. */
+  /** The chain-complete outcome: {@code ok} false means a step failed and services stay off. */
   record Result(boolean ok) {}
 
   /**

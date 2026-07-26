@@ -7,8 +7,8 @@ import java.util.Map;
  * The per-workspace container runtime — the sibling of {@link GitExecutor} for the <em>other</em>
  * on-disk mutation qits performs. A workspace is a branch (host-side, in the bare origin) plus a
  * container that owns a clone of it under {@code /workspace}; every action script, dependency
- * install, dev server, daemon and coding-agent command runs inside that container via {@code exec},
- * so nothing untrusted ever touches the host home dir or its credentials.
+ * install, dev server, service and coding-agent command runs inside that container via {@code
+ * exec}, so nothing untrusted ever touches the host home dir or its credentials.
  *
  * <p>An interface (implemented by {@link DockerExecutor}) so it stays runtime-agnostic — docker
  * today, rootless podman or a remote node later — and so tests can supply a fake without a real
@@ -40,16 +40,16 @@ public interface ContainerRuntime {
    * container name. Throws on failure.
    *
    * <p>The container publishes <em>no</em> host ports: qits and every workspace container share one
-   * Docker network, so the daemon web-view proxy reaches a container port by its container name
+   * Docker network, so the service web-view proxy reaches a container port by its container name
    * over that network (see {@link #resolveTarget}). That removes the create-time port-publishing
-   * constraint entirely — a daemon can gain a web-view port after its container exists and still be
-   * reachable without a recreation.
+   * constraint entirely — a service can gain a web-view port after its container exists and still
+   * be reachable without a recreation.
    */
   String run(String repoId, String workspaceId, String branch, String parent);
 
   /**
    * Where the qits process connects to reach {@code containerPort} inside {@code container} — the
-   * daemon web-view proxy's origin. On the shared network this is the container's DNS name and the
+   * service web-view proxy's origin. On the shared network this is the container's DNS name and the
    * real container port; the test fake maps it to {@code 127.0.0.1}. Null only when the target
    * cannot be resolved at all (e.g. the container is gone), in which case the proxy 502s.
    */
@@ -149,7 +149,8 @@ public interface ContainerRuntime {
   //
   // A workspace's checkout lives on a per-workspace named volume mounted at /workspace (not the
   // container's ephemeral writable layer), so it SURVIVES container recreation (image update,
-  // crash, prune, host restart) and is reattached on the next provision — the daemon then skips its
+  // crash, prune, host restart) and is reattached on the next provision — the workspace-daemon then
+  // skips its
   // self-clone on the already-populated volume. Rich qits.* labels (mirroring the container labels
   // plus qits.managed/qits.project) make dangling volumes detectable and reapable by name-free,
   // charset-safe reconcile. Gated by qits.workspace.persist-workspace; when off, /workspace reverts
@@ -186,58 +187,59 @@ public interface ContainerRuntime {
    */
   List<VolumeInfo> listWorkspaceVolumes();
 
-  // --- Daemon sessions: long-runners decoupled from the qits JVM ------------------------------
+  // --- Service sessions: long-runners decoupled from the qits JVM ------------------------------
   //
-  // A daemon must outlive a qits restart and stay observable across one. These methods run it as a
+  // A service must outlive a qits restart and stay observable across one. These methods run it as a
   // detached session inside the container (a tmux session for docker; a plain setsid process for
   // the
-  // test fake) whose combined output is mirrored to {@link #daemonLogPath} — the durable line
+  // test fake) whose combined output is mirrored to {@link #serviceLogPath} — the durable line
   // stream
   // qits tails for the ready-pattern, observers, and per-line persistence. Liveness and stop go
-  // through the session, not a host-side client, so killing qits leaves the daemon running and a
-  // fresh qits reconciles it from {@link #daemonAlive}.
+  // through the session, not a host-side client, so killing qits leaves the service running and a
+  // fresh qits reconciles it from {@link #serviceAlive}.
 
   /**
-   * Launch {@code script} as a detached daemon session named by {@code daemonId} inside {@code
+   * Launch {@code script} as a detached service session named by {@code serviceId} inside {@code
    * container}, running on a PTY in {@code /workspace}. {@code env} is applied to the session and
-   * inherited by everything it forks. Combined stdout/stderr is mirrored to {@link #daemonLogPath};
-   * the session's exit code (when it ends on its own) is recorded for {@link #daemonExitCode}. A
-   * stale same-id session is cleared first. Best-effort — throws only on a runtime failure.
+   * inherited by everything it forks. Combined stdout/stderr is mirrored to {@link
+   * #serviceLogPath}; the session's exit code (when it ends on its own) is recorded for {@link
+   * #serviceExitCode}. A stale same-id session is cleared first. Best-effort — throws only on a
+   * runtime failure.
    */
-  void startDaemon(String container, String daemonId, String script, Map<String, String> env);
+  void startService(String container, String serviceId, String script, Map<String, String> env);
 
-  /** Whether the daemon session named {@code daemonId} is currently running. */
-  boolean daemonAlive(String container, String daemonId);
+  /** Whether the service session named {@code serviceId} is currently running. */
+  boolean serviceAlive(String container, String serviceId);
 
   /**
-   * The exit code recorded when the daemon session ended on its own, or null if it is still running
-   * or was killed before recording one (a kill is treated as a failure by the caller).
+   * The exit code recorded when the service session ended on its own, or null if it is still
+   * running or was killed before recording one (a kill is treated as a failure by the caller).
    */
-  Integer daemonExitCode(String container, String daemonId);
+  Integer serviceExitCode(String container, String serviceId);
 
   /**
-   * Deliver {@code signal} (e.g. {@code TERM}) to the daemon session's process group — the graceful
-   * half of a stop. Returns false if no session is running.
+   * Deliver {@code signal} (e.g. {@code TERM}) to the service session's process group — the
+   * graceful half of a stop. Returns false if no session is running.
    */
-  boolean signalDaemon(String container, String daemonId, String signal);
+  boolean signalService(String container, String serviceId, String signal);
 
-  /** Force-stop the daemon session: SIGKILL its process group and tear the session down. */
-  void killDaemon(String container, String daemonId);
+  /** Force-stop the service session: SIGKILL its process group and tear the session down. */
+  void killService(String container, String serviceId);
 
   /**
-   * The container-side path of the daemon's mirrored combined-output log — the {@code tail -F}
+   * The container-side path of the service's mirrored combined-output log — the {@code tail -F}
    * target qits follows for the ready-pattern, observers, and persistence.
    */
-  String daemonLogPath(String daemonId);
+  String serviceLogPath(String serviceId);
 
   /**
-   * The container-side shell command that opens an <em>interactive</em> PTY onto the running daemon
-   * session — {@code tmux attach} for docker. Run inside a {@code docker exec -it} client (the
-   * command registry's PTY path) so the browser can drive full-screen apps (e.g. Quarkus dev's
+   * The container-side shell command that opens an <em>interactive</em> PTY onto the running
+   * service session — {@code tmux attach} for docker. Run inside a {@code docker exec -it} client
+   * (the command registry's PTY path) so the browser can drive full-screen apps (e.g. Quarkus dev's
    * {@code [r]}/{@code [e]} keys). This is the terminal half of the split introduced by Increment 2
-   * of tmux-backed daemons: the background {@link #daemonLogPath} tail keeps feeding the durable
+   * of tmux-backed services: the background {@link #serviceLogPath} tail keeps feeding the durable
    * pipeline (observers/ready/persistence), while this attach client is ephemeral — killing it only
-   * detaches the client, leaving the detached daemon session running.
+   * detaches the client, leaving the detached service session running.
    */
-  String attachDaemonCommand(String daemonId);
+  String attachServiceCommand(String serviceId);
 }

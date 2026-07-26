@@ -25,7 +25,6 @@ import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandExit;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
-import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
@@ -39,8 +38,9 @@ import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
-import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
-import eu.wohlben.qits.workspacedaemon.protocol.StartDaemon;
+import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
+import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
+import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
 import io.quarkus.websockets.next.WebSocketConnection;
@@ -219,7 +219,7 @@ public class WorkspaceDaemonRegistry
             hello.daemonBuildTime());
         // Remember the repository the daemon serves: service (dev-server) events carry only the
         // service NAME, and the host keys supervision state by (repoId, workspaceId, id) — so the
-        // ServiceEventSink needs repoId to resolve the name to a repository daemon definition. The
+        // ServiceEventSink needs repoId to resolve the name to a repository service definition. The
         // daemon's announced build identity is retained for the workspace registry
         // (WorkspaceDaemonInfo).
         if (client != null) {
@@ -269,7 +269,7 @@ public class WorkspaceDaemonRegistry
       case BootstrapStep step -> routeBootstrapStep(workspaceId, step);
       case BootstrapOutcome outcome -> routeBootstrapOutcome(workspaceId, outcome);
       case Bootstrapped done -> completeBootstrap(workspaceId, done.ok());
-      case DaemonEvent event -> routeServiceState(workspaceId, client, event);
+      case ServiceTransition event -> routeServiceState(workspaceId, client, event);
       case GitStatus status -> onGitStatus(workspaceId, client, status);
       case AgentActivity activity -> onAgentActivity(workspaceId, client, activity);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
@@ -278,8 +278,8 @@ public class WorkspaceDaemonRegistry
       case Describe ignored -> {}
       case DescribeConfig ignored -> {}
       case RunBootstrap ignored -> {}
-      case StartDaemon ignored -> {}
-      case SignalDaemon ignored -> {}
+      case StartService ignored -> {}
+      case SignalService ignored -> {}
       case PullBranch ignored -> {}
     }
   }
@@ -446,7 +446,8 @@ public class WorkspaceDaemonRegistry
   }
 
   /** Fan a service's lifecycle transition out to every subscribed host coordinator. */
-  private void routeServiceState(String workspaceId, DaemonConnection client, DaemonEvent event) {
+  private void routeServiceState(
+      String workspaceId, DaemonConnection client, ServiceTransition event) {
     if (serviceSinks.isEmpty()) {
       return;
     }
@@ -776,7 +777,7 @@ public class WorkspaceDaemonRegistry
     }
     String correlationId = UUID.randomUUID().toString();
     client.connection.sendTextAndAwait(
-        codec.encode(new StartDaemon(correlationId, serviceName, script, env)));
+        codec.encode(new StartService(correlationId, serviceName, script, env)));
   }
 
   @Override
@@ -788,7 +789,7 @@ public class WorkspaceDaemonRegistry
     }
     String correlationId = UUID.randomUUID().toString();
     client.connection.sendTextAndAwait(
-        codec.encode(new SignalDaemon(correlationId, serviceName, signal)));
+        codec.encode(new SignalService(correlationId, serviceName, signal)));
   }
 
   /** Poll for a live daemon up to {@code timeout}; true once one is connected. */
