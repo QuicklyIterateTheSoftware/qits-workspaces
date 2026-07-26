@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.LogLineClassifier;
 import eu.wohlben.qits.workspaces.entity.LogSeverity;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;

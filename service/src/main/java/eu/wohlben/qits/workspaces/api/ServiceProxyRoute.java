@@ -4,7 +4,6 @@ import eu.wohlben.qits.workspaces.control.ProxyOrigin;
 import eu.wohlben.qits.workspaces.control.ServiceProxyPath;
 import eu.wohlben.qits.workspaces.control.ServiceSupervisor;
 import eu.wohlben.qits.workspaces.entity.ServiceStatus;
-import eu.wohlben.qits.http.RootPath;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;

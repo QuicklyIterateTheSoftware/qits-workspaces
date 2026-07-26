@@ -3,13 +3,7 @@ package eu.wohlben.qits.workspaces.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspaces.control.CommandOutputSink;
-import eu.wohlben.qits.workspaces.control.CommandRegistry;
-import eu.wohlben.qits.workspaces.control.CommandService;
 import eu.wohlben.qits.workspaces.dto.CommandDto;
-import eu.wohlben.qits.workspaces.control.ProjectService;
-import eu.wohlben.qits.workspaces.control.RepositoryService;
-import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import eu.wohlben.qits.workspaces.dto.ServiceEventDto;
 import eu.wohlben.qits.workspaces.entity.ServiceEventKind;
 import eu.wohlben.qits.workspaces.entity.ServiceEventSeverity;

@@ -3,9 +3,6 @@ package eu.wohlben.qits.workspaces.control;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspaces.control.TechnicalProcess;
-import eu.wohlben.qits.workspaces.control.TechnicalProcessRegistry;
-import eu.wohlben.qits.workspaces.control.ProjectService;
 import eu.wohlben.qits.workspaces.entity.WorkspaceRuntimeStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;

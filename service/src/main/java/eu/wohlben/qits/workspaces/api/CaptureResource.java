@@ -63,7 +63,7 @@ public class CaptureResource {
     String url =
         requestOrigin(uriInfo)
             + "/repositories/"
-            + workspace.repository.id
+            + workspace.repositoryId
             + "/workspaces/"
             + workspace.workspaceId
             + "/wip";

@@ -6,10 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.error.NotFoundException;
-import eu.wohlben.qits.workspaces.control.TechnicalProcess;
-import eu.wohlben.qits.workspaces.control.TechnicalProcessRegistry;
 import eu.wohlben.qits.workspaces.dto.TechnicalProcessFrame;
-import eu.wohlben.qits.workspaces.control.ProjectService;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.nio.file.Path;

@@ -6,8 +6,6 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import eu.wohlben.qits.workspaces.api.ProjectController;
-import eu.wohlben.qits.workspaces.api.WorkspaceController;
 import eu.wohlben.qits.workspaces.control.FakeWorkspaceConfigReader;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;

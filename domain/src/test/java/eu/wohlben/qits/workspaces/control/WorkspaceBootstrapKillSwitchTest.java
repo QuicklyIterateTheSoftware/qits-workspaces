@@ -2,11 +2,6 @@ package eu.wohlben.qits.workspaces.control;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspaces.control.ProjectService;
-import eu.wohlben.qits.workspaces.control.GitExecutor;
-import eu.wohlben.qits.workspaces.control.RepositoryService;
-import eu.wohlben.qits.workspaces.control.WorkspaceReadyForServicesRecorder;
-import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;

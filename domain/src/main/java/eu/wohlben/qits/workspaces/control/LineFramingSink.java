@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.CommandOutputSink;
 import java.util.regex.Pattern;
 
 /**

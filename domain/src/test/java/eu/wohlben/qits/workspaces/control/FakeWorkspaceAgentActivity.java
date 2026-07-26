@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.AgentActivityState;
 import io.quarkus.test.Mock;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.Optional;

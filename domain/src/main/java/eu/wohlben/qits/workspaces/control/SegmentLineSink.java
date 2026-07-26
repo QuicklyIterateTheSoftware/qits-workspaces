@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.CommandOutputSink;
 
 /**
  * Adapts a command's raw chunked output (the service follower pipeline fans chunks out to {@link

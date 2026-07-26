@@ -8,8 +8,6 @@ import eu.wohlben.qits.workspaces.persistence.BootstrapRunRepository;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
 import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceRepository;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
 import jakarta.inject.Inject;

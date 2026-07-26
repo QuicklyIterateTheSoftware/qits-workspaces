@@ -3,10 +3,7 @@ package eu.wohlben.qits.workspaces.control;
 import eu.wohlben.qits.workspaces.dto.CaptureContent;
 import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
-import eu.wohlben.qits.workspaces.control.WorkspaceService;
-import eu.wohlben.qits.workspaces.entity.Repository;
 import eu.wohlben.qits.workspaces.entity.Workspace;
-import eu.wohlben.qits.workspaces.persistence.RepositoryRepository;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -33,7 +30,7 @@ public class CaptureService {
 
   private static final int MAX_NAME_ATTEMPTS = 100;
 
-  @Inject RepositoryRepository repositoryRepository;
+  @Inject RepositoryLookup repositories;
   @Inject WorkspaceRepository workspaceRepository;
   @Inject WorkspaceService workspaceService;
   @Inject CaptureGoalRenderer goalRenderer;
@@ -53,15 +50,14 @@ public class CaptureService {
     if (repoId == null || repoId.isBlank()) {
       throw new NotFoundException("Capture payload names no repository");
     }
-    Repository repo =
-        repositoryRepository
-            .findByIdOptional(repoId)
-            .orElseThrow(() -> new NotFoundException("Repository not found: " + repoId));
+    // 404, nothing created, when the repository is unknown to the owning application — the same
+    // fail-closed answer the monorepo gave from its own Repository row.
+    RepositoryLookup.RepositoryView repo = repositories.require(repoId);
     String branch = availableBranchName(repoId, receivedAt);
     String workspaceId = WorkspaceService.toWorkspaceSlug(branch);
     String preamble = goalRenderer.render(content, receivedAt);
     return workspaceService.createWorkspace(
-        repoId, workspaceId, repo.mainBranch, branch, preamble, false);
+        repoId, workspaceId, repo.mainBranch(), branch, preamble, false);
   }
 
   /**

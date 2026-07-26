@@ -8,8 +8,6 @@ import eu.wohlben.qits.workspaces.entity.PromptAttachmentSource;
 import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.entity.WorkspacePromptAttachment;
 import eu.wohlben.qits.workspaces.persistence.WorkspacePromptAttachmentRepository;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;

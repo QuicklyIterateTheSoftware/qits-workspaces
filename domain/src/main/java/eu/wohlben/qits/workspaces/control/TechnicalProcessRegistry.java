@@ -1,7 +1,5 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangePublisher;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;

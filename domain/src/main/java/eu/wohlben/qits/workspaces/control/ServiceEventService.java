@@ -4,8 +4,6 @@ import eu.wohlben.qits.workspaces.dto.ServiceEventDto;
 import eu.wohlben.qits.workspaces.entity.ServiceEventSeverity;
 import eu.wohlben.qits.workspaces.mapper.ServiceEventMapper;
 import eu.wohlben.qits.workspaces.persistence.ServiceEventRepository;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
-import eu.wohlben.qits.workspaces.control.WorkspaceChangePublisher;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;

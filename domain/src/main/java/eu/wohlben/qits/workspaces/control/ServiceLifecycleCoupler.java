@@ -1,11 +1,6 @@
 package eu.wohlben.qits.workspaces.control;
 
 import eu.wohlben.qits.workspaces.error.BadRequestException;
-import eu.wohlben.qits.workspaces.control.TechnicalProcess;
-import eu.wohlben.qits.workspaces.control.TechnicalProcessRegistry;
-import eu.wohlben.qits.workspaces.control.WorkspaceConfigReader;
-import eu.wohlben.qits.workspaces.control.WorkspaceContainerStopping;
-import eu.wohlben.qits.workspaces.control.WorkspaceReadyForServices;
 import eu.wohlben.qits.workspaces.dto.ServiceDefinitionDto;
 import eu.wohlben.qits.workspaces.mapper.ServiceDefinitionMapper;
 import jakarta.enterprise.context.ApplicationScoped;

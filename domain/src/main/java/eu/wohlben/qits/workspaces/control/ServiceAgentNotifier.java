@@ -1,11 +1,9 @@
 package eu.wohlben.qits.workspaces.control;
 
-import eu.wohlben.qits.workspaces.control.CommandRegistry;
-import eu.wohlben.qits.workspaces.entity.CommandKind;
-import eu.wohlben.qits.workspaces.persistence.CommandRepository;
 import eu.wohlben.qits.workspaces.dto.ServiceEventDto;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
@@ -23,9 +21,11 @@ public class ServiceAgentNotifier {
 
   private static final Logger LOG = Logger.getLogger(ServiceAgentNotifier.class);
 
-  @Inject CommandRepository commandRepository;
-
-  @Inject CommandRegistry registry;
+  /**
+   * The command context's live conversations, when one is assembled with this jar. Absent, or
+   * present with nothing running, both mean "spool it" — see {@link WorkspaceChatInbox}.
+   */
+  @Inject Instance<WorkspaceChatInbox> chats;
 
   @Inject ServiceEventSpool spool;
 
@@ -33,17 +33,11 @@ public class ServiceAgentNotifier {
   @Transactional
   public void deliver(ServiceEventDto event) {
     String message = format(event);
-    String chatId =
-        commandRepository
-            .findRunningByKindAndWorkspace(CommandKind.CHAT, event.repoId(), event.workspaceId())
-            .stream()
-            .map(command -> command.id)
-            // The DB row can outlive the process (or lag its start); the registry is the truth.
-            .filter(registry::isRunning)
-            .findFirst()
-            .orElse(null);
-    if (chatId != null && registry.chatSend(chatId, message)) {
-      LOG.debugf("Service event delivered to chat %s: %s", chatId, event.summary());
+    if (chats.isResolvable()
+        && chats.get().deliver(event.repoId(), event.workspaceId(), message)) {
+      LOG.debugf(
+          "Service event delivered to the live chat in %s/%s: %s",
+          event.repoId(), event.workspaceId(), event.summary());
       return;
     }
     spool.add(event.repoId(), event.workspaceId(), message);

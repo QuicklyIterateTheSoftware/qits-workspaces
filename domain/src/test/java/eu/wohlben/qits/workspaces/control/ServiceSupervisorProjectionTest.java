@@ -6,16 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.error.BadRequestException;
-import eu.wohlben.qits.workspaces.control.ProjectService;
-import eu.wohlben.qits.workspaces.control.FakeWorkspaceConfigReader;
-import eu.wohlben.qits.workspaces.control.FakeWorkspaceServiceDriver;
-import eu.wohlben.qits.workspaces.control.ProxyOrigin;
-import eu.wohlben.qits.workspaces.control.QitsConfig;
-import eu.wohlben.qits.workspaces.control.RepositoryService;
-import eu.wohlben.qits.workspaces.control.WorkspaceService;
-import eu.wohlben.qits.workspaces.control.WorkspaceServiceDriver;
 import eu.wohlben.qits.workspaces.dto.ServiceInstanceDto;
-import eu.wohlben.qits.workspaces.control.RestartPolicy;
 import eu.wohlben.qits.workspaces.entity.ServiceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
