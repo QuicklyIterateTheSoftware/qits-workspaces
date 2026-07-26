@@ -6,19 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.control.AgentActivityState;
-import eu.wohlben.qits.domain.command.entity.Command;
-import eu.wohlben.qits.domain.command.entity.CommandKind;
-import eu.wohlben.qits.domain.command.entity.CommandStatus;
-import eu.wohlben.qits.domain.command.persistence.CommandRepository;
-import eu.wohlben.qits.domain.project.entity.Project;
-import eu.wohlben.qits.domain.project.persistence.ProjectRepository;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
 import eu.wohlben.qits.workspaces.control.WorkspaceBootstrapDriver;
 import eu.wohlben.qits.workspaces.control.WorkspaceConfigView;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonInfo;
-import eu.wohlben.qits.workspaces.entity.Repository;
 import eu.wohlben.qits.workspaces.entity.Workspace;
-import eu.wohlben.qits.workspaces.persistence.RepositoryRepository;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceRepository;
 import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
 import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint.Topic;
@@ -80,10 +72,9 @@ class DaemonControlSocketTest {
   @Inject WorkspaceDaemonRegistry registry;
   @Inject DaemonMessageCodec codec;
   @Inject HintRecorder hints;
-  @Inject ProjectRepository projectRepository;
-  @Inject RepositoryRepository repositoryRepository;
   @Inject WorkspaceRepository workspaceRepository;
-  @Inject CommandRepository commandRepository;
+
+  @Inject RecordingAgentSessionReporter agentSessions;
 
   @TestHTTPResource("/api/workspace-daemon/" + WORKSPACE_ID)
   URI endpoint;
@@ -689,11 +680,12 @@ class DaemonControlSocketTest {
   @Test
   void aSessionStartAgentActivityStillDrivesTheSessionLineageWrite() throws Exception {
     // The regression guard for retiring the direct /agent-session endpoint: a SessionStart frame,
-    // routed through the daemon, still records the same lineage row
-    // CommandService.reportAgentSession
-    // produced before.
+    // routed through the daemon, still reaches the session-lineage sink. The sink is the
+    // AgentSessionReporter port here rather than a CommandService write — the lineage row belongs
+    // to the commands context; what this context owns is calling the port with the frame's fields.
     String sessionId = UUID.randomUUID().toString();
-    String commandId = seedRunningAgentCommand();
+    String commandId = UUID.randomUUID().toString();
+    agentSessions.clear();
     try (FakePeer peer = connect()) {
       await(() -> registry.isDaemonLive(WORKSPACE_ID));
 
@@ -709,52 +701,11 @@ class DaemonControlSocketTest {
                       "/claude-home/.claude/projects/-workspace/" + sessionId + ".jsonl",
                       1L)));
 
-      await(() -> lineageRecorded(commandId, sessionId));
-      assertTrue(lineageRecorded(commandId, sessionId), "SessionStart lineage row was written");
+      await(() -> agentSessions.recorded(commandId, sessionId));
+      assertTrue(
+          agentSessions.recorded(commandId, sessionId),
+          "SessionStart was reported to the session-lineage sink");
     }
-  }
-
-  @Transactional
-  boolean lineageRecorded(String commandId, String sessionId) {
-    Command command = commandRepository.findById(commandId);
-    return command != null
-        && command.agentSessions.stream().anyMatch(ref -> sessionId.equals(ref.sessionId));
-  }
-
-  /** Seeds a minimal RUNNING agent command (no pinned session) and returns its id. */
-  @Transactional
-  String seedRunningAgentCommand() {
-    Project project = new Project();
-    project.id = UUID.randomUUID().toString();
-    project.name = "activity-lineage";
-    projectRepository.persist(project);
-
-    Repository repository = new Repository();
-    repository.id = UUID.randomUUID().toString();
-    repository.url = "https://example.com/repo.git";
-    repository.project = project;
-    repositoryRepository.persist(repository);
-
-    Workspace workspace = new Workspace();
-    workspace.workspaceId = "activity-work-" + UUID.randomUUID();
-    workspace.repository = repository;
-    workspace.branch = "feature/x";
-    workspaceRepository.persist(workspace);
-
-    Command command =
-        Command.builder()
-            .id(UUID.randomUUID().toString())
-            .workspace(workspace)
-            .branch("feature/x")
-            .commitHash("abcdef1234567890")
-            .actionName("Claude Code (repository MCP)")
-            .executeScript("exec claude")
-            .interactive(true)
-            .kind(CommandKind.TERMINAL)
-            .status(CommandStatus.RUNNING)
-            .build();
-    commandRepository.persist(command);
-    return command.id;
   }
 
   @Test

@@ -10,7 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.workspaces.control.AgentActivityState;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
-import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.workspaces.dto.WorkspaceDto;
 import eu.wohlben.qits.workspaces.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.workspaces.entity.WorkspaceStatus;
@@ -30,10 +29,13 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class WorkspaceContainerLifecycleServiceTest {
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  // NOT covered here: startup reconciliation of workspaces against the live container set
+  // (containerless-but-live-branch -> STOPPED, dangling-volume reaping). That logic lives in the
+  // repositories context's RepositoryDiscoveryService, which walks the repositories data dir; this
+  // context has no reconciler of its own to drive.
+
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
-  @Inject RepositoryDiscoveryService discoveryService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
   @Inject WorkspaceContainerStartedRecorder startedRecorder;
@@ -44,10 +46,18 @@ public class WorkspaceContainerLifecycleServiceTest {
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
 
+  /**
+   * A repository with a bare origin on disk and a resolvable id. Replaces the monorepo's
+   * clone-the-submodule-fixture setup, which needed the repositories context and a
+   * build-time fixture-derivation step, neither of which exists here.
+   */
   private String clonedRepo() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Lifecycle Project", null);
-    return repositoryService.cloneRepository(fixtureUrl, null, project).id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    // cloneRepository used to register the main branch's workspace row as part of cloning; that
+    // call lives in this context, so the fixture makes it directly.
+    workspaceService.createMainWorkspace(repoId, "master");
+    return repoId;
   }
 
   private WorkspaceDto workspaceDto(String repoId, String workspaceId) {
@@ -267,21 +277,6 @@ public class WorkspaceContainerLifecycleServiceTest {
         "a workspace with no branch to recreate from is abandoned");
   }
 
-  @Test
-  public void reconcileMarksAContainerlessButLiveBranchStoppedNotAbandoned() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
-    containers.rm(containers.containerName("feat", repoId));
-
-    // Reconciliation keys off the branch, not the container: the branch survives, so the workspace
-    // stays ACTIVE (STOPPED runtime), not ABANDONED.
-    discoveryService.discover();
-
-    WorkspaceDto dto = workspaceDto(repoId, "feat");
-    assertEquals(WorkspaceStatus.ACTIVE, dto.status());
-    assertEquals(WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus());
-  }
 
   @Test
   public void stopContainerPausesInPlaceKeepingTheWorkspaceActive() throws Exception {
@@ -648,21 +643,6 @@ public class WorkspaceContainerLifecycleServiceTest {
         "the workspace is abandoned");
   }
 
-  @Test
-  public void reconcileReapsADanglingWorkspaceVolumeButSparesActiveOnes() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat"); // an ACTIVE row + its volume
-    // A dangling volume: labeled/created but with no workspace row backing it (a crash or a manual
-    // docker rm between container teardown and removeWorkspaceVolume leaves exactly this).
-    containers.ensureWorkspaceVolume(repoId, "ghost", "gone", null);
-    assertTrue(workspaceVolumeExists("ghost"), "precondition: the dangling volume exists");
-
-    discoveryService.discover();
-
-    assertFalse(workspaceVolumeExists("ghost"), "a volume with no active row is reaped");
-    assertTrue(workspaceVolumeExists("feat"), "a volume with an active workspace is spared");
-  }
 
   /**
    * Whether the fake runtime is currently tracking a per-workspace volume for {@code workspaceId}.

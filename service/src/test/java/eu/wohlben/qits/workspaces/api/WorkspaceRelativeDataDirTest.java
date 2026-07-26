@@ -3,6 +3,7 @@ package eu.wohlben.qits.workspaces.api;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
+import eu.wohlben.qits.workspaces.control.TestOrigin;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -33,37 +34,28 @@ public class WorkspaceRelativeDataDirTest {
     }
   }
 
-  private final String fixtureUrl;
+  /**
+   * A repository with a bare origin on disk and a resolvable id, seeded in-JVM.
+   *
+   * <p>The monorepo drove POST /api/projects and POST /api/projects/{id}/repositories to build this
+   * fixture. Those routes belong to the projects and repositories contexts and are not part of this
+   * jar, so the same state is set up directly instead — the endpoints under test here are the
+   * workspace ones below, not the seeding ones.
+   */
+  @jakarta.inject.Inject
+  eu.wohlben.qits.workspaces.control.FakeRepositoryLookup repositories;
 
-  public WorkspaceRelativeDataDirTest() throws Exception {
-    fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-  }
+  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
 
   private String createProjectAndRepository() {
-    String projectId =
-        given()
-            .contentType(ContentType.JSON)
-            .body(
-                new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRequest(
-                    "Rel Workspace Project", null, null, null))
-            .when()
-            .post("/api/projects")
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .extract()
-            .path("project.id");
-
-    return given()
-        .contentType(ContentType.JSON)
-        .body(
-            new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRepositoryRequest(
-                fixtureUrl, null, null))
-        .when()
-        .post("/api/projects/" + projectId + "/repositories")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .extract()
-        .path("repository.id");
+    try {
+      String repoId = TestOrigin.create(dataDir);
+      repositories.register(repoId);
+      return repoId;
+    } catch (Exception e) {
+      throw new IllegalStateException("failed to seed a test origin", e);
+    }
   }
 
   @Test

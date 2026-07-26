@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.ZoneId;
 import java.util.List;
+import jakarta.enterprise.inject.Instance;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -50,18 +51,13 @@ class WorkspaceContainerFactoryTest {
     // needs a tx + DB); the no-scope fallback has its own test.
     f.nameResolver =
         nameResolver(
-            Optional.of(new RepositoryNameResolver.ProjectScopedName("proj-1", "my-repo")));
+            Optional.of(new RepositoryAddressResolver.ProjectScopedName("proj-1", "my-repo")));
     return f;
   }
 
-  private static RepositoryNameResolver nameResolver(
-      Optional<RepositoryNameResolver.ProjectScopedName> scopedName) {
-    return new RepositoryNameResolver() {
-      @Override
-      public Optional<ProjectScopedName> resolve(String repoId) {
-        return scopedName;
-      }
-    };
+  private static Instance<RepositoryAddressResolver> nameResolver(
+      Optional<RepositoryAddressResolver.ProjectScopedName> scopedName) {
+    return StubInstance.of(repoId -> scopedName);
   }
 
   private static GitIdentity identity(String name, String email) {

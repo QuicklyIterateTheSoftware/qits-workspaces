@@ -4,41 +4,47 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.command.control.CommandService;
-import eu.wohlben.qits.domain.featureflow.control.ActionConfigurationService;
-import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.workspaces.dto.WorkspaceHistoryDetailDto;
 import eu.wohlben.qits.workspaces.dto.WorkspaceHistoryDto;
 import eu.wohlben.qits.workspaces.entity.WorkspaceEventType;
 import eu.wohlben.qits.workspaces.entity.WorkspaceStatus;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
  * Verifies workspace soft-delete against a real cloned-fixture repo: cleanup/discard keeps the row
- * as history (with status, events and result), workspace ids can be reused after resolution, and a
- * workspace that ran a command can still be discarded — both the workspace and its command persist.
+ * as history (with status, events and result) and workspace ids can be reused after resolution.
+ *
+ * <p>The monorepo also asserted here that a workspace which ran a command could still be discarded
+ * — a command FK used to pin the row. That is structurally impossible now: commands live in another
+ * context against another datasource, so no FK into workspace can exist to pin anything.
  */
 @QuarkusTest
 public class WorkspaceHistoryServiceTest {
 
-  @Inject ProjectService projectService;
-
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
 
   @Inject WorkspaceService workspaceService;
 
   @Inject WorkspaceHistoryService workspaceHistoryService;
 
-  @Inject ActionConfigurationService actionConfigurationService;
+  @ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
 
-  @Inject CommandService commandService;
-
+  /**
+   * A repository with a bare origin on disk and a resolvable id. Replaces the monorepo's
+   * clone-the-submodule-fixture setup, which needed the repositories context and a
+   * build-time fixture-derivation step, neither of which exists here.
+   */
   private String clonedRepo() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("History Project", null);
-    return repositoryService.cloneRepository(fixtureUrl, null, project).id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    // cloneRepository used to register the main branch's workspace row as part of cloning; that
+    // call lives in this context, so the fixture makes it directly.
+    workspaceService.createMainWorkspace(repoId, "master");
+    return repoId;
   }
 
   private WorkspaceHistoryDto historyFor(String repoId, String workspaceId) {
@@ -100,20 +106,4 @@ public class WorkspaceHistoryServiceTest {
     assertEquals(2, featRows, "both the resolved and the new workspace share the id in history");
   }
 
-  @Test
-  public void aWorkspaceThatRanACommandCanBeDiscardedAndBothPersist() throws Exception {
-    String repoId = clonedRepo();
-    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    String actionId =
-        actionConfigurationService.create("echo", null, "echo hi", null, false, null).id;
-    commandService.launchAndAwait(repoId, "feat", actionId);
-
-    // Previously the command's FK pinned the workspace row and this threw a constraint violation.
-    workspaceService.discardWorkspace(repoId, "feat", null);
-
-    WorkspaceHistoryDetailDto detail =
-        workspaceHistoryService.get(repoId, historyFor(repoId, "feat").id());
-    assertEquals(WorkspaceStatus.ABANDONED, detail.status());
-    assertEquals(1, detail.commands().size(), "the command stays associated with the workspace");
-  }
 }

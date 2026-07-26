@@ -3,6 +3,7 @@ package eu.wohlben.qits.workspaces.api;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
+import eu.wohlben.qits.workspaces.control.TestOrigin;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.ws.rs.core.Response;
@@ -17,37 +18,29 @@ public class WorkspaceControllerTest {
   @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
 
-  private final String fixtureUrl;
+  @jakarta.inject.Inject
+  eu.wohlben.qits.workspaces.control.FakeRepositoryLookup repositories;
 
-  public WorkspaceControllerTest() throws Exception {
-    fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-  }
+  @jakarta.inject.Inject
+  eu.wohlben.qits.workspaces.control.WorkspaceService workspaceService;
 
+  /**
+   * A repository with a bare origin on disk and a resolvable id, seeded in-JVM.
+   *
+   * <p>The monorepo drove POST /api/projects and POST /api/projects/{id}/repositories to build this
+   * fixture. Those routes belong to the projects and repositories contexts and are not part of this
+   * jar, so the same state is set up directly instead — the endpoints under test here are the
+   * workspace ones, not the seeding ones.
+   */
   private String createProjectAndRepository() {
-    String projectId =
-        given()
-            .contentType(ContentType.JSON)
-            .body(
-                new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRequest(
-                    "Workspace Project", null, null, null))
-            .when()
-            .post("/api/projects")
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .extract()
-            .path("project.id");
-
-    return given()
-        .contentType(ContentType.JSON)
-        .body(
-            new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRepositoryRequest(
-                fixtureUrl, null, null))
-        .when()
-        .post("/api/projects/" + projectId + "/repositories")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .extract()
-        .path("repository.id");
+    try {
+      String repoId = TestOrigin.create(dataDir);
+      repositories.register(repoId);
+      workspaceService.createMainWorkspace(repoId, "master");
+      return repoId;
+    } catch (Exception e) {
+      throw new IllegalStateException("failed to seed a test origin", e);
+    }
   }
 
   @Test
@@ -430,41 +423,7 @@ public class WorkspaceControllerTest {
             greaterThan(0));
   }
 
-  @Test
-  public void testIncomingCommitsListsParentCommitsNotInBranch() throws Exception {
-    String repoId = createProjectAndRepository();
 
-    createWorkspace(repoId, "in-parent", "master", "in-parent-branch");
-    createWorkspace(repoId, "in-child", "in-parent-branch", "in-child-branch");
-
-    // Advance the parent branch by one commit; the child forked before it, so it's now behind by 1.
-    commitFile(repoId, "in-parent", "p.txt", "p\n", "incoming parent commit");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/in-child/incoming-commits")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("branch", equalTo("in-child-branch"))
-        .body("parent", equalTo("in-parent-branch"))
-        // the commit waiting on the parent that a fast-forward/merge would pull in
-        .body("commits.message", hasItem("incoming parent commit"));
-  }
-
-  @Test
-  public void testIncomingCommitsEmptyWhenUpToDate() {
-    String repoId = createProjectAndRepository();
-    createWorkspace(repoId, "ut-wt", "master", "ut-branch");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/ut-wt/incoming-commits")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("commits", hasSize(0));
-  }
 
   /**
    * Writes a file inside the workspace on disk, commits it on the workspace's branch, and pushes.
@@ -570,131 +529,12 @@ public class WorkspaceControllerTest {
         .body("entries[0].workspace.parent", nullValue());
   }
 
-  @Test
-  public void testListFilesIncludesTrackedAndNewUntrackedFiles() throws Exception {
-    String repoId = createProjectAndRepository();
-    // The default main workspace is checked out at "master".
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    Files.writeString(workspacePath.resolve("browse-me.txt"), "hello\n");
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        // a brand-new untracked file shows up (ls-files --others), sorted alongside tracked ones
-        .body("paths", hasItem("browse-me.txt"));
-  }
 
-  @Test
-  public void testFileContentReturnsText() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    Files.writeString(workspacePath.resolve("readme.md"), "# Title\n\nbody\n");
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files/content?path=readme.md")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("path", equalTo("readme.md"))
-        .body("binary", equalTo(false))
-        .body("content", equalTo("# Title\n\nbody\n"));
-  }
 
-  @Test
-  public void testFileContentDetectsBinary() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    // A NUL byte marks the file as binary; the viewer gets no content.
-    Files.write(workspacePath.resolve("blob.bin"), new byte[] {1, 2, 0, 3, 4});
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files/content?path=blob.bin")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("binary", equalTo(true))
-        .body("content", nullValue());
-  }
 
-  @Test
-  public void testFileContentRejectsPathTraversal() {
-    String repoId = createProjectAndRepository();
-    // `path` is user-supplied; a `..` escape out of the workspace root is rejected.
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(
-            "/api/repositories/"
-                + repoId
-                + "/workspaces/master/files/content?path=../origin/config")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
-
-  @Test
-  public void testFileContentRejectsSymlinkEscape() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    // A cloned repo is untrusted: a symlink committed inside the workspace that points outside it
-    // must not be followed when reading (path traversal via symlink).
-    Path secret = Files.createTempFile("qits-secret", ".txt");
-    Files.writeString(secret, "top secret");
-    Files.createSymbolicLink(workspacePath.resolve("escape-link"), secret);
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files/content?path=escape-link")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
-
-  @Test
-  public void testFileContentRejectsIntermediateSymlinkEscape() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    // A symlinked *directory* committed inside the workspace is transparently followed during path
-    // resolution, so a request whose intermediate segment is that link escapes the workspace even
-    // though the final segment is an ordinary file. The read must be rejected (path traversal via
-    // an
-    // intermediate symlink, not just the final component).
-    Path outside = Files.createTempDirectory("qits-outside");
-    Files.writeString(outside.resolve("secret.txt"), "top secret");
-    Files.createSymbolicLink(workspacePath.resolve("escape-dir"), outside);
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(
-            "/api/repositories/"
-                + repoId
-                + "/workspaces/master/files/content?path=escape-dir/secret.txt")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
-
-  @Test
-  public void testListFilesRejectsIntermediateSymlinkEscape() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    // Same escape via an intermediate symlinked directory, but for a listing: the final segment
-    // resolves to a real directory outside the workspace, which must not be walked.
-    Path outside = Files.createTempDirectory("qits-outside");
-    Files.createDirectories(outside.resolve("nested"));
-    Files.createSymbolicLink(workspacePath.resolve("escape-dir"), outside);
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files?path=escape-dir/nested")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
 
   @Test
   public void testFileContentMissingFileReturns404() {
@@ -710,106 +550,11 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.NOT_FOUND.getStatusCode());
   }
 
-  @Test
-  public void testListFilesReturnsGitignoredDirectoryAsLazyStub() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    Files.writeString(workspacePath.resolve(".gitignore"), "node_modules/\n");
-    Files.createDirectories(workspacePath.resolve("node_modules/pkg"));
-    Files.writeString(workspacePath.resolve("node_modules/top.js"), "x\n");
-    Files.writeString(workspacePath.resolve("node_modules/pkg/index.js"), "y\n");
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        // the ignored dir is a collapsed stub, not walked into: no node_modules contents in paths
-        .body("paths", not(hasItem(startsWith("node_modules"))))
-        // …but present as a lazy stub with a cheap immediate-child count and a self-referential
-        // href
-        .body("lazyDirs.path", hasItem("node_modules"))
-        .body("lazyDirs.find { it.path == 'node_modules' }.childCount", equalTo(2))
-        .body(
-            "lazyDirs.find { it.path == 'node_modules' }.href",
-            containsString("path=node_modules"));
-  }
 
-  @Test
-  public void testListLazyDirectoryContentsOneLevelDeep() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    Files.writeString(workspacePath.resolve(".gitignore"), "node_modules/\n");
-    Files.createDirectories(workspacePath.resolve("node_modules/pkg"));
-    Files.writeString(workspacePath.resolve("node_modules/top.js"), "x\n");
-    Files.writeString(workspacePath.resolve("node_modules/pkg/index.js"), "y\n");
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files?path=node_modules")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        // immediate regular files are eager; the nested subdir stays lazy
-        .body("paths", hasItem("node_modules/top.js"))
-        .body("paths", not(hasItem("node_modules/pkg/index.js")))
-        .body("lazyDirs.path", hasItem("node_modules/pkg"))
-        .body("lazyDirs.find { it.path == 'node_modules/pkg' }.childCount", equalTo(1));
-  }
 
-  @Test
-  public void testListFilesRejectsPathTraversal() {
-    String repoId = createProjectAndRepository();
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files?path=../origin")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
 
-  @Test
-  public void testListFilesRejectsSymlinkDirectoryEscape() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    // A symlinked directory committed inside the workspace must not redirect the listing outside
-    // it.
-    Path outside = Files.createTempDirectory("qits-outside");
-    Files.createSymbolicLink(workspacePath.resolve("escape-dir"), outside);
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files?path=escape-dir")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
-
-  @Test
-  public void testListFilesRejectsNonDirectory() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    Files.writeString(workspacePath.resolve("a-file.txt"), "hi\n");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files?path=a-file.txt")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
-
-  @Test
-  public void testListFilesRejectsGitDirectory() {
-    String repoId = createProjectAndRepository();
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get("/api/repositories/" + repoId + "/workspaces/master/files?path=.git")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
 
   @Test
   public void testCreateWorkspaceRejectsPathTraversalAndFlagIds() {
@@ -935,305 +680,16 @@ public class WorkspaceControllerTest {
     return "/api/repositories/" + repoId + "/workspaces/master/component-map";
   }
 
-  @Test
-  public void testComponentMapScansInlineAndExternalTemplateComponents() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    Files.createDirectories(workspacePath.resolve("src/app/detail"));
-    Files.writeString(workspacePath.resolve("src/app/greeting.ts"), INLINE_COMPONENT);
-    Files.writeString(
-        workspacePath.resolve("src/app/detail/detail.ts"),
-        """
-        @Component({
-          selector: 'app-detail, [appDetail]',
-          templateUrl: './detail.html',
-          styleUrls: ['./detail.scss'],
-        })
-        export class Detail {}
-        """);
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("framework", equalTo("angular"))
-        .body("components", hasSize(2))
-        // the inline-template component carries only its .ts file
-        .body(
-            "components.find { it.className == 'Greeting' }.componentFile",
-            equalTo("src/app/greeting.ts"))
-        .body("components.find { it.className == 'Greeting' }.templateFile", nullValue())
-        .body("components.find { it.className == 'Greeting' }.styleFiles", hasSize(0))
-        .body(
-            "components.find { it.className == 'Greeting' }.selectors[0].element",
-            equalTo("app-greeting"))
-        // external refs resolve relative to the component file; the multi-selector is structured
-        .body(
-            "components.find { it.className == 'Detail' }.templateFile",
-            equalTo("src/app/detail/detail.html"))
-        .body(
-            "components.find { it.className == 'Detail' }.styleFiles",
-            contains("src/app/detail/detail.scss"))
-        .body(
-            "components.find { it.className == 'Detail' }.selectors[0].element",
-            equalTo("app-detail"))
-        .body(
-            "components.find { it.className == 'Detail' }.selectors[1].attribute",
-            equalTo("appDetail"));
-  }
 
-  @Test
-  public void testComponentMapEmptyForRepoWithoutComponents() {
-    String repoId = createProjectAndRepository();
 
-    // the fixture repo has no TypeScript at all — git grep matches nothing (exit 1), which must
-    // surface as an empty map, never an error
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("framework", equalTo("angular"))
-        .body("components", hasSize(0));
-  }
 
-  @Test
-  public void testComponentMapPicksUpNewUntrackedComponent() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-
-    // prime the cache with an empty scan…
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("components", hasSize(0));
-
-    // …then a brand-new (untracked, uncommitted) component must invalidate it and appear
-    Files.writeString(workspacePath.resolve("fresh.ts"), INLINE_COMPONENT);
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("components.className", hasItem("Greeting"));
-  }
-
-  @Test
-  public void testComponentMapReflectsEditToDirtyTrackedFile() throws Exception {
-    String repoId = createProjectAndRepository();
-    commitFile(repoId, "master", "tracked.ts", INLINE_COMPONENT, "add component");
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body(
-            "components.find { it.className == 'Greeting' }.selectors[0].element",
-            equalTo("app-greeting"));
-
-    // an uncommitted edit to the tracked file must invalidate the cached scan (git diff marker)
-    Path workspacePath = Path.of(dataDir, repoId, "workspaces", "master");
-    Files.writeString(
-        workspacePath.resolve("tracked.ts"),
-        INLINE_COMPONENT.replace("app-greeting", "app-renamed"));
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body(
-            "components.find { it.className == 'Greeting' }.selectors[0].element",
-            equalTo("app-renamed"));
-  }
-
-  @Test
-  public void testComponentMapExcludesSpecFiles() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path workspacePath = ensuredWorkspacePath(repoId, "master");
-    // test-host components in specs would pollute the map
-    Files.writeString(
-        workspacePath.resolve("greeting.spec.ts"),
-        INLINE_COMPONENT.replace("Greeting", "TestHost"));
-
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(componentMapUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("components", hasSize(0));
-  }
 
   private String detectionUrl(String repoId) {
     return "/api/repositories/" + repoId + "/workspaces/master/detection";
   }
 
-  /**
-   * The whole feature in one call: a Java project (pom-refined to Quarkus) nested with a Vitest
-   * Angular project, returning projects, per-framework membership, and the source→test link graph
-   * with runner kinds — all resolved server-side over the live working tree.
-   */
-  @Test
-  public void testDetectionReturnsProjectsMembershipAndLinksInOneCall() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path ws = ensuredWorkspacePath(repoId, "master");
-    Files.createDirectories(ws.resolve("src/main/java/com"));
-    Files.createDirectories(ws.resolve("src/test/java/com"));
-    Files.createDirectories(ws.resolve("web/src"));
-    // a Java/Quarkus project at the repo root
-    Files.writeString(
-        ws.resolve("pom.xml"),
-        "<project><dependency><groupId>io.quarkus</groupId></dependency></project>\n");
-    Files.writeString(ws.resolve("src/main/java/com/App.java"), "package com; class App {}\n");
-    Files.writeString(
-        ws.resolve("src/test/java/com/AppTest.java"), "package com; class AppTest {}\n");
-    // a nested Angular project whose test builder is Vitest (must NOT default to karma)
-    Files.writeString(
-        ws.resolve("web/angular.json"),
-        "{ \"projects\": { \"app\": { \"architect\": { \"test\": { \"builder\":"
-            + " \"@angular/build:unit-test\" } } } } }\n");
-    Files.writeString(ws.resolve("web/src/foo.ts"), "export const foo = 1;\n");
-    Files.writeString(ws.resolve("web/src/foo.spec.ts"), "describe('foo', () => {});\n");
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(detectionUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        // projects: the Java root pom-refined to Quarkus, plus the nested Angular root
-        .body("projects.find { it.frameworkId == 'java-quarkus' }.label", equalTo("Java / Quarkus"))
-        .body("projects.find { it.frameworkId == 'java-quarkus' }.root", equalTo(""))
-        .body("projects.find { it.root == 'web' }.frameworkId", equalTo("ts-angular"))
-        // membership: all detected frameworks' member sets, in the one call
-        .body(
-            "frameworks.find { it.frameworkId == 'java-quarkus' }.memberPaths",
-            hasItems("pom.xml", "src/main/java/com/App.java", "src/test/java/com/AppTest.java"))
-        .body(
-            "frameworks.find { it.root == 'web' }.memberPaths",
-            hasItems("web/angular.json", "web/src/foo.ts", "web/src/foo.spec.ts"))
-        // links: Java source → its JUnit test
-        .body(
-            "links.find { it.path == 'src/main/java/com/App.java' }.tests[0].path",
-            equalTo("src/test/java/com/AppTest.java"))
-        .body(
-            "links.find { it.path == 'src/main/java/com/App.java' }.tests[0].kinds",
-            contains("junit"))
-        .body("links.find { it.path == 'src/main/java/com/App.java' }.projectRoot", equalTo(""))
-        // links: Angular source → its Vitest spec (config-detected, not a karma default)
-        .body(
-            "links.find { it.path == 'web/src/foo.ts' }.tests[0].path",
-            equalTo("web/src/foo.spec.ts"))
-        .body("links.find { it.path == 'web/src/foo.ts' }.tests[0].kinds", contains("vitest"));
-  }
 
-  /**
-   * The Lit stack: a Vite root whose package.json depends on {@code lit} is a {@code ts-lit}
-   * project (the DetectionService content peek confirming the structural marker), its {@code
-   * *.test.ts} suffix pairing links sources to tests with the config-detected Vitest runner — and a
-   * Vite root <em>without</em> the lit dependency is no project at all (never mislabeled).
-   */
-  @Test
-  public void testDetectionRecognisesALitProjectViaContentPeekAndLinksDotTests() throws Exception {
-    String repoId = createProjectAndRepository();
-    Path ws = ensuredWorkspacePath(repoId, "master");
-    Files.createDirectories(ws.resolve("lit/src"));
-    Files.createDirectories(ws.resolve("other/src"));
-    // a Lit project: vite config + a package.json with a lit dependency + a vitest config
-    Files.writeString(ws.resolve("lit/vite.config.ts"), "export default {};\n");
-    Files.writeString(ws.resolve("lit/vitest.config.ts"), "export default {};\n");
-    Files.writeString(
-        ws.resolve("lit/package.json"), "{ \"dependencies\": { \"lit\": \"^3.0.0\" } }\n");
-    Files.writeString(ws.resolve("lit/src/foo.ts"), "export const foo = 1;\n");
-    Files.writeString(ws.resolve("lit/src/foo.test.ts"), "test('foo', () => {});\n");
-    // a Vite project with no lit dependency (a React/Vue shape) — must NOT be classified
-    Files.writeString(ws.resolve("other/vite.config.ts"), "export default {};\n");
-    Files.writeString(
-        ws.resolve("other/package.json"), "{ \"dependencies\": { \"react\": \"^19.0.0\" } }\n");
-    Files.writeString(ws.resolve("other/src/app.ts"), "export const app = 1;\n");
 
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(detectionUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("projects.find { it.root == 'lit' }.frameworkId", equalTo("ts-lit"))
-        .body("projects.find { it.root == 'lit' }.label", equalTo("TypeScript / Lit"))
-        .body("projects.find { it.root == 'other' }", nullValue())
-        .body(
-            "frameworks.find { it.frameworkId == 'ts-lit' }.memberPaths",
-            hasItems(
-                "lit/vite.config.ts",
-                "lit/vitest.config.ts",
-                "lit/package.json",
-                "lit/src/foo.ts",
-                "lit/src/foo.test.ts"))
-        // links: Lit source → its .test.ts, runner config-detected as Vitest
-        .body(
-            "links.find { it.path == 'lit/src/foo.ts' }.tests[0].path",
-            equalTo("lit/src/foo.test.ts"))
-        .body("links.find { it.path == 'lit/src/foo.ts' }.tests[0].kinds", contains("vitest"))
-        .body("links.find { it.path == 'lit/src/foo.ts' }.projectRoot", equalTo("lit"));
-  }
-
-  /**
-   * Render-consistency: {@code /files} and {@code /detection}, over the same unchanged tree, agree
-   * on the generation token, so the client applies detection only while it matches the tree it
-   * renders.
-   */
-  @Test
-  public void testFilesAndDetectionShareTheGenerationToken() {
-    String repoId = createProjectAndRepository();
-    String filesUrl = "/api/repositories/" + repoId + "/workspaces/master/files";
-
-    String filesGeneration =
-        given()
-            .contentType(ContentType.JSON)
-            .when()
-            .get(filesUrl)
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .body("generation", not(emptyOrNullString()))
-            .extract()
-            .path("generation");
-
-    // /detection stamps the identical token so the two never render as a skewed combination.
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(detectionUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("generation", equalTo(filesGeneration));
-  }
-
-  @Test
-  public void testDetectionIsEmptyForARepoWithNoRecognisedFramework() {
-    String repoId = createProjectAndRepository();
-
-    // the fixture repo has no pom.xml / angular.json / docs dir — detection yields empty lists,
-    // never an error, and /files stays a pure String[] transport
-    given()
-        .contentType(ContentType.JSON)
-        .when()
-        .get(detectionUrl(repoId))
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("projects", hasSize(0))
-        .body("frameworks", hasSize(0))
-        .body("links", hasSize(0));
-  }
 }

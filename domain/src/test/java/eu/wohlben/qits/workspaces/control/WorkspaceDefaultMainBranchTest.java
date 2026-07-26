@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.entity.WorkspaceEventType;
 import io.quarkus.test.junit.QuarkusTest;
@@ -22,8 +21,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class WorkspaceDefaultMainBranchTest {
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
   @Inject WorkspaceHistoryService workspaceHistoryService;
   @Inject GitExecutor git;
@@ -31,10 +29,18 @@ public class WorkspaceDefaultMainBranchTest {
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
 
+  /**
+   * A repository with a bare origin on disk and a resolvable id. Replaces the monorepo's
+   * clone-the-submodule-fixture setup, which needed the repositories context and a
+   * build-time fixture-derivation step, neither of which exists here.
+   */
   private String clonedRepo() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Default Branch Project", null);
-    return repositoryService.cloneRepository(fixtureUrl, null, project).id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    // cloneRepository used to register the main branch's workspace row as part of cloning; that
+    // call lives in this context, so the fixture makes it directly.
+    workspaceService.createMainWorkspace(repoId, "master");
+    return repoId;
   }
 
   private String revParse(String repoId, String ref) throws Exception {
@@ -47,7 +53,7 @@ public class WorkspaceDefaultMainBranchTest {
     String repoId = clonedRepo();
     // A repository whose configured main branch is NOT "master" (the fixture's 'feature' branch
     // diverges from 'master', so the fork point is distinguishable).
-    repositoryService.setMainBranch(repoId, "feature");
+    repositories.setMainBranch(repoId, "feature");
 
     Workspace ws = workspaceService.createWorkspace(repoId, "ws", null, null, null);
 
@@ -66,7 +72,7 @@ public class WorkspaceDefaultMainBranchTest {
   @Test
   public void blankMergeTargetMergesIntoTheConfiguredMainBranch() throws Exception {
     String repoId = clonedRepo();
-    repositoryService.setMainBranch(repoId, "feature");
+    repositories.setMainBranch(repoId, "feature");
     workspaceService.createWorkspace(repoId, "feeder", null, "feeder", null);
     String masterBefore = revParse(repoId, "refs/heads/master");
 

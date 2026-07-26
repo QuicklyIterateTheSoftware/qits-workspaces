@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
-import eu.wohlben.qits.domain.project.control.ProjectService;
 import eu.wohlben.qits.workspaces.dto.WorkspaceDto;
 import eu.wohlben.qits.workspaces.entity.WorkspaceRuntimeStatus;
 import io.quarkus.test.junit.QuarkusTest;
@@ -27,8 +26,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class WorkspaceRecreateContainerServiceTest {
 
-  @Inject ProjectService projectService;
-  @Inject RepositoryService repositoryService;
+  @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
@@ -38,10 +36,18 @@ public class WorkspaceRecreateContainerServiceTest {
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
 
+  /**
+   * A repository with a bare origin on disk and a resolvable id. Replaces the monorepo's
+   * clone-the-submodule-fixture setup, which needed the repositories context and a
+   * build-time fixture-derivation step, neither of which exists here.
+   */
   private String clonedRepo() throws Exception {
-    String fixtureUrl = getClass().getResource("/fixtures/testing-repo.git").toURI().getPath();
-    var project = projectService.create("Recreate Project", null);
-    return repositoryService.cloneRepository(fixtureUrl, null, project).id;
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    // cloneRepository used to register the main branch's workspace row as part of cloning; that
+    // call lives in this context, so the fixture makes it directly.
+    workspaceService.createMainWorkspace(repoId, "master");
+    return repoId;
   }
 
   private WorkspaceDto workspaceDto(String repoId, String workspaceId) {

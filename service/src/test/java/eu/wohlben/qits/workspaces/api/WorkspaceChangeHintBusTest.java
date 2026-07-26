@@ -3,11 +3,6 @@ package eu.wohlben.qits.workspaces.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-import eu.wohlben.qits.domain.service.control.ServiceEventService;
-import eu.wohlben.qits.domain.service.dto.ServiceEventDto;
-import eu.wohlben.qits.domain.service.entity.ServiceEventKind;
-import eu.wohlben.qits.domain.service.entity.ServiceEventSeverity;
-import eu.wohlben.qits.domain.service.entity.ServiceStatus;
 import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
 import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint.Topic;
 import eu.wohlben.qits.workspaces.control.WorkspaceChangePublisher;
@@ -34,15 +29,13 @@ import org.junit.jupiter.api.Test;
 /**
  * Verifies the {@code domain} → SSE hint bus end to end through real CDI async delivery: the
  * publisher's {@code fireAsync} reaches an {@code @ObservesAsync} observer ({@link HintCollector}),
- * and a real producer ({@link ServiceEventService#publish}) fires the right topic at its
+ * and a real producer fires the right topic at its
  * choke-point.
  */
 @QuarkusTest
 class WorkspaceChangeHintBusTest {
 
   @Inject WorkspaceChangePublisher publisher;
-
-  @Inject ServiceEventService serviceEventService;
 
   @Inject HintCollector collector;
 
@@ -83,32 +76,6 @@ class WorkspaceChangeHintBusTest {
     assertEquals("wt-bus", hint.workspaceId());
   }
 
-  @Test
-  void publishingAServiceEventFiresAServiceEventsHint() throws InterruptedException {
-    serviceEventService.publish(
-        new ServiceEventDto(
-            "repo-de",
-            "wt-de",
-            "service-1",
-            "Dev server",
-            ServiceEventKind.STATUS_CHANGED,
-            ServiceEventSeverity
-                .INFO, // INFO so the agent notifier is skipped; the hint fires anyway
-            ServiceStatus.READY,
-            "ready",
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            Instant.now()));
-
-    WorkspaceChangeHint hint = awaitHint("repo-de", 2000);
-    assertNotNull(hint, "publish() should fire a SERVICE_EVENTS hint");
-    assertEquals(Topic.SERVICE_EVENTS, hint.topic());
-    assertEquals("wt-de", hint.workspaceId());
-  }
 
   @Test
   void theSseEndpointStreamsAHintFrameOverHttp() throws Exception {
