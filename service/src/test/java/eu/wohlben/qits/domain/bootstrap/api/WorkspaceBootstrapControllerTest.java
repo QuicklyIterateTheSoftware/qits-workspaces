@@ -80,7 +80,9 @@ public class WorkspaceBootstrapControllerTest {
     String projectId =
         given()
             .contentType(ContentType.JSON)
-            .body(new ProjectController.CreateProjectRequest("WS Bootstrap Project", null))
+            .body(
+                new ProjectController.CreateProjectRequest(
+                    "WS Bootstrap Project", null, null, null))
             .post("/api/projects")
             .then()
             .statusCode(200)
