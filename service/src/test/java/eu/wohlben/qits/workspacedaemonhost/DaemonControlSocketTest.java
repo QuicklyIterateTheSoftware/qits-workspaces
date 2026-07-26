@@ -628,6 +628,10 @@ class DaemonControlSocketTest {
       await(() -> registry.activityFor(WORKSPACE_ID).isPresent());
       assertEquals(Optional.of(AgentActivityState.BUSY), registry.activityFor(WORKSPACE_ID));
       await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID));
+      // The flip is mirrored onto the repository channel (repoId, null) and the global channel
+      // (null, null) — the agent-activity bars on the repository/project detail routes ride those.
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", null));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, null, null));
 
       hints.clear();
       // A reconnect-style replay of the same BUSY state: the rollup doesn't flip, so no hint.
@@ -653,6 +657,9 @@ class DaemonControlSocketTest {
       await(() -> registry.activityFor(WORKSPACE_ID).equals(Optional.of(AgentActivityState.IDLE)));
       await(() -> hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID) >= 1);
       assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID), hints.toString());
+      // The no-flip duplicate stayed silent on the mirrored channels too.
+      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", null), hints.toString());
+      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, null, null), hints.toString());
     }
   }
 

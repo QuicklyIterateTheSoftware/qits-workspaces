@@ -49,6 +49,9 @@ class WorkspaceChangeHintBusTest {
   @TestHTTPResource("/api/repositories/repo-sse/workspaces/wt-sse/events")
   URL sseUrl;
 
+  @TestHTTPResource("/api/events")
+  URL globalSseUrl;
+
   @BeforeEach
   void reset() {
     collector.clear();
@@ -63,7 +66,7 @@ class WorkspaceChangeHintBusTest {
       if (hint == null) {
         return null;
       }
-      if (hint.repoId().equals(repoId)) {
+      if (java.util.Objects.equals(hint.repoId(), repoId)) {
         return hint;
       }
     }
@@ -86,7 +89,7 @@ class WorkspaceChangeHintBusTest {
         new ServiceEventDto(
             "repo-de",
             "wt-de",
-            "daemon-1",
+            "service-1",
             "Dev server",
             ServiceEventKind.STATUS_CHANGED,
             ServiceEventSeverity
@@ -109,9 +112,23 @@ class WorkspaceChangeHintBusTest {
 
   @Test
   void theSseEndpointStreamsAHintFrameOverHttp() throws Exception {
+    assertSseDataFrame(
+        sseUrl, () -> publisher.fire("repo-sse", "wt-sse", Topic.SERVICES), "services");
+  }
+
+  @Test
+  void theGlobalSseEndpointStreamsAHintFrameOverHttp() throws Exception {
+    // The global channel (key (null, null)) carries the agent-activity mirror the project detail
+    // route subscribes to.
+    assertSseDataFrame(
+        globalSseUrl, () -> publisher.fire(null, null, Topic.AGENT_ACTIVITY), "agent-activity");
+  }
+
+  /** Open {@code url} as an SSE stream, run {@code fire}, and expect a {@code data: expected}. */
+  private void assertSseDataFrame(URL url, Runnable fire, String expected) throws Exception {
     HttpClient client = HttpClient.newHttpClient();
     HttpRequest request =
-        HttpRequest.newBuilder(sseUrl.toURI())
+        HttpRequest.newBuilder(url.toURI())
             .header("Accept", "text/event-stream")
             .timeout(Duration.ofSeconds(5))
             .GET()
@@ -141,18 +158,18 @@ class WorkspaceChangeHintBusTest {
     reader.start();
 
     Thread.sleep(400); // let the subscription settle before firing
-    publisher.fire("repo-sse", "wt-sse", Topic.SERVICES);
+    fire.run();
 
-    // Read frames until the "services" data line arrives (ignoring heartbeat/blank/comment lines).
+    // Read frames until the expected data line arrives (ignoring heartbeat/blank/comment lines).
     long deadline = System.currentTimeMillis() + 3000;
     boolean seen = false;
     long remaining;
     while (!seen && (remaining = deadline - System.currentTimeMillis()) > 0) {
       String line = lines.poll(remaining, TimeUnit.MILLISECONDS);
-      if (line != null && line.startsWith("data:") && line.substring(5).trim().equals("services")) {
+      if (line != null && line.startsWith("data:") && line.substring(5).trim().equals(expected)) {
         seen = true;
       }
     }
-    Assertions.assertTrue(seen, "expected a 'data: services' SSE frame over HTTP");
+    Assertions.assertTrue(seen, "expected a 'data: " + expected + "' SSE frame over HTTP");
   }
 }

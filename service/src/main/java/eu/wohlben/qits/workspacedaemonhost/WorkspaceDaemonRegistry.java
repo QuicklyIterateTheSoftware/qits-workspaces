@@ -317,9 +317,13 @@ public class WorkspaceDaemonRegistry
    * PendingBootstrap#dispatch}.
    *
    * <p>Second sink: the in-memory rollup cache. The state is stored per {@code commandId} ({@code
-   * ENDED} evicts it), and a {@link WorkspaceChangeHint.Topic#AGENT_ACTIVITY} hint is fired on the
-   * workspace channel only when the workspace's rollup actually flips — so a same-state re-report
-   * (reconnect replay) doesn't churn the UI.
+   * ENDED} evicts it), and a {@link WorkspaceChangeHint.Topic#AGENT_ACTIVITY} hint is fired only
+   * when the workspace's rollup actually flips — so a same-state re-report (reconnect replay)
+   * doesn't churn the UI. The flip fires on three channels at once, one per route that renders the
+   * agent-activity bar: the workspace channel (the open workspace detail), the repository channel
+   * {@code (repoId, null)} (the repository detail, mirroring {@code GIT_STATUS}), and the global
+   * channel {@code (null, null)} (the project detail, which spans repositories and holds ONE
+   * connection instead of one per repo).
    */
   private void onAgentActivity(
       String workspaceId, DaemonConnection client, AgentActivity activity) {
@@ -346,6 +350,8 @@ public class WorkspaceDaemonRegistry
     }
     if (before != rollup(workspaceId)) {
       changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+      changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+      changePublisher.fire(null, null, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
     }
   }
 

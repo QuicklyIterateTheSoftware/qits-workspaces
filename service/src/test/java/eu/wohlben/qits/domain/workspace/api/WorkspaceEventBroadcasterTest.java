@@ -64,6 +64,40 @@ class WorkspaceEventBroadcasterTest {
   }
 
   @Test
+  void theGlobalChannelIsIsolatedFromWorkspaceAndRepositoryChannels() {
+    // (null, null) is the global channel's key — a workspace or repository hint must not leak into
+    // it, and a global hint must not leak out of it (the keys "repoId/wt", "repoId/null" and
+    // "null/null" can never collide).
+    AssertSubscriber<String> global =
+        broadcaster
+            .subscribe(null, null)
+            .subscribe()
+            .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
+    AssertSubscriber<String> workspace =
+        broadcaster
+            .subscribe("repo-1", "wt-1")
+            .subscribe()
+            .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
+    AssertSubscriber<String> repository =
+        broadcaster
+            .subscribe("repo-1", null)
+            .subscribe()
+            .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
+
+    fire("repo-1", "wt-1", Topic.AGENT_ACTIVITY);
+    fire("repo-1", null, Topic.AGENT_ACTIVITY);
+    fire(null, null, Topic.AGENT_ACTIVITY);
+
+    global.awaitItems(1, Duration.ofSeconds(2));
+    workspace.awaitItems(1, Duration.ofSeconds(2));
+    repository.awaitItems(1, Duration.ofSeconds(2));
+    assertEquals(1, global.getItems().size());
+    assertEquals("agent-activity", global.getItems().get(0));
+    assertEquals(1, workspace.getItems().size());
+    assertEquals(1, repository.getItems().size());
+  }
+
+  @Test
   void debounceCollapsesABurstToAtMostLeadingPlusTrailing() throws InterruptedException {
     AssertSubscriber<String> sub =
         broadcaster
