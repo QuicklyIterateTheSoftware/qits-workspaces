@@ -1,0 +1,587 @@
+package eu.wohlben.qits.workspaces.control;
+
+import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
+import io.quarkus.runtime.StartupEvent;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import jakarta.inject.Inject;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
+
+/**
+ * {@link ContainerRuntime} backed by the {@code docker} CLI, shelled out via {@link ProcessBuilder}
+ * — the sibling of {@link GitExecutor}, deliberately with no docker-java dependency. The runtime
+ * binary is configurable ({@code qits.workspace.container-runtime}) so a rootless {@code podman}
+ * can be dropped in without code changes; the argv shape below is the docker/podman common subset.
+ */
+@ApplicationScoped
+public class DockerExecutor implements ContainerRuntime {
+
+  private static final Logger LOG = Logger.getLogger(DockerExecutor.class);
+
+  @ConfigProperty(name = "qits.workspace.container-runtime", defaultValue = "docker")
+  String runtime;
+
+  /**
+   * How the qits process reaches a workspace container's ports. {@code network} (default): qits and
+   * the container share {@code qits-net}, so the target is the container's DNS name + real port —
+   * no host publish. {@code bridge-ip}: read the container's IP off the network via {@code inspect}
+   * (plain-Linux hosts where the bridge is host-routable); still no publish.
+   */
+  @ConfigProperty(name = "qits.workspace.container-network", defaultValue = "network")
+  String containerNetwork;
+
+  /**
+   * Assembles the {@code docker run} argv (with the always-on cross-cutting config — credential
+   * volume, {@code qits.*} labels, host alias, host uid). This executor only prepends the runtime
+   * binary + {@code run} and shells it out.
+   */
+  @Inject WorkspaceContainerFactory containerFactory;
+
+  /**
+   * Create the shared credential volume once at startup so it exists before any workspace container
+   * mounts it — and so an operator can run the one-time login before the first workspace is
+   * created. Best-effort: a missing/broken runtime just logs, exactly like the rest of this
+   * executor.
+   */
+  void onStart(@Observes StartupEvent event) {
+    // The shared volumes every workspace container mounts: the coding-agent credential store and
+    // the
+    // Maven repo / pnpm store build caches. Created here so they exist before the first container.
+    ensureVolume(
+        containerFactory.claudeVolume(), "agent credential (agent auth may be unavailable)");
+    ensureVolume(containerFactory.mavenVolume(), "Maven repo cache");
+    ensureVolume(containerFactory.pnpmVolume(), "pnpm store cache");
+    ensureNetwork();
+  }
+
+  /** Idempotent {@code docker volume create}; no-op when the volume name is blank. */
+  void ensureVolume(String volume, String purpose) {
+    if (volume == null || volume.isBlank()) {
+      return;
+    }
+    ExecResult result = runCapturing(null, List.of(runtime, "volume", "create", volume));
+    if (result.exitCode() != 0) {
+      LOG.warnf("Could not ensure shared %s volume '%s': %s", purpose, volume, result.output());
+    }
+  }
+
+  /**
+   * Ensure the shared workspace network exists before any container joins it. Inspect-then-create
+   * so a network already provisioned by the devcontainer compose (its usual owner) is left
+   * untouched; this only covers qits run outside compose. Best-effort — a broken runtime just logs.
+   */
+  void ensureNetwork() {
+    String net = containerFactory.network();
+    if (net == null || net.isBlank()) {
+      return;
+    }
+    if (runCapturing(null, List.of(runtime, "network", "inspect", net)).exitCode() == 0) {
+      return;
+    }
+    ExecResult result = runCapturing(null, List.of(runtime, "network", "create", net));
+    if (result.exitCode() != 0) {
+      LOG.warnf(
+          "Could not ensure shared workspace network '%s' (web view may be unreachable): %s",
+          net, result.output());
+    }
+  }
+
+  @Override
+  public String containerName(String workspaceId, String repoId) {
+    // repoId is a UUID; the short prefix keeps the name readable and well under docker's length
+    // cap while still being effectively unique per repo. Prefix keeps the first char alphanumeric.
+    String shortRepo = repoId.length() > 8 ? repoId.substring(0, 8) : repoId;
+    return "qits-ws-" + workspaceId + "-" + shortRepo;
+  }
+
+  @Override
+  public String run(String repoId, String workspaceId, String branch, String parent) {
+    String name = containerName(workspaceId, repoId);
+    // Create-if-absent the labeled per-workspace /workspace volume before the container mounts it,
+    // so recreation reattaches the same checkout (and dangling-volume reconcile has its handle).
+    ensureWorkspaceVolumeIfPersistent(repoId, workspaceId, branch, parent);
+    // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
+    // qits.* labels, host alias, host uid, shared network); this executor only prepends the runtime
+    // + `run` verb.
+    List<String> argv = new ArrayList<>();
+    argv.add(runtime);
+    argv.add("run");
+    argv.addAll(containerFactory.forWorkspace(repoId, workspaceId, branch, parent).toRunArgv());
+
+    ExecResult result = runCapturing(null, argv);
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start container " + name + ": " + result.output());
+    }
+    return name;
+  }
+
+  @Override
+  public ExecResult exec(
+      String container, String workdir, Map<String, String> env, String... argv) {
+    return exec(container, workdir, env, (java.util.function.Consumer<String>) null, argv);
+  }
+
+  @Override
+  public ExecResult exec(
+      String container,
+      String workdir,
+      Map<String, String> env,
+      java.util.function.Consumer<String> onLine,
+      String... argv) {
+    List<String> command = new ArrayList<>(execArgv(container, false, workdir, env));
+    for (String arg : argv) {
+      command.add(arg);
+    }
+    return runCapturing(null, command, onLine);
+  }
+
+  @Override
+  public String run(
+      String repoId,
+      String workspaceId,
+      String branch,
+      String parent,
+      java.util.function.Consumer<String> onLine) {
+    String name = containerName(workspaceId, repoId);
+    ensureWorkspaceVolumeIfPersistent(repoId, workspaceId, branch, parent);
+    List<String> argv = new ArrayList<>();
+    argv.add(runtime);
+    argv.add("run");
+    argv.addAll(containerFactory.forWorkspace(repoId, workspaceId, branch, parent).toRunArgv());
+
+    ExecResult result = runCapturing(null, argv, onLine);
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start container " + name + ": " + result.output());
+    }
+    return name;
+  }
+
+  @Override
+  public List<String> execArgv(
+      String container, boolean tty, String workdir, Map<String, String> env) {
+    List<String> argv = new ArrayList<>();
+    argv.add(runtime);
+    argv.add("exec");
+    argv.add(tty ? "-it" : "-i");
+    if (workdir != null && !workdir.isBlank()) {
+      argv.add("-w");
+      argv.add(workdir);
+    }
+    if (env != null) {
+      for (Map.Entry<String, String> e : env.entrySet()) {
+        argv.add("-e");
+        argv.add(e.getKey() + "=" + (e.getValue() == null ? "" : e.getValue()));
+      }
+    }
+    argv.add(container);
+    return argv;
+  }
+
+  @Override
+  public ProxyOrigin resolveTarget(String container, int containerPort) {
+    // bridge-ip: the container's IP on the shared network, host-routable on plain-Linux docker.
+    if ("bridge-ip".equals(containerNetwork)) {
+      String ip = bridgeIp(container);
+      return ip == null ? null : new ProxyOrigin(ip, containerPort);
+    }
+    // network (default): qits shares qits-net with the container, so its DNS name resolves and the
+    // real container port is reachable directly — no host publish, no create-time port constraint.
+    return new ProxyOrigin(container, containerPort);
+  }
+
+  /** The container's IPv4 on its first attached network ({@code docker inspect}), or null. */
+  private String bridgeIp(String container) {
+    ExecResult result =
+        runCapturing(
+            null,
+            List.of(
+                runtime,
+                "inspect",
+                "-f",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                container));
+    if (result.exitCode() != 0) {
+      return null;
+    }
+    String ip = result.output().trim();
+    return ip.isEmpty() ? null : ip;
+  }
+
+  @Override
+  public boolean exists(String container) {
+    return runCapturing(null, List.of(runtime, "container", "inspect", container)).exitCode() == 0;
+  }
+
+  @Override
+  public boolean isRunning(String container) {
+    ExecResult result =
+        runCapturing(
+            null, List.of(runtime, "container", "inspect", "-f", "{{.State.Running}}", container));
+    // A missing container inspects non-zero; a present one prints "true"/"false" for its run state.
+    return result.exitCode() == 0 && "true".equals(result.output().trim());
+  }
+
+  @Override
+  public void start(String container) {
+    ExecResult result = runCapturing(null, List.of(runtime, "start", container));
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start container " + container + ": " + result.output());
+    }
+  }
+
+  @Override
+  public void stop(String container) {
+    ExecResult result = runCapturing(null, List.of(runtime, "stop", container));
+    if (result.exitCode() != 0) {
+      LOG.debugf("Failed to stop container %s: %s", container, result.output());
+    }
+  }
+
+  @Override
+  public void rm(String container) {
+    ExecResult result = runCapturing(null, List.of(runtime, "rm", "-f", container));
+    if (result.exitCode() != 0) {
+      LOG.debugf("Failed to remove container %s: %s", container, result.output());
+    }
+  }
+
+  @Override
+  public void restart(String container) {
+    runCapturing(null, List.of(runtime, "restart", container));
+  }
+
+  @Override
+  public List<ContainerInfo> listWorkspaceContainers(String repoId) {
+    ExecResult result =
+        runCapturing(
+            null,
+            List.of(
+                runtime,
+                "ps",
+                "-a",
+                "--filter",
+                "label=qits.repository=" + repoId,
+                "--format",
+                // The trailing qits.worktree column is a one-release back-compat read: containers
+                // provisioned before the worktree→workspace rename carry the old label, so a
+                // reconcile can still adopt them instead of forcing a recreate. Remove once no
+                // pre-rename containers remain.
+                "{{.Names}}\t{{.Label \"qits.workspace\"}}\t{{.Label \"qits.branch\"}}\t{{.Label"
+                    + " \"qits.parent\"}}\t{{.Label \"qits.worktree\"}}\t{{.State}}"));
+    if (result.exitCode() != 0) {
+      LOG.warnf("Failed to list containers for repo %s: %s", repoId, result.output());
+      return List.of();
+    }
+    List<ContainerInfo> infos = new ArrayList<>();
+    for (String line : result.output().split("\n")) {
+      if (line.isBlank()) {
+        continue;
+      }
+      String[] parts = line.split("\t", -1);
+      String name = parts.length > 0 ? parts[0] : "";
+      String workspaceId = parts.length > 1 ? parts[1] : "";
+      String branch = parts.length > 2 ? emptyToNull(parts[2]) : null;
+      String parent = parts.length > 3 ? emptyToNull(parts[3]) : null;
+      String legacyWorkspaceId = parts.length > 4 ? parts[4] : "";
+      // `docker ps -a` lists stopped containers too (reconcile/adoption need them); {{.State}} is
+      // "running" only when the container is actually up — a deliberate stop leaves it "exited".
+      boolean running = parts.length > 5 && "running".equals(parts[5]);
+      if (workspaceId.isBlank()) {
+        workspaceId = legacyWorkspaceId; // pre-rename container labelled qits.worktree
+      }
+      if (!workspaceId.isBlank()) {
+        infos.add(new ContainerInfo(name, workspaceId, branch, parent, running));
+      }
+    }
+    return infos;
+  }
+
+  // --- Per-workspace /workspace volumes -------------------------------------------------------
+
+  @Override
+  public String workspaceVolumeName(String workspaceId) {
+    return containerFactory.workspaceVolumeName(workspaceId);
+  }
+
+  /** {@link #ensureWorkspaceVolume} only when the persistent-workspace flag is on. */
+  private void ensureWorkspaceVolumeIfPersistent(
+      String repoId, String workspaceId, String branch, String parent) {
+    if (containerFactory.persistWorkspace()) {
+      ensureWorkspaceVolume(repoId, workspaceId, branch, parent);
+    }
+  }
+
+  @Override
+  public void ensureWorkspaceVolume(
+      String repoId, String workspaceId, String branch, String parent) {
+    String name = containerFactory.workspaceVolumeName(workspaceId);
+    List<String> cmd = new ArrayList<>(List.of(runtime, "volume", "create"));
+    // Labels are set only at create time; docker ignores label changes on an existing volume, so a
+    // later branch rename leaves qits.branch stale — acceptable, the stable qits.workspace is the
+    // reconcile key. The factory owns the label set (it resolves qits.project and mirrors the
+    // container labels).
+    containerFactory
+        .workspaceVolumeLabels(repoId, workspaceId, branch, parent)
+        .forEach(
+            (k, v) -> {
+              cmd.add("--label");
+              cmd.add(k + "=" + v);
+            });
+    cmd.add(name);
+    ExecResult result = runCapturing(null, cmd);
+    if (result.exitCode() != 0) {
+      LOG.warnf("Could not ensure workspace volume '%s': %s", name, result.output());
+    }
+  }
+
+  @Override
+  public void removeWorkspaceVolume(String workspaceId) {
+    String name = containerFactory.workspaceVolumeName(workspaceId);
+    // Best-effort: the container must already be rm'd (docker refuses an in-use volume) and a
+    // missing volume is fine — both just log at debug and continue.
+    ExecResult result = runCapturing(null, List.of(runtime, "volume", "rm", name));
+    if (result.exitCode() != 0) {
+      LOG.debugf("Failed to remove workspace volume %s: %s", name, result.output());
+    }
+  }
+
+  @Override
+  public List<VolumeInfo> listWorkspaceVolumes() {
+    ExecResult ls =
+        runCapturing(
+            null,
+            List.of(
+                runtime,
+                "volume",
+                "ls",
+                "--filter",
+                "label=qits.managed=workspace-volume",
+                "--format",
+                "{{.Name}}"));
+    if (ls.exitCode() != 0) {
+      LOG.warnf("Failed to list workspace volumes: %s", ls.output());
+      return List.of();
+    }
+    List<VolumeInfo> infos = new ArrayList<>();
+    for (String name : ls.output().split("\n")) {
+      if (name.isBlank()) {
+        continue;
+      }
+      // Read the identity labels back one inspect at a time (the ls --format above can't emit
+      // labels portably across docker/podman); a volume whose labels can't be read is skipped.
+      ExecResult inspect =
+          runCapturing(
+              null,
+              List.of(
+                  runtime,
+                  "volume",
+                  "inspect",
+                  "--format",
+                  "{{index .Labels \"qits.project\"}}\t{{index .Labels \"qits.repository\"}}\t"
+                      + "{{index .Labels \"qits.workspace\"}}\t{{index .Labels \"qits.branch\"}}",
+                  name));
+      if (inspect.exitCode() != 0) {
+        continue;
+      }
+      String[] parts = inspect.output().trim().split("\t", -1);
+      String projectId = parts.length > 0 ? emptyToNull(parts[0]) : null;
+      String repoId = parts.length > 1 ? emptyToNull(parts[1]) : null;
+      String workspaceId = parts.length > 2 ? parts[2] : "";
+      String branch = parts.length > 3 ? emptyToNull(parts[3]) : null;
+      if (!workspaceId.isBlank()) {
+        infos.add(new VolumeInfo(name, projectId, repoId, workspaceId, branch));
+      }
+    }
+    return infos;
+  }
+
+  // --- Service sessions (tmux) -----------------------------------------------------------------
+  //
+  // Each service runs in a detached tmux session on a dedicated socket (-L qits-<id>): a fresh
+  // server
+  // per service inherits this exec's -e env at first start with no shared-server staleness, and
+  // isolates services from one another. `pipe-pane` mirrors the pane to a logfile qits tails. Paths
+  // derive from the service id (a server-generated UUID — safe to interpolate); the startScript is
+  // never interpolated (it rides as the positional arg $1 to avoid quoting/injection issues).
+
+  /** Container-side run directory for service session state (logs, scripts, exit codes). */
+  private static final String SERVICE_DIR = "/tmp/qits-services";
+
+  private static String socket(String serviceId) {
+    return "qits-" + serviceId;
+  }
+
+  @Override
+  public String serviceLogPath(String serviceId) {
+    return SERVICE_DIR + "/" + serviceId + ".log";
+  }
+
+  @Override
+  public void startService(
+      String container, String serviceId, String script, Map<String, String> env) {
+    String sock = socket(serviceId);
+    String base = SERVICE_DIR + "/" + serviceId;
+    // $1 is the untrusted startScript (written to a file, then run by the pane); everything else is
+    // built from the safe id. The pane records its exit code so serviceExitCode can tell a clean
+    // stop
+    // from a crash. `new-session … \; pipe-pane` is one atomic tmux call so the pane's very first
+    // line is mirrored (a separate pipe-pane races the pane's first output and would drop it).
+    String launcher =
+        "set -e; mkdir -p "
+            + SERVICE_DIR
+            + "; printf '%s\\n' \"$1\" > "
+            + base
+            + ".sh; tmux -L "
+            + sock
+            + " kill-server 2>/dev/null || true; : > "
+            + base
+            + ".log; rm -f "
+            + base
+            + ".exit; tmux -L "
+            + sock
+            + " new-session -d -s main -x 200 -y 50 -c /workspace \"bash "
+            + base
+            + ".sh; echo \\$? > "
+            + base
+            + ".exit\" \\; pipe-pane -t main -o \"cat >> "
+            + base
+            + ".log\"";
+    ExecResult result =
+        exec(container, "/workspace", env, "bash", "-lc", launcher, "qits-service", script);
+    if (result.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Failed to start service session " + serviceId + ": " + result.output());
+    }
+  }
+
+  @Override
+  public boolean serviceAlive(String container, String serviceId) {
+    return exec(
+                container,
+                null,
+                Map.of(),
+                "tmux",
+                "-L",
+                socket(serviceId),
+                "has-session",
+                "-t",
+                "main")
+            .exitCode()
+        == 0;
+  }
+
+  @Override
+  public Integer serviceExitCode(String container, String serviceId) {
+    ExecResult r = exec(container, null, Map.of(), "cat", SERVICE_DIR + "/" + serviceId + ".exit");
+    if (r.exitCode() != 0) {
+      return null;
+    }
+    try {
+      return Integer.valueOf(r.output().trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  @Override
+  public boolean signalService(String container, String serviceId, String signal) {
+    String sock = socket(serviceId);
+    // The pane leader is the process-group leader (tmux #{pane_pid}); signal the whole group so a
+    // compound script's children get it too. The signal name is a controlled value.
+    String cmd =
+        "p=$(tmux -L "
+            + sock
+            + " list-panes -t main -F '#{pane_pid}' 2>/dev/null); [ -n \"$p\" ] || exit 1;"
+            + " kill -s "
+            + signal
+            + " -- -\"$p\"";
+    return exec(container, null, Map.of(), "sh", "-c", cmd).exitCode() == 0;
+  }
+
+  @Override
+  public void killService(String container, String serviceId) {
+    String sock = socket(serviceId);
+    // SIGKILL the pane's process group, then tear the server down. Both best-effort.
+    String cmd =
+        "p=$(tmux -L "
+            + sock
+            + " list-panes -t main -F '#{pane_pid}' 2>/dev/null);"
+            + " [ -n \"$p\" ] && kill -s KILL -- -\"$p\" 2>/dev/null;"
+            + " tmux -L "
+            + sock
+            + " kill-server 2>/dev/null; true";
+    exec(container, null, Map.of(), "sh", "-c", cmd);
+  }
+
+  @Override
+  public String attachServiceCommand(String serviceId) {
+    // `exec` so the docker-exec shell becomes the tmux client, keeping the pgid the registry
+    // recorded valid; a group-kill on close then only detaches this client, never the detached
+    // tmux server on the -L socket.
+    return "exec tmux -L " + socket(serviceId) + " attach -t main";
+  }
+
+  private static String emptyToNull(String s) {
+    return s == null || s.isBlank() ? null : s;
+  }
+
+  private ExecResult runCapturing(Path cwd, List<String> command) {
+    return runCapturing(cwd, command, null);
+  }
+
+  /**
+   * Runs the command capturing its combined output; a non-null {@code onLine} additionally receives
+   * each line as it arrives — the live tap the technical-process log stream rides on. Tap failures
+   * are swallowed so a broken consumer can never fail the underlying docker verb.
+   */
+  private ExecResult runCapturing(
+      Path cwd, List<String> command, java.util.function.Consumer<String> onLine) {
+    ProcessBuilder pb = new ProcessBuilder(command);
+    if (cwd != null) {
+      pb.directory(cwd.toFile());
+    }
+    pb.redirectErrorStream(true);
+    try {
+      Process p = pb.start();
+      String output;
+      try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+        if (onLine == null) {
+          output = reader.lines().collect(Collectors.joining("\n"));
+        } else {
+          StringBuilder collected = new StringBuilder();
+          String line;
+          while ((line = reader.readLine()) != null) {
+            if (collected.length() > 0) {
+              collected.append('\n');
+            }
+            collected.append(line);
+            try {
+              onLine.accept(line);
+            } catch (RuntimeException ignored) {
+              // the tap is observational only
+            }
+          }
+          output = collected.toString();
+        }
+      }
+      int exitCode = p.waitFor();
+      return new ExecResult(exitCode, output);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return new ExecResult(-1, "interrupted");
+    } catch (Exception e) {
+      return new ExecResult(-1, e.getMessage());
+    }
+  }
+}
