@@ -120,7 +120,7 @@ public class WorkspaceRecreateIT {
             .contentType(ContentType.JSON)
             .body(
                 new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRequest(
-                    "Recreate IT", null))
+                    "Recreate IT", null, null, null))
             .when()
             .post("/api/projects")
             .then()

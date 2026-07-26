@@ -29,7 +29,7 @@ public class WorkspaceControllerTest {
             .contentType(ContentType.JSON)
             .body(
                 new eu.wohlben.qits.domain.project.api.ProjectController.CreateProjectRequest(
-                    "Workspace Project", null))
+                    "Workspace Project", null, null, null))
             .when()
             .post("/api/projects")
             .then()
