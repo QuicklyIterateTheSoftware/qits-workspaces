@@ -14,10 +14,26 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import java.util.List;
 
-@Path("/repositories/{repoId}/workspaces")
+/**
+ * Workspaces, addressed by their own id.
+ *
+ * <p><strong>A workspace is not a sub-resource of a repository here.</strong> This context does not
+ * own repositories — it holds a repository id as a string, with no foreign key and no join, in a
+ * different database. Addressing these routes as {@code /repositories/{repoId}/workspaces/...}
+ * asserted a containment the model deliberately does not have. So the entity leads: a single
+ * workspace is {@code {id}} alone — {@link
+ * eu.wohlben.qits.workspaces.entity.Workspace#id}, the generated key every FK'd child table already
+ * uses — and the repository is <em>scope</em> on the collection, which is what it actually is.
+ *
+ * <p>Not the string {@code workspaceId}: that is a branch-derived label, unique only per repository
+ * and reusable once a workspace resolves, which is why it needed a {@code repoId} beside it to
+ * identify anything. A unique id is already unique.
+ */
+@Path("/workspaces")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class WorkspaceController {
@@ -39,37 +55,50 @@ public class WorkspaceController {
     }
   }
 
+  /** The repository is a filter on the collection, not a parent segment. */
   @GET
-  public ListWorkspacesRequest.Response list(@PathParam("repoId") String repoId) {
+  public ListWorkspacesRequest.Response list(@QueryParam("repositoryId") String repositoryId) {
     var entries =
-        workspaceService.listWorkspaces(repoId).stream()
+        workspaceService.listWorkspaces(repositoryId).stream()
             .map(ListWorkspacesRequest.Response.Entry::new)
             .toList();
     return new ListWorkspacesRequest.Response(entries);
   }
 
   /**
-   * {@code adoptExisting} lets the workspace take over a branch that already exists (the
+   * {@code repositoryId} rides in the body rather than the path or a query parameter: a create
+   * carries its scope in the payload, and the repository is not a filter on a POST.
+   *
+   * <p>{@code id} is the requested <em>label</em> (the path/container-name segment), not an
+   * identifier — the created workspace's identifier comes back in the response.
+   *
+   * <p>{@code adoptExisting} lets the workspace take over a branch that already exists (the
    * branch-list "Create workspace" button on a workspaceless branch) instead of forking a new one;
-   * false for the normal "branch off" flow, which creates a fresh branch and errors on a name
-   * collision.
+   * false for the normal "branch off" flow, which creates a fresh branch and 409s on a name
+   * collision. Either way the branch must have no active workspace already — it is the resource
+   * being claimed.
    */
   public static record CreateWorkspaceRequest(
-      @NotBlank String id, String parent, String branch, String preamble, boolean adoptExisting) {
+      @NotBlank String repositoryId,
+      @NotBlank String id,
+      String parent,
+      String branch,
+      String preamble,
+      boolean adoptExisting) {
     /** Backward-compatible "branch off" form: create a new branch, never adopt an existing one. */
-    public CreateWorkspaceRequest(String id, String parent, String branch, String preamble) {
-      this(id, parent, branch, preamble, false);
+    public CreateWorkspaceRequest(
+        String repositoryId, String id, String parent, String branch, String preamble) {
+      this(repositoryId, id, parent, branch, preamble, false);
     }
 
     public record Response(WorkspaceDto workspace) {}
   }
 
   @POST
-  public CreateWorkspaceRequest.Response create(
-      @PathParam("repoId") String repoId, @Valid CreateWorkspaceRequest request) {
+  public CreateWorkspaceRequest.Response create(@Valid CreateWorkspaceRequest request) {
     var wt =
         workspaceService.createWorkspace(
-            repoId,
+            request.repositoryId(),
             request.id(),
             request.parent(),
             request.branch(),
@@ -96,12 +125,12 @@ public class WorkspaceController {
    * workspace itself is unknown.
    */
   @POST
-  @Path("/{workspaceId}/ensure-container")
+  @Path("/{id}/ensure-container")
   public EnsureContainerRequest.Response ensureContainer(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    String technicalProcessId = workspaceService.beginEnsureContainer(repoId, workspaceId);
+      @PathParam("id") Long id) {
+    String technicalProcessId = workspaceService.beginEnsureContainer(id);
     return new EnsureContainerRequest.Response(
-        workspaceService.getWorkspace(repoId, workspaceId), technicalProcessId);
+        workspaceService.getWorkspace(id), technicalProcessId);
   }
 
   public static record ActiveProcessRequest() {
@@ -116,12 +145,12 @@ public class WorkspaceController {
    * instead of polling.
    */
   @GET
-  @Path("/{workspaceId}/active-process")
+  @Path("/{id}/active-process")
   public ActiveProcessRequest.Response activeProcess(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+      @PathParam("id") Long id) {
     return new ActiveProcessRequest.Response(
         technicalProcesses.isResolvable()
-            ? technicalProcesses.get().activeFor(repoId, workspaceId).orElse(null)
+            ? technicalProcesses.get().activeFor(id).orElse(null)
             : null);
   }
 
@@ -131,11 +160,11 @@ public class WorkspaceController {
    * recreate. Returns the refreshed workspace.
    */
   @POST
-  @Path("/{workspaceId}/stop-container")
+  @Path("/{id}/stop-container")
   public WorkspaceDto stopContainer(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    workspaceService.stopContainer(repoId, workspaceId);
-    return workspaceService.getWorkspace(repoId, workspaceId);
+      @PathParam("id") Long id) {
+    workspaceService.stopContainer(id);
+    return workspaceService.getWorkspace(id);
   }
 
   /**
@@ -147,11 +176,11 @@ public class WorkspaceController {
    * unknown.
    */
   @POST
-  @Path("/{workspaceId}/delete-container")
+  @Path("/{id}/delete-container")
   public WorkspaceDto deleteContainer(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    workspaceService.deleteContainer(repoId, workspaceId);
-    return workspaceService.getWorkspace(repoId, workspaceId);
+      @PathParam("id") Long id) {
+    workspaceService.deleteContainer(id);
+    return workspaceService.getWorkspace(id);
   }
 
   public static record RecreateContainerRequest() {
@@ -172,12 +201,12 @@ public class WorkspaceController {
    * only when the workspace itself is unknown.
    */
   @POST
-  @Path("/{workspaceId}/recreate-container")
+  @Path("/{id}/recreate-container")
   public RecreateContainerRequest.Response recreateContainer(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    String technicalProcessId = workspaceService.beginRecreateContainer(repoId, workspaceId);
+      @PathParam("id") Long id) {
+    String technicalProcessId = workspaceService.beginRecreateContainer(id);
     return new RecreateContainerRequest.Response(
-        workspaceService.getWorkspace(repoId, workspaceId), technicalProcessId);
+        workspaceService.getWorkspace(id), technicalProcessId);
   }
 
   public static record MergeWorkspaceRequest(String target) {
@@ -185,12 +214,11 @@ public class WorkspaceController {
   }
 
   @POST
-  @Path("/{workspaceId}/merge")
+  @Path("/{id}/merge")
   public MergeWorkspaceRequest.Response merge(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
+      @PathParam("id") Long id,
       @Valid MergeWorkspaceRequest request) {
-    var result = workspaceService.mergeWorkspace(repoId, workspaceId, request.target());
+    var result = workspaceService.mergeWorkspace(id, request.target());
     return new MergeWorkspaceRequest.Response(
         result.commitHash(), result.hasConflicts(), result.output());
   }
@@ -207,13 +235,11 @@ public class WorkspaceController {
   }
 
   @POST
-  @Path("/{workspaceId}/discard")
+  @Path("/{id}/discard")
   public DiscardWorkspaceRequest.Response discard(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
+      @PathParam("id") Long id,
       @Valid DiscardWorkspaceRequest request) {
-    workspaceService.discardWorkspace(
-        repoId, workspaceId, request == null ? null : request.result());
+    workspaceService.discardWorkspace(id, request == null ? null : request.result());
     return new DiscardWorkspaceRequest.Response(true);
   }
 

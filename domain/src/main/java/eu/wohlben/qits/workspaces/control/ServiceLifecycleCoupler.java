@@ -63,7 +63,7 @@ public class ServiceLifecycleCoupler {
     List<ServiceDefinitionDto> autoStarts =
         !autostartEnabled || configReader.isUnsatisfied()
             ? List.of()
-            : configReader.get().readConfig(evt.workspaceId()).stream()
+            : configReader.get().readConfig(evt.workspaceRowId()).stream()
                 .flatMap(view -> view.config().services().stream())
                 .map(definitions::toDto)
                 .filter(ServiceDefinitionDto::autoStart)
@@ -73,7 +73,8 @@ public class ServiceLifecycleCoupler {
     }
     for (ServiceDefinitionDto service : autoStarts) {
       try {
-        supervisor.start(evt.repoId(), evt.workspaceId(), service.id(), process);
+        supervisor.start(
+            evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), service.id(), process);
       } catch (BadRequestException alreadyRunning) {
         // An instance is already live (a concurrent manual start, or a re-adopted session). The
         // supervisor enforces one instance per (workspace, service); tolerating this is exactly the
@@ -110,6 +111,7 @@ public class ServiceLifecycleCoupler {
     if (!autostopEnabled) {
       return;
     }
-    supervisor.settleForWorkspace(evt.repoId(), evt.workspaceId(), evt.graceful());
+    supervisor.settleForWorkspace(
+        evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), evt.graceful());
   }
 }

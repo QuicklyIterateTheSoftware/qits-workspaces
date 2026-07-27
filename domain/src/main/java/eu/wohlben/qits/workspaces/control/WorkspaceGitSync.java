@@ -24,5 +24,5 @@ public interface WorkspaceGitSync {
    * origin ref. A best-effort, fire-and-forget notification: no-op when no daemon is connected, and
    * the daemon refuses anything but a fast-forward (never clobbers a tree that turned dirty).
    */
-  void pullFromOrigin(String workspaceId, String branch);
+  void pullFromOrigin(Long workspaceId, String branch);
 }

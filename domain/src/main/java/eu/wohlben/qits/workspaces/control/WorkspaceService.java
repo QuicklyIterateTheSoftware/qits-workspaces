@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspaces.control;
 
 import eu.wohlben.qits.workspaces.error.BadRequestException;
+import eu.wohlben.qits.workspaces.error.ConflictException;
 import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
 import eu.wohlben.qits.workspaces.dto.WorkspaceDto;
@@ -159,8 +160,19 @@ public class WorkspaceService {
 
   @Inject GitIdentity gitIdentity;
 
-  /** Creates {@code branch} from {@code parentBranch} host-side in the bare origin. */
+  /**
+   * Creates {@code branch} from {@code parentBranch} host-side in the bare origin.
+   *
+   * <p>An existing ref is a <em>client</em> error, not a server one: this is the normal-path guard
+   * for "each workspace gets its own branch", and asking for a branch that is already there is a
+   * 409 the caller can act on — a typo'd "branch off" name, or a branch created outside qits that
+   * the caller meant to adopt. It is checked up front rather than inferred from git's exit status,
+   * which cannot distinguish "ref exists" from a genuinely broken origin; the latter still 500s.
+   */
   private void createBranchRefOnOrigin(Path originPath, String branch, String parentBranch) {
+    if (branchExistsOnOrigin(originPath, branch)) {
+      throw new ConflictException("Branch already exists: " + branch);
+    }
     try {
       git.exec(originPath.toFile(), "git", "branch", "--end-of-options", branch, parentBranch);
     } catch (Exception e) {
@@ -223,6 +235,7 @@ public class WorkspaceService {
   private void provisionContainer(
       String repoId,
       String workspaceId,
+      Long rowId,
       String branch,
       String parentBranch,
       WorkspaceProcessTracker.Handle process) {
@@ -231,7 +244,7 @@ public class WorkspaceService {
     }
     Consumer<String> runLines =
         process == null ? null : line -> process.appendLine("docker-run", line);
-    String container = containers.run(repoId, workspaceId, branch, parentBranch, runLines);
+    String container = containers.run(repoId, workspaceId, rowId, branch, parentBranch, runLines);
     if (process != null) {
       process.settleSegment("docker-run", true);
       process.openSegment("clone");
@@ -248,7 +261,7 @@ public class WorkspaceService {
     // pre-daemon
     // image) therefore cannot be provisioned: it fails loudly (rm + FAILED), recoverable by
     // rebuilding the image so the daemon is present.
-    ProvisionResult outcome = awaitDaemonProvision(repoId, workspaceId, cloneLines);
+    ProvisionResult outcome = awaitDaemonProvision(repoId, workspaceId, rowId, cloneLines);
     if (!outcome.ok()) {
       containers.rm(container);
       throw new InternalServerErrorException(
@@ -268,15 +281,14 @@ public class WorkspaceService {
    * clones the checkout through the {@code ContainerRuntime}.
    */
   private ProvisionResult awaitDaemonProvision(
-      String repoId, String workspaceId, Consumer<String> onLine) {
+      String repoId, String workspaceId, Long rowId, Consumer<String> onLine) {
     if (!daemonProvisioner.isResolvable()) {
       return ProvisionResult.failed("no workspace-daemon provisioner is available");
     }
     return daemonProvisioner
         .get()
         .awaitProvision(
-            repoId,
-            workspaceId,
+            rowId,
             Duration.ofMillis(provisionConnectTimeoutMs),
             Duration.ofMillis(provisionTimeoutMs),
             onLine)
@@ -346,20 +358,21 @@ public class WorkspaceService {
               // stays null (unknown ⇒ no badge). The daemon re-reports on reconnect.
               Boolean clean =
                   runtime == WorkspaceRuntimeStatus.RUNNING && gitStatus.isResolvable()
-                      ? gitStatus.get().isClean(wt.workspaceId).orElse(null)
+                      ? gitStatus.get().isClean(wt.id).orElse(null)
                       : null;
               // Agent activity shares clean/dirty's RUNNING-only, self-healing contract.
               AgentActivityState activity =
                   runtime == WorkspaceRuntimeStatus.RUNNING && agentActivity.isResolvable()
-                      ? agentActivity.get().activityFor(wt.workspaceId).orElse(null)
+                      ? agentActivity.get().activityFor(wt.id).orElse(null)
                       : null;
               // Registry facts (connected-since + daemon build identity) share clean/dirty's
               // RUNNING-only, in-memory contract: known only while the daemon's socket is live.
               WorkspaceDaemonInfo.Info info =
                   runtime == WorkspaceRuntimeStatus.RUNNING && daemonInfo.isResolvable()
-                      ? daemonInfo.get().lookup(wt.workspaceId).orElse(null)
+                      ? daemonInfo.get().lookup(wt.id).orElse(null)
                       : null;
               return new WorkspaceDto(
+                  wt.id,
                   wt.workspaceId,
                   wt.parent,
                   branch,
@@ -415,11 +428,26 @@ public class WorkspaceService {
   }
 
   /** A single active workspace's current DTO (runtime status computed live), or 404. */
-  public WorkspaceDto getWorkspace(String repoId, String workspaceId) {
-    return listWorkspaces(repoId).stream()
-        .filter(w -> workspaceId.equals(w.workspaceId()))
+  public WorkspaceDto getWorkspace(Long id) {
+    Workspace workspace = requireActive(id);
+    return listWorkspaces(workspace.repositoryId).stream()
+        .filter(w -> id.equals(w.id()))
         .findFirst()
-        .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
+        .orElseThrow(() -> new NotFoundException("Workspace not found: " + id));
+  }
+
+  /**
+   * The ACTIVE workspace with this id, or 404. One lookup: the id is the identity, so no repository
+   * is needed to select the row — the repository is read <em>off</em> it, by the callers that build
+   * container names and on-disk paths from the label.
+   */
+  private Workspace requireActive(Long id) {
+    if (id == null) {
+      throw new NotFoundException("Workspace not found: null");
+    }
+    return workspaceRepository
+        .findActiveById(id)
+        .orElseThrow(() -> new NotFoundException("Workspace not found: " + id));
   }
 
   /**
@@ -452,7 +480,7 @@ public class WorkspaceService {
       // The working tree lives in the container; a dirty tree or unpushed commits (which the
       // origin-side ahead/behind above cannot see) both mean cleanup could destroy work.
       if (!isWorkspaceClean(repoId, wt)
-          || !isFullyPushed(repoId, originPath, wt.workspaceId, wt.branch)) {
+          || !isFullyPushed(repoId, originPath, wt.workspaceId, wt.id, wt.branch)) {
         return false;
       }
     }
@@ -465,7 +493,8 @@ public class WorkspaceService {
    * commits, so without this a "safe" cleanup could delete unpushed work. A missing container means
    * nothing is left to lose, so treat it as pushed.
    */
-  boolean isFullyPushed(String repoId, Path originPath, String workspaceId, String branch) {
+  boolean isFullyPushed(
+      String repoId, Path originPath, String workspaceId, Long rowId, String branch) {
     String container = containers.containerName(workspaceId, repoId);
     if (!containers.exists(container)) {
       return true;
@@ -478,7 +507,7 @@ public class WorkspaceService {
     // Unknown — no live daemon, nothing reported yet, or no registry bean at all (cli, tests) — is
     // NOT "in sync": refuse, exactly as an unreadable container used to.
     Optional<String> reportedHead =
-        gitStatus.isUnsatisfied() ? Optional.empty() : gitStatus.get().head(workspaceId);
+        gitStatus.isUnsatisfied() ? Optional.empty() : gitStatus.get().head(rowId);
     if (reportedHead.isEmpty()) {
       return false;
     }
@@ -530,7 +559,7 @@ public class WorkspaceService {
     // or no registry bean at all — is treated as dirty and refuses the operation. The host has no
     // second opinion to fall back on any more: the `docker exec git status` this used to run went
     // into the daemon with the rest of the in-container git.
-    return !gitStatus.isUnsatisfied() && gitStatus.get().isClean(wt.workspaceId).orElse(false);
+    return !gitStatus.isUnsatisfied() && gitStatus.get().isClean(wt.id).orElse(false);
   }
 
   /**
@@ -622,7 +651,7 @@ public class WorkspaceService {
     if (target == null || gitSync.isUnsatisfied()) {
       return;
     }
-    gitSync.get().pullFromOrigin(target.workspaceId, targetBranch);
+    gitSync.get().pullFromOrigin(target.id, targetBranch);
   }
 
   /** The workspace that owns {@code branch}, or null when none matches. */
@@ -760,6 +789,17 @@ public class WorkspaceService {
       throw new BadRequestException("Invalid branch name");
     }
 
+    // The branch is the resource being claimed, so the check belongs here — after `branch` and
+    // `workspaceId` have been reconciled, not before. The id guard above is about the surrogate
+    // label; it says nothing about the branch, because `branch` is an independent request field
+    // that merely *defaults* to the id. Under the ordinary usage where the two coincide the two
+    // guards agree, which is why the missing one went unnoticed; they stop coinciding the moment a
+    // caller sets both, and `adoptExisting` then skips the ref creation that was the only thing
+    // standing in the way. UQ_workspace_active_branch (V3) enforces the same rule structurally.
+    if (workspaceRepository.existsActiveByRepositoryAndBranch(repoId, newBranch)) {
+      throw new ConflictException("Branch already has an active workspace: " + newBranch);
+    }
+
     // Only the durable state is created here: the branch ref host-side in the bare origin (so
     // ahead/behind and the merge-tree conflict probe, both origin-side, work from the first
     // second) plus the row below. No container, no clone — provisioning is lazy: first use goes
@@ -815,10 +855,14 @@ public class WorkspaceService {
     if (!Files.exists(originPath)) {
       throw new NotFoundException("Repository origin not found on disk");
     }
-    if (workspaceRepository.existsActiveByRepositoryAndWorkspaceId(repoId, workspaceId)) {
-      return workspaceRepository
-          .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-          .orElseThrow();
+    // Idempotent on the BRANCH, not on the derived id: the branch is what this workspace claims, so
+    // "main is already workable" is answered by whoever owns the main branch — whatever it happens
+    // to be called. Keying the check on the id instead made a workspace that merely *slugged* to
+    // the same name (owning some other branch) look like the main workspace and be handed back in
+    // its place.
+    Optional<Workspace> existing = workspaceRepository.findActiveByRepositoryAndBranch(repoId, branch);
+    if (existing.isPresent()) {
+      return existing.get();
     }
 
     // The main branch already exists in the origin, so there is no durable state to create beyond
@@ -870,6 +914,9 @@ public class WorkspaceService {
 
   private record BranchParent(String branch, String parent) {}
 
+  /** A resolved workspace reduced to what the container/path machinery addresses it by. */
+  private record WorkspaceRef(String repoId, String workspaceId) {}
+
   /**
    * Guarantees a running container for an ACTIVE workspace whose branch still exists, provisioning
    * one on demand — the container is a recreatable cache of the durable branch, so losing it is a
@@ -896,8 +943,18 @@ public class WorkspaceService {
    * transaction so a FAILED/ABANDONED outcome is persisted even though the method then throws, and
    * so it is safe to call from non-request threads (like {@code CommandService.prepare}).
    */
-  public void ensureContainer(String repoId, String workspaceId) {
-    ensureContainer(repoId, workspaceId, null);
+  public void ensureContainer(Long id) {
+    // Its own transaction: this is called from worker threads (the bootstrap runner's manual-run
+    // executor) where no session is open, and the rest of ensureContainer already brackets each of
+    // its own reads the same way.
+    WorkspaceRef target =
+        QuarkusTransaction.requiringNew()
+            .call(
+                () -> {
+                  Workspace workspace = requireActive(id);
+                  return new WorkspaceRef(workspace.repositoryId, workspace.workspaceId);
+                });
+    ensureContainer(target.repoId(), target.workspaceId(), id, null);
   }
 
   /**
@@ -909,19 +966,16 @@ public class WorkspaceService {
    * workspace.runtimeError}), not as an HTTP error. Throws 404 in-request when the workspace
    * doesn't exist, so a bad id still fails fast.
    */
-  public String beginEnsureContainer(String repoId, String workspaceId) {
-    QuarkusTransaction.requiringNew()
-        .run(
-            () ->
-                workspaceRepository
-                    .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-                    .orElseThrow(
-                        () -> new NotFoundException("Workspace not found: " + workspaceId)));
-    WorkspaceProcessTracker.Handle process = tracker(repoId, workspaceId);
+  public String beginEnsureContainer(Long id) {
+    Workspace resolved = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
+    String repoId = resolved.repositoryId;
+    String workspaceId = resolved.workspaceId;
+    Long rowId = resolved.id;
+    WorkspaceProcessTracker.Handle process = tracker(repoId, workspaceId, rowId);
     processExecutor.submit(
         () -> {
           try {
-            ensureContainer(repoId, workspaceId, process);
+            ensureContainer(repoId, workspaceId, rowId, process);
           } catch (RuntimeException e) {
             // Surface the failure in the stream: settle the open segment failed (appending the
             // message) and emit done. Idempotent — a no-op if the process already ended.
@@ -952,18 +1006,13 @@ public class WorkspaceService {
    * → {@code rm} the old container → {@link #ensureContainer} provisions a fresh one from the
    * durable branch (whose absent-container path re-runs {@link #provisionContainer}).
    */
-  public String beginRecreateContainer(String repoId, String workspaceId) {
-    String branch =
-        QuarkusTransaction.requiringNew()
-            .call(
-                () ->
-                    workspaceRepository
-                        .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-                        .map(wt -> wt.branch)
-                        .orElseThrow(
-                            () -> new NotFoundException("Workspace not found: " + workspaceId)));
-    requireCleanForRecreate(workspaceId);
-    WorkspaceProcessTracker.Handle process = tracker(repoId, workspaceId);
+  public String beginRecreateContainer(Long id) {
+    Workspace resolved = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
+    String repoId = resolved.repositoryId;
+    String workspaceId = resolved.workspaceId;
+    Long rowId = resolved.id;
+    requireCleanForRecreate(workspaceId, rowId);
+    WorkspaceProcessTracker.Handle process = tracker(repoId, workspaceId, rowId);
     processExecutor.submit(
         () -> {
           try {
@@ -973,11 +1022,11 @@ public class WorkspaceService {
             // Settle live services gracefully so their disappearance reads as deliberate, not a
             // crash
             // the restart policy would resurrect — the same courtesy stopContainer/discard extend.
-            containerEvents.fireStopping(repoId, workspaceId, true);
+            containerEvents.fireStopping(repoId, workspaceId, rowId, true);
             containers.rm(containers.containerName(workspaceId, repoId));
             // Container now absent → ensureContainer's provision path re-clones on the current
             // image.
-            ensureContainer(repoId, workspaceId, process);
+            ensureContainer(repoId, workspaceId, rowId, process);
           } catch (RuntimeException e) {
             if (process != null) {
               process.failProvision(e.getMessage());
@@ -997,9 +1046,9 @@ public class WorkspaceService {
    * both dirty ({@code Optional.of(false)}) and unknown ({@code Optional.empty()}) throw 400; only
    * {@code Optional.of(true)} passes.
    */
-  private void requireCleanForRecreate(String workspaceId) {
+  private void requireCleanForRecreate(String workspaceId, Long rowId) {
     Optional<Boolean> clean =
-        gitStatus.isResolvable() ? gitStatus.get().isClean(workspaceId) : Optional.empty();
+        gitStatus.isResolvable() ? gitStatus.get().isClean(rowId) : Optional.empty();
     if (!clean.equals(Optional.of(Boolean.TRUE))) {
       String state = clean.map(c -> c ? "clean" : "dirty").orElse("unknown");
       throw new BadRequestException(
@@ -1019,7 +1068,8 @@ public class WorkspaceService {
    * WorkspaceContainerEventPublisher#fireStarted(String, String, String, boolean)} — the process
    * then reaches {@code done} only once the bootstrap chain and the auto-started services settle.
    */
-  private void ensureContainer(String repoId, String workspaceId, WorkspaceProcessTracker.Handle process) {
+  private void ensureContainer(
+      String repoId, String workspaceId, Long rowId, WorkspaceProcessTracker.Handle process) {
     String container = containers.containerName(workspaceId, repoId);
 
     // Load branch/parent and short-circuit a live container, in its own transaction.
@@ -1040,7 +1090,7 @@ public class WorkspaceService {
                   return new BranchParent(wt.branch, wt.parent);
                 });
     if (snapshot == null) {
-      observeClientLiveness(repoId, workspaceId);
+      observeClientLiveness(repoId, workspaceId, rowId);
       if (process != null) {
         process.completeNoOp("container-start", "Container is already running — nothing to do.");
       }
@@ -1075,8 +1125,8 @@ public class WorkspaceService {
         // Cold -> RUNNING, but not a fresh provision: the clone (and its bootstrap state) survived,
         // so the bootstrap runner passes straight through to service auto-start (async).
         containerEvents.fireStarted(
-            repoId, workspaceId, process == null ? null : process.id(), false);
-        observeClientLiveness(repoId, workspaceId);
+            repoId, workspaceId, rowId, process == null ? null : process.id(), false);
+        observeClientLiveness(repoId, workspaceId, rowId);
         return;
       } catch (RuntimeException e) {
         QuarkusTransaction.requiringNew()
@@ -1126,7 +1176,7 @@ public class WorkspaceService {
     QuarkusTransaction.requiringNew()
         .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.PROVISIONING, null));
     try {
-      provisionContainer(repoId, workspaceId, snapshot.branch(), snapshot.parent(), process);
+      provisionContainer(repoId, workspaceId, rowId, snapshot.branch(), snapshot.parent(), process);
       if (process != null) {
         process.finishProvision(true);
       }
@@ -1134,8 +1184,9 @@ public class WorkspaceService {
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.RUNNING, null));
       // Cold -> RUNNING off a fresh provision (bare clone): run the bootstrap chain, then service
       // auto-start (async; the runner passes straight through when the chain is empty).
-      containerEvents.fireStarted(repoId, workspaceId, process == null ? null : process.id(), true);
-      observeClientLiveness(repoId, workspaceId);
+      containerEvents.fireStarted(
+          repoId, workspaceId, rowId, process == null ? null : process.id(), true);
+      observeClientLiveness(repoId, workspaceId, rowId);
     } catch (RuntimeException e) {
       QuarkusTransaction.requiringNew()
           .run(
@@ -1156,9 +1207,9 @@ public class WorkspaceService {
    * before, so a missing/broken socket (older images, a crashed binary, cli/tests with no backend
    * impl) degrades to today's behaviour. Later parts consult this once the socket drives behaviour.
    */
-  private void observeClientLiveness(String repoId, String workspaceId) {
+  private void observeClientLiveness(String repoId, String workspaceId, Long rowId) {
     if (clientLiveness.isResolvable()) {
-      boolean live = clientLiveness.get().isDaemonLive(workspaceId);
+      boolean live = clientLiveness.get().isDaemonLive(rowId);
       LOG.debugf(
           "workspace-daemon control socket for %s/%s: %s (informational; reconciliation unaffected)",
           repoId, workspaceId, live ? "present" : "not yet observed");
@@ -1219,11 +1270,10 @@ public class WorkspaceService {
    * teardown — the lossy {@link #rm} is reserved for discard (which deletes the branch afterward).
    */
   @Transactional
-  public void stopContainer(String repoId, String workspaceId) {
-    Workspace workspace =
-        workspaceRepository
-            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
+  public void stopContainer(Long id) {
+    Workspace workspace = requireActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     // No durability push before the stop: the daemon pushes committed work as it lands, so origin
     // is current by the time we get here. A stop is a pause anyway — the container and its
     // /workspace clone survive it, so uncommitted work is not at risk either.
@@ -1231,7 +1281,7 @@ public class WorkspaceService {
     // reads as a deliberate STOPPED (graceful: signal + grace) instead of a crash the restart
     // policy
     // would resurrect. Synchronous — completes while the container is still running.
-    containerEvents.fireStopping(repoId, workspaceId, true);
+    containerEvents.fireStopping(repoId, workspaceId, workspace.id, true);
     containers.stop(containers.containerName(workspaceId, repoId));
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
   }
@@ -1251,12 +1301,11 @@ public class WorkspaceService {
    * best-effort). The container is removed before the volume (docker refuses an in-use volume).
    */
   @Transactional
-  public void deleteContainer(String repoId, String workspaceId) {
-    Workspace workspace =
-        workspaceRepository
-            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
-    containerEvents.fireStopping(repoId, workspaceId, false);
+  public void deleteContainer(Long id) {
+    Workspace workspace = requireActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
+    containerEvents.fireStopping(repoId, workspaceId, workspace.id, false);
     containers.rm(containers.containerName(workspaceId, repoId));
     containers.removeWorkspaceVolume(workspaceId);
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
@@ -1264,17 +1313,17 @@ public class WorkspaceService {
   }
 
   @Transactional
-  public MergeResult mergeWorkspace(String repoId, String workspaceId, String target) {
+  public MergeResult mergeWorkspace(Long id, String target) {
+    Workspace workspace = requireActive(id);
+    String repoId = workspace.repositoryId;
     var repo = repositories.require(repoId);
-
-    Workspace workspace =
-        workspaceRepository
-            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
 
     String resolvedTarget = (target == null || target.isBlank()) ? defaultMainBranch(repo) : target;
 
-    // Resolve a target given as a workspace id to the branch that workspace owns.
+    // `target` names a BRANCH. It is still accepted as a workspace label, because that is what the
+    // branch-tree UI has always sent and the two coincide for an ordinary workspace; the lookup is
+    // a convenience, not an identity claim. It is unambiguous now in a way it was not before: at
+    // most one ACTIVE workspace owns a branch, so at most one row can answer.
     Workspace targetWorkspace =
         workspaceRepository
             .findActiveByRepositoryAndWorkspaceId(repoId, resolvedTarget)
@@ -1459,18 +1508,15 @@ public class WorkspaceService {
   }
 
 
-  public void discardWorkspace(String repoId, String workspaceId) {
-    discardWorkspace(repoId, workspaceId, null);
+  public void discardWorkspace(Long id) {
+    discardWorkspace(id, null);
   }
 
   @Transactional
-  public void discardWorkspace(String repoId, String workspaceId, String result) {
+  public void discardWorkspace(Long id, String result) {
+    Workspace workspace = requireActive(id);
+    String repoId = workspace.repositoryId;
     repositories.require(repoId);
-
-    Workspace workspace =
-        workspaceRepository
-            .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
-            .orElseThrow(() -> new NotFoundException("Workspace not found: " + workspaceId));
 
     requireCleanWorkingTree(repoId, workspace, "abandon");
     doDiscard(repoId, workspace, WorkspaceStatus.ABANDONED, result);
@@ -1498,7 +1544,7 @@ public class WorkspaceService {
       // Settle any live services first (immediate — no graceful signal, the work is being
       // discarded)
       // so their disappearance doesn't read as a crash to be resurrected.
-      containerEvents.fireStopping(repoId, workspace.workspaceId, false);
+      containerEvents.fireStopping(repoId, workspace.workspaceId, workspace.id, false);
       containers.rm(containers.containerName(workspace.workspaceId, repoId));
       containers.removeWorkspaceVolume(workspace.workspaceId);
 
@@ -1541,8 +1587,8 @@ public class WorkspaceService {
    * WorkspaceProcessTracker} is installed — every call site already treats null as "run it
    * unnarrated", which is the pre-streaming behaviour.
    */
-  private WorkspaceProcessTracker.Handle tracker(String repoId, String workspaceId) {
-    return processes.isResolvable() ? processes.get().begin(repoId, workspaceId) : null;
+  private WorkspaceProcessTracker.Handle tracker(String repoId, String workspaceId, Long rowId) {
+    return processes.isResolvable() ? processes.get().begin(repoId, workspaceId, rowId) : null;
   }
 
   private Path findWorkspacePathForBranch(String repoId, String branch) {

@@ -75,6 +75,8 @@ public class WorkspaceBootstrapRunnerTest {
   private static final long AWAIT_MILLIS = 20_000;
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceBootstrapRunner runner;
@@ -139,9 +141,9 @@ public class WorkspaceBootstrapRunnerTest {
   }
 
   /** Stage the workspace's auto-start dev server in the fake config reader; returns its id. */
-  private String autoStartService(String id) {
+  private String autoStartService(String repoId, String id) {
     configReader.setConfig(
-        "work",
+        workspaceIds.of(repoId, "work"),
         new QitsConfig(
             null,
             null,
@@ -166,7 +168,7 @@ public class WorkspaceBootstrapRunnerTest {
   }
 
   private BootstrapRunDto lastRun(String repoId, String stepName) {
-    return bootstrapRunService.listForWorkspace(repoId, "work").stream()
+    return bootstrapRunService.listForWorkspace(workspaceIds.of(repoId, "work")).stream()
         .filter(r -> r.bootstrapCommandId().equals(stepName))
         .findFirst()
         .orElse(null);
@@ -196,7 +198,7 @@ public class WorkspaceBootstrapRunnerTest {
   }
 
   private ServiceInstanceDto serviceInstance(String repoId, String serviceId) {
-    return supervisor.effectiveServices(repoId, "work").stream()
+    return supervisor.effectiveServices(workspaceIds.of(repoId, "work")).stream()
         .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElse(null);
@@ -219,10 +221,10 @@ public class WorkspaceBootstrapRunnerTest {
         repoWithWorkspace(
             "Bootstrap Fresh",
             chainYaml("first=echo first >> " + orderLog, "second=echo second >> " + orderLog));
-    String serviceId = autoStartService("dev-fresh");
+    String serviceId = autoStartService(repoId, "dev-fresh");
 
     // First access provisions the container (fresh) and triggers the chain, then auto-start.
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
 
     BootstrapRunDto first = awaitOutcome(repoId, "first", BootstrapOutcome.SUCCEEDED);
     BootstrapRunDto second = awaitOutcome(repoId, "second", BootstrapOutcome.SUCCEEDED);
@@ -248,9 +250,9 @@ public class WorkspaceBootstrapRunnerTest {
             chainYaml(
                 "skipped=echo skipped >> " + marker + "=exit 1",
                 "ran=echo ran >> " + marker + "=exit 0"));
-    String serviceId = autoStartService("dev-skip");
+    String serviceId = autoStartService(repoId, "dev-skip");
 
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
 
     BootstrapRunDto skipped = awaitOutcome(repoId, "skipped", BootstrapOutcome.SKIPPED);
     awaitOutcome(repoId, "ran", BootstrapOutcome.SUCCEEDED);
@@ -268,9 +270,9 @@ public class WorkspaceBootstrapRunnerTest {
     String repoId =
         repoWithWorkspace(
             "Bootstrap Fail", chainYaml("failing=exit 7", "never=echo never >> " + marker));
-    String serviceId = autoStartService("dev-fail");
+    String serviceId = autoStartService(repoId, "dev-fail");
 
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
 
     BootstrapRunDto failed = awaitOutcome(repoId, "failing", BootstrapOutcome.FAILED);
     assertEquals(7, failed.exitCode());
@@ -293,17 +295,17 @@ public class WorkspaceBootstrapRunnerTest {
     Path marker = scratch.resolve("installs.log");
     String repoId =
         repoWithWorkspace("Bootstrap Restart", chainYaml("install=echo installed >> " + marker));
-    String serviceId = autoStartService("dev-restart");
+    String serviceId = autoStartService(repoId, "dev-restart");
 
     // A fresh provision runs the chain once (and auto-starts the daemon).
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
     awaitOutcome(repoId, "install", BootstrapOutcome.SUCCEEDED);
     awaitServiceStatus(repoId, serviceId, ServiceStatus.STARTING);
 
     // A restart of the Exited container (freshProvision=false): no chain re-run, straight to
     // service auto-start.
-    workspaceService.stopContainer(repoId, "work");
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.stopContainer(workspaceIds.of(repoId, "work"));
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
     awaitServiceStatus(repoId, serviceId, ServiceStatus.STARTING);
 
     assertEquals(
@@ -317,15 +319,15 @@ public class WorkspaceBootstrapRunnerTest {
     Path flag = scratch.resolve("fixed.flag");
     // Fails until the flag file exists — the "broken then fixed" bootstrap step.
     String repoId = repoWithWorkspace("Bootstrap Recover", chainYaml("flaky=test -f " + flag));
-    String serviceId = autoStartService("dev-recover");
+    String serviceId = autoStartService(repoId, "dev-recover");
 
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
     awaitOutcome(repoId, "flaky", BootstrapOutcome.FAILED);
     assertEquals(0, readyRecorder.countFor(repoId, "work"));
 
     // Fix the world, then re-run the whole chain from the workspace surface.
     Files.writeString(flag, "fixed");
-    runner.runChainAsync(repoId, "work");
+    runner.runChainAsync(workspaceIds.of(repoId, "work"));
 
     awaitOutcome(repoId, "flaky", BootstrapOutcome.SUCCEEDED);
     await(
@@ -350,7 +352,7 @@ public class WorkspaceBootstrapRunnerTest {
     // bootstrap + service auto-start is the fresh-provision/"Run all" job, not this trigger's.) The
     // step id passes through as the name (no config is readable for the workspace yet — ids
     // default to names).
-    runner.runSingleAsync(repoId, "work", "target");
+    runner.runSingleAsync(workspaceIds.of(repoId, "work"), "target");
 
     awaitOutcome(repoId, "target", BootstrapOutcome.SUCCEEDED);
     Thread.sleep(500);
@@ -361,12 +363,12 @@ public class WorkspaceBootstrapRunnerTest {
   @Test
   public void concurrentManualRunsAreRejected() throws Exception {
     String repoId = repoWithWorkspace("Bootstrap Conflict", chainYaml("slow=sleep 3"));
-    String serviceId = autoStartService("dev-conflict");
+    String serviceId = autoStartService(repoId, "dev-conflict");
 
-    runner.runChainAsync(repoId, "work");
+    runner.runChainAsync(workspaceIds.of(repoId, "work"));
     assertThrows(
         BadRequestException.class,
-        () -> runner.runChainAsync(repoId, "work"),
+        () -> runner.runChainAsync(workspaceIds.of(repoId, "work")),
         "a second run while one is in flight is rejected");
 
     // Drain: the first run's success fires ready and the coupler auto-starts the daemon — await

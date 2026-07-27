@@ -19,10 +19,13 @@ import java.util.Optional;
 public interface WorkspaceProcessTracker {
 
   /** Begin tracking an operation on this workspace. */
-  Handle begin(String repoId, String workspaceId);
+  Handle begin(String repoId, String workspaceId, Long workspaceRowId);
 
-  /** The id of the operation currently live for this workspace, if any. */
-  Optional<String> activeFor(String repoId, String workspaceId);
+  /**
+   * The id of the operation currently live for this workspace, if any. Takes the workspace's own
+   * id: this is the route-facing half of the port, and a workspace is addressed by its identifier.
+   */
+  Optional<String> activeFor(Long id);
 
   /** One tracked operation. Segment names are free-form and shared with the frontend. */
   interface Handle {

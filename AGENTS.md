@@ -43,15 +43,58 @@ id; the two are in different databases and a foreign key cannot span them.
 `domain/src/main/resources/db/workspaces/migration/`, hand-written, its own lineage on its own
 datasource. Never touch the monorepo's `db/migration` — that is a different database.
 
-The lineage is `V1` (workspace, workspace_event) then `V2` (service_event,
-workspace_bootstrap_run, workspace_prompt_draft, workspace_prompt_attachment). `V1`'s header says
-the `V2` tables were deliberately left out; that was true when it was written and is not any more —
-`V2`'s header explains why. Extend, never renumber, and never edit an applied file's body: Flyway
-checksums it.
+The lineage is `V1` (workspace, workspace_event), `V2` (service_event, workspace_bootstrap_run,
+workspace_prompt_draft, workspace_prompt_attachment) then `V3` (one active workspace per branch).
+`V1`'s header says the `V2` tables were deliberately left out; that was true when it was written and
+is not any more — `V2`'s header explains why. Likewise `V1`'s "no unique constraint" note is
+superseded by `V3` for the branch. Extend, never renumber, and never edit an applied file's body:
+Flyway checksums it.
+
+**H2 has no partial indexes.** `create unique index … where …` is a syntax error, so a rule that
+only applies to some rows carries its predicate in a generated column instead and relies on unique
+indexes ignoring NULLs — see `V3`'s `active_branch`. Verify any index syntax against the H2 version
+actually on the classpath before writing the migration; it is the only target.
 
 Remember that workspace rows are **soft-deleted**. A child table in another context gets no cascade;
 publish through `WorkspaceResolved` instead, and fire it synchronously inside the resolving
 transaction so observers can join it.
+
+## What identifies a workspace
+
+`Workspace.id` — the generated `Long`. It is what routes, the ports and every FK'd child table use,
+and it needs no `repositoryId` beside it, because a unique id is already unique.
+
+`workspaceId` (the string) is a **branch-derived label**, not an identifier: unique only per
+repository, only among ACTIVE rows, and reusable once a workspace resolves. It stays the
+path/container-name segment — `containerName(workspaceId, repoId)` and the on-disk workspaces dir
+both keep it deliberately — and it is still guarded for uniqueness among ACTIVE rows so those paths
+stay unambiguous. Do not reintroduce it as an identity: that is what let two ACTIVE workspaces own
+one branch.
+
+The **branch** is the resource a workspace claims. At most one ACTIVE workspace per
+`(repositoryId, branch)`, enforced in `createWorkspace` and structurally by `UQ_workspace_active_branch`.
+
+The **daemon control plane** is keyed on the id too: `DaemonControlSocket` is
+`/api/workspace-daemon/id/{id}` and `WorkspaceDaemonRegistry`'s maps are `Map<Long, …>`. A daemon
+still announces its own label in its `Hello`, and the registry keeps it (`DaemonConnection.label`)
+purely so events and log lines read readably.
+
+The socket takes that id as a **`String` and parses it**: websockets-next rejects the endpoint at
+build time — `@PathParam must be java.lang.String` — and the failure surfaces as an unloadable test
+class, not as a compile error, so it is worth knowing before you type `Long`.
+
+`LegacyDaemonControlSocket` serves the old label path for containers provisioned before the move —
+their `QITS_WORKSPACE_DAEMON_URL` was injected at creation and only a recreate re-injects it. It
+resolves the label and **refuses when more than one active workspace carries it**, which is the
+collision the id exists to remove. Delete it once no such container can still be running.
+
+Still keyed on the label, deliberately: `service_event.workspace_id` — diagnostic history that
+outlives the row, see `V2`'s header.
+
+Resolving an id costs a query, which matters on the **SSE routes**: a `Multi`-returning method runs
+on the IO thread, so a lookup in one throws `BlockingOperationNotAllowedException` (a 500) unless
+the method is `@Blocking` — see `WorkspaceEventsController`. Ordinary JAX-RS methods are dispatched
+to worker threads already and need nothing.
 
 ## The vendored protocol module
 

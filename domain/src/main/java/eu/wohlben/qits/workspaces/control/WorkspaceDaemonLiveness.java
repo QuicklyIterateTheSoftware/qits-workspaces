@@ -16,5 +16,5 @@ public interface WorkspaceDaemonLiveness {
   /**
    * Whether {@code workspace-daemon} for {@code workspaceId} has an open control socket right now.
    */
-  boolean isDaemonLive(String workspaceId);
+  boolean isDaemonLive(Long workspaceId);
 }

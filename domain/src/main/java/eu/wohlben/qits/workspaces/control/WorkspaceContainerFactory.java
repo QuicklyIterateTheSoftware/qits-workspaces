@@ -259,7 +259,7 @@ public class WorkspaceContainerFactory {
    * need not.
    */
   public WorkspaceContainer forWorkspace(
-      String repoId, String workspaceId, String branch, String parent) {
+      String repoId, String workspaceId, Long rowId, String branch, String parent) {
     WorkspaceContainer container =
         new WorkspaceContainer()
             .name(containerName(workspaceId, repoId))
@@ -296,8 +296,8 @@ public class WorkspaceContainerFactory {
             + qitsHostResolver.qitsHost()
             + ":"
             + qitsPort
-            + "/api/workspace-daemon/"
-            + workspaceId);
+            + "/api/workspace-daemon/id/"
+            + rowId);
     container.env("QITS_WORKSPACE_DAEMON_WORKSPACE_ID", workspaceId);
     container.env("QITS_WORKSPACE_DAEMON_REPOSITORY_ID", repoId);
     container.env("QITS_WORKSPACE_DAEMON_BRANCH", branch == null ? "" : branch);

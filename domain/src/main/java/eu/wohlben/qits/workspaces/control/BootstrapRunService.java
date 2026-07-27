@@ -30,6 +30,8 @@ public class BootstrapRunService {
 
   @Inject WorkspaceRepository workspaceRepository;
 
+  @Inject WorkspaceResolver workspaceResolver;
+
   @Inject BootstrapRunMapper bootstrapRunMapper;
 
   @Inject WorkspaceChangePublisher changePublisher;
@@ -40,6 +42,7 @@ public class BootstrapRunService {
   public void recordOutcome(
       String repoId,
       String workspaceId,
+      Long rowId,
       String bootstrapCommandId,
       String commandName,
       BootstrapOutcome outcome,
@@ -63,14 +66,14 @@ public class BootstrapRunService {
     if (existing == null) {
       bootstrapRunRepository.persist(run);
     }
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+    changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
   }
 
   /** The active workspace's last-run rows, for the workspace bootstrap surface. */
   @Transactional
   @ActivateRequestContext
-  public List<BootstrapRunDto> listForWorkspace(String repoId, String workspaceId) {
-    Workspace workspace = activeWorkspace(repoId, workspaceId);
+  public List<BootstrapRunDto> listForWorkspace(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
     return bootstrapRunRepository.findByWorkspaceRow(workspace.id).stream()
         .map(bootstrapRunMapper::toDto)
         .toList();

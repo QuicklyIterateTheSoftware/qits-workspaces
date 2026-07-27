@@ -40,7 +40,7 @@ class TechnicalProcessTest {
   private final List<TechnicalProcess> completed = new ArrayList<>();
 
   private TechnicalProcess process() {
-    return new TechnicalProcess("p-1", "repo-1", "ws-1", completed::add);
+    return new TechnicalProcess("p-1", "repo-1", "ws-1", 1L, completed::add);
   }
 
   private static List<String> kinds(RecordingListener listener) {

@@ -120,7 +120,7 @@ public class WorkspaceDaemonRegistry
    * known while the daemon is connected (container RUNNING), cleared on {@link #unregister}, and
    * re-reported by the daemon on reconnect. Surfaced through {@link WorkspaceGitStatus#isClean}.
    */
-  private final ConcurrentHashMap<String, Boolean> gitClean = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, Boolean> gitClean = new ConcurrentHashMap<>();
 
   /**
    * Last commit each live daemon reported on the same {@link GitStatus} frame as {@link #gitClean}.
@@ -128,7 +128,7 @@ public class WorkspaceDaemonRegistry
    * on reconnect. Surfaced through {@link WorkspaceGitStatus#head}, which the host compares against
    * the origin's ref instead of running {@code git rev-parse} inside the container.
    */
-  private final ConcurrentHashMap<String, String> gitHead = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, String> gitHead = new ConcurrentHashMap<>();
 
   /**
    * Last coding-agent activity each live daemon reported ({@link AgentActivity}), keyed by {@code
@@ -140,13 +140,13 @@ public class WorkspaceDaemonRegistry
   private final ConcurrentHashMap<String, ActivityEntry> agentActivity = new ConcurrentHashMap<>();
 
   /** One tracked agent command's activity, plus the workspace it belongs to (for the rollup). */
-  private record ActivityEntry(String workspaceId, AgentActivityState state) {}
+  private record ActivityEntry(Long workspaceId, AgentActivityState state) {}
 
   /** How long a {@link #readConfig} waits for the live daemon's {@link ConfigView} reply. */
   @ConfigProperty(name = "qits.workspace.config.describe-timeout-ms", defaultValue = "10000")
   long configDescribeTimeoutMs;
 
-  private final ConcurrentHashMap<String, DaemonConnection> clients = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, DaemonConnection> clients = new ConcurrentHashMap<>();
 
   /**
    * In-flight autonomous self-provisions, keyed by {@code workspaceId} — <b>on the registry, not on
@@ -155,7 +155,7 @@ public class WorkspaceDaemonRegistry
    * connection is up when it finishes. A connection-scoped slot would be orphaned by {@link
    * #unregister}.
    */
-  private final ConcurrentHashMap<String, PendingProvision> provisions = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, PendingProvision> provisions = new ConcurrentHashMap<>();
 
   /**
    * In-flight bootstrap chains, keyed by {@code workspaceId} — like {@link #provisions}, on the
@@ -167,7 +167,7 @@ public class WorkspaceDaemonRegistry
    * {@link #awaitProvision} clears any stale slot at the start of each provision cycle so a boot
    * awaiter never picks up a previous cycle's retained terminal.
    */
-  private final ConcurrentHashMap<String, PendingBootstrap> bootstraps = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, PendingBootstrap> bootstraps = new ConcurrentHashMap<>();
 
   /**
    * Host coordinators subscribed to service (dev-server) lifecycle events (Part 4). The daemon owns
@@ -178,11 +178,16 @@ public class WorkspaceDaemonRegistry
   private final CopyOnWriteArrayList<WorkspaceServiceDriver.ServiceEventSink> serviceSinks =
       new CopyOnWriteArrayList<>();
 
+  /** The label a connected daemon announced for itself, or null when it has not said Hello yet. */
+  private static String labelOf(DaemonConnection client) {
+    return client == null ? null : client.label;
+  }
+
   /** The terminal outcome of a {@link #runCommand} round-trip. */
   public record CommandResult(int exitCode, String stdout, String stderr) {}
 
   /** Register a freshly-connected client, replacing any stale entry for the same workspace. */
-  public void register(String workspaceId, WebSocketConnection connection) {
+  public void register(Long workspaceId, WebSocketConnection connection) {
     clients.put(workspaceId, new DaemonConnection(connection));
     LOG.debugf(
         "workspace-daemon connected for workspace %s (connection %s)",
@@ -193,7 +198,7 @@ public class WorkspaceDaemonRegistry
    * Drop the client for {@code workspaceId}, but only if it is still the given connection — a
    * reconnect that registered a newer socket must not be evicted by the old one's late close.
    */
-  public void unregister(String workspaceId, WebSocketConnection connection) {
+  public void unregister(Long workspaceId, WebSocketConnection connection) {
     clients.computeIfPresent(
         workspaceId,
         (id, existing) -> existing.connection.id().equals(connection.id()) ? null : existing);
@@ -209,13 +214,13 @@ public class WorkspaceDaemonRegistry
   }
 
   @Override
-  public boolean isDaemonLive(String workspaceId) {
+  public boolean isDaemonLive(Long workspaceId) {
     DaemonConnection client = clients.get(workspaceId);
     return client != null && client.connection.isOpen();
   }
 
   /** Handle a decoded frame from {@code workspace-daemon} for {@code workspaceId}. */
-  public void onMessage(String workspaceId, WebSocketConnection connection, DaemonMessage message) {
+  public void onMessage(Long workspaceId, WebSocketConnection connection, DaemonMessage message) {
     DaemonConnection client = clients.get(workspaceId);
     switch (message) {
       case Hello hello -> {
@@ -235,6 +240,7 @@ public class WorkspaceDaemonRegistry
         // (WorkspaceDaemonInfo).
         if (client != null) {
           client.repoId = hello.repoId();
+          client.label = hello.workspaceId();
           client.daemonVersion = hello.daemonVersion();
           client.daemonBuildTime = parseInstant(hello.daemonBuildTime());
         }
@@ -308,7 +314,7 @@ public class WorkspaceDaemonRegistry
    * view for, and that should cost nothing.
    */
   private void onWorkspaceChanged(
-      String workspaceId, DaemonConnection client, WorkspaceChanged changed) {
+      Long workspaceId, DaemonConnection client, WorkspaceChanged changed) {
     WorkspaceChangeHint.Topic topic;
     try {
       topic = WorkspaceChangeHint.Topic.valueOf(changed.topic());
@@ -330,7 +336,7 @@ public class WorkspaceDaemonRegistry
    * branch-tree dirty badge — but only when the flag actually flipped, so a dirty→dirty content
    * edit nudges {@code FILES} without re-invalidating the whole workspace list.
    */
-  private void onGitStatus(String workspaceId, DaemonConnection client, GitStatus status) {
+  private void onGitStatus(Long workspaceId, DaemonConnection client, GitStatus status) {
     String repoId = client != null ? client.repoId : null;
     changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.FILES);
     if (status.head() != null) {
@@ -343,12 +349,12 @@ public class WorkspaceDaemonRegistry
   }
 
   @Override
-  public Optional<Boolean> isClean(String workspaceId) {
+  public Optional<Boolean> isClean(Long workspaceId) {
     return Optional.ofNullable(gitClean.get(workspaceId));
   }
 
   @Override
-  public Optional<String> head(String workspaceId) {
+  public Optional<String> head(Long workspaceId) {
     return Optional.ofNullable(gitHead.get(workspaceId));
   }
 
@@ -371,7 +377,7 @@ public class WorkspaceDaemonRegistry
    * connection instead of one per repo).
    */
   private void onAgentActivity(
-      String workspaceId, DaemonConnection client, AgentActivity activity) {
+      Long workspaceId, DaemonConnection client, AgentActivity activity) {
     String repoId = client != null ? client.repoId : null;
     if ("SessionStart".equals(activity.hookEvent()) && activity.sessionId() != null) {
       try {
@@ -407,7 +413,7 @@ public class WorkspaceDaemonRegistry
   /**
    * The per-workspace rollup: BUSY &gt; WAITING &gt; IDLE across its tracked commands; else null.
    */
-  private AgentActivityState rollup(String workspaceId) {
+  private AgentActivityState rollup(Long workspaceId) {
     boolean waiting = false;
     boolean idle = false;
     for (ActivityEntry entry : agentActivity.values()) {
@@ -443,12 +449,12 @@ public class WorkspaceDaemonRegistry
   }
 
   @Override
-  public Optional<AgentActivityState> activityFor(String workspaceId) {
+  public Optional<AgentActivityState> activityFor(Long workspaceId) {
     return Optional.ofNullable(rollup(workspaceId));
   }
 
   @Override
-  public Optional<WorkspaceDaemonInfo.Info> lookup(String workspaceId) {
+  public Optional<WorkspaceDaemonInfo.Info> lookup(Long workspaceId) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       return Optional.empty();
@@ -488,7 +494,7 @@ public class WorkspaceDaemonRegistry
   }
 
   @Override
-  public void pullFromOrigin(String workspaceId, String branch) {
+  public void pullFromOrigin(Long workspaceId, String branch) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       // No live daemon to pull — the checkout syncs on its next host git op (fast-forward /
@@ -502,13 +508,14 @@ public class WorkspaceDaemonRegistry
 
   /** Fan a service's lifecycle transition out to every subscribed host coordinator. */
   private void routeServiceState(
-      String workspaceId, DaemonConnection client, ServiceTransition event) {
+      Long workspaceId, DaemonConnection client, ServiceTransition event) {
     if (serviceSinks.isEmpty()) {
       return;
     }
     String repoId = client != null ? client.repoId : null;
     for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
-      sink.onState(repoId, workspaceId, event.id(), event.state(), event.exitCode());
+      sink.onState(
+          repoId, labelOf(client), workspaceId, event.id(), event.state(), event.exitCode());
     }
   }
 
@@ -516,7 +523,7 @@ public class WorkspaceDaemonRegistry
    * Fan a running service's streamed output (correlation {@code service:<name>}) out to the sinks.
    */
   private void streamServiceOutput(
-      String workspaceId, DaemonConnection client, CommandChunk chunk) {
+      Long workspaceId, DaemonConnection client, CommandChunk chunk) {
     if (serviceSinks.isEmpty()) {
       return;
     }
@@ -528,7 +535,8 @@ public class WorkspaceDaemonRegistry
         continue;
       }
       for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
-        sink.onLine(repoId, workspaceId, name, chunk.stream().name(), line);
+        sink.onLine(
+            repoId, labelOf(client), workspaceId, name, chunk.stream().name(), line);
       }
     }
   }
@@ -537,7 +545,7 @@ public class WorkspaceDaemonRegistry
    * Feed a provision's streamed clone/submodule output to the awaiting host's {@code clone}
    * segment.
    */
-  private void streamProvisionOutput(String workspaceId, CommandChunk chunk) {
+  private void streamProvisionOutput(Long workspaceId, CommandChunk chunk) {
     PendingProvision pending = provisions.get(workspaceId);
     if (pending == null || pending.onLine == null) {
       return; // no awaiter (yet) — provision output is best-effort UI, the exit is what matters
@@ -558,7 +566,7 @@ public class WorkspaceDaemonRegistry
    * create an entry no awaiter ever removes, leaking the map. A duplicate on an already-completed
    * future is a harmless no-op.
    */
-  private void completeProvision(String workspaceId, ProvisionResult result) {
+  private void completeProvision(Long workspaceId, ProvisionResult result) {
     PendingProvision pending = provisions.get(workspaceId);
     if (pending != null) {
       pending.future.complete(result);
@@ -566,7 +574,7 @@ public class WorkspaceDaemonRegistry
   }
 
   /** Route one bootstrap step's phase change to the awaiting sink (buffered until it registers). */
-  private void routeBootstrapStep(String workspaceId, BootstrapStep step) {
+  private void routeBootstrapStep(Long workspaceId, BootstrapStep step) {
     bootstraps
         .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
         .deliver(sink -> sink.onStep(step.name(), step.phase()));
@@ -575,14 +583,14 @@ public class WorkspaceDaemonRegistry
   /**
    * Route one bootstrap step's terminal outcome to the awaiting sink (buffered until it registers).
    */
-  private void routeBootstrapOutcome(String workspaceId, BootstrapOutcome outcome) {
+  private void routeBootstrapOutcome(Long workspaceId, BootstrapOutcome outcome) {
     bootstraps
         .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
         .deliver(sink -> sink.onOutcome(outcome.name(), outcome.outcome(), outcome.exitCode()));
   }
 
   /** Feed a bootstrap step's streamed output (correlation {@code bootstrap:<name>}) to the sink. */
-  private void streamBootstrapOutput(String workspaceId, CommandChunk chunk) {
+  private void streamBootstrapOutput(Long workspaceId, CommandChunk chunk) {
     String name =
         chunk.correlationId().substring(DaemonProtocol.BOOTSTRAP_CORRELATION_PREFIX.length());
     PendingBootstrap pending =
@@ -600,7 +608,7 @@ public class WorkspaceDaemonRegistry
    * registers its await, so a terminal with no slot creates one (retaining the result) rather than
    * dropping it. The awaiter (or {@link #awaitProvision}'s next-cycle clear) removes it.
    */
-  private void completeBootstrap(String workspaceId, boolean ok) {
+  private void completeBootstrap(Long workspaceId, boolean ok) {
     bootstraps
         .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
         .future
@@ -613,7 +621,7 @@ public class WorkspaceDaemonRegistry
    * demonstration seam only.
    */
   public CompletableFuture<CommandResult> runCommand(
-      String workspaceId,
+      Long workspaceId,
       java.util.List<String> argv,
       String cwd,
       java.util.Map<String, String> env) {
@@ -632,7 +640,7 @@ public class WorkspaceDaemonRegistry
    * Send a {@link Describe} to the workspace's client and complete with its {@link WorkspaceInfo}.
    * Part-1 demonstration seam only.
    */
-  public CompletableFuture<WorkspaceInfo> describe(String workspaceId) {
+  public CompletableFuture<WorkspaceInfo> describe(Long workspaceId) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null) {
       return CompletableFuture.failedFuture(
@@ -649,7 +657,7 @@ public class WorkspaceDaemonRegistry
    * ConfigView} — the workspace's in-container {@code .qits-config.yml}, correlated by id (unlike
    * the FIFO {@link #describe}). Fails fast if no client is connected.
    */
-  public CompletableFuture<ConfigView> describeConfig(String workspaceId) {
+  public CompletableFuture<ConfigView> describeConfig(Long workspaceId) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null) {
       return CompletableFuture.failedFuture(
@@ -662,7 +670,7 @@ public class WorkspaceDaemonRegistry
   }
 
   @Override
-  public Optional<WorkspaceConfigView> readConfig(String workspaceId) {
+  public Optional<WorkspaceConfigView> readConfig(Long workspaceId) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       return Optional.empty(); // no daemon live to read the checkout — caller uses its default view
@@ -696,8 +704,7 @@ public class WorkspaceDaemonRegistry
 
   @Override
   public Optional<ProvisionResult> awaitProvision(
-      String repoId, // the daemon self-identifies over the socket; awaits are keyed by workspaceId
-      String workspaceId,
+      Long workspaceId,
       Duration connectTimeout,
       Duration provisionTimeout,
       Consumer<String> onLine) {
@@ -746,7 +753,7 @@ public class WorkspaceDaemonRegistry
    * {@code workspaceId}. Lets a test send provision output only once routing is in place, since
    * streamed chunks are otherwise best-effort (dropped before an awaiter registers).
    */
-  boolean isAwaitingProvision(String workspaceId) {
+  boolean isAwaitingProvision(Long workspaceId) {
     PendingProvision pending = provisions.get(workspaceId);
     return pending != null && pending.onLine != null;
   }
@@ -756,17 +763,13 @@ public class WorkspaceDaemonRegistry
    * confirm the daemon's autonomous chain events have landed on the registry before it registers
    * its await (the retain/buffer race the autonomous model must survive).
    */
-  boolean isBootstrapPending(String workspaceId) {
+  boolean isBootstrapPending(Long workspaceId) {
     return bootstraps.containsKey(workspaceId);
   }
 
   @Override
   public Optional<Result> awaitBootstrap(
-      String repoId,
-      String workspaceId,
-      StepSink sink,
-      Duration connectTimeout,
-      Duration chainTimeout) {
+      Long workspaceId, StepSink sink, Duration connectTimeout, Duration chainTimeout) {
     // Register the sink so buffered events (steps that beat this await, since the daemon runs the
     // chain autonomously) replay onto it, and a terminal that already arrived is picked up.
     PendingBootstrap pending =
@@ -777,7 +780,7 @@ public class WorkspaceDaemonRegistry
 
   @Override
   public Optional<Result> runBootstrap(
-      String repoId, String workspaceId, String name, StepSink sink, Duration chainTimeout) {
+      Long workspaceId, String name, StepSink sink, Duration chainTimeout) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       return Optional.empty(); // no daemon live to run it
@@ -794,7 +797,7 @@ public class WorkspaceDaemonRegistry
   }
 
   private Optional<Result> awaitBootstrapFuture(
-      String workspaceId,
+      Long workspaceId,
       PendingBootstrap pending,
       Duration connectTimeout,
       Duration chainTimeout) {
@@ -824,7 +827,7 @@ public class WorkspaceDaemonRegistry
 
   @Override
   public void startService(
-      String workspaceId, String serviceName, String script, Map<String, String> env) {
+      Long workspaceId, String serviceName, String script, Map<String, String> env) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       LOG.debugf("startService('%s'): no workspace-daemon live for %s", serviceName, workspaceId);
@@ -836,7 +839,7 @@ public class WorkspaceDaemonRegistry
   }
 
   @Override
-  public void signalService(String workspaceId, String serviceName, String signal) {
+  public void signalService(Long workspaceId, String serviceName, String signal) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       LOG.debugf("signalService('%s'): no workspace-daemon live for %s", serviceName, workspaceId);
@@ -848,7 +851,7 @@ public class WorkspaceDaemonRegistry
   }
 
   /** Poll for a live daemon up to {@code timeout}; true once one is connected. */
-  private boolean awaitLive(String workspaceId, Duration timeout) {
+  private boolean awaitLive(Long workspaceId, Duration timeout) {
     long deadline = System.nanoTime() + timeout.toNanos();
     while (System.nanoTime() < deadline) {
       if (isDaemonLive(workspaceId)) {
@@ -873,6 +876,12 @@ public class WorkspaceDaemonRegistry
 
     /** The repository the daemon serves, learned from its {@link Hello} — see {@code onMessage}. */
     private volatile String repoId;
+
+    /**
+     * The workspace label the daemon announces for itself. Carried only so events and log lines can
+     * still name the workspace readably — the registry keys on the id from the socket path.
+     */
+    private volatile String label;
 
     /**
      * The daemon binary's build identity announced in its {@link Hello} (registry); may be null.

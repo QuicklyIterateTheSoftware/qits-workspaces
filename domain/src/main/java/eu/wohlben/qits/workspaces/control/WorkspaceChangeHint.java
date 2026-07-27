@@ -8,7 +8,7 @@ package eu.wohlben.qits.workspaces.control;
  * frontend reacts by re-fetching through the unchanged REST endpoints, so a dropped or missed hint
  * self-heals on the next hint or on reconnect.
  */
-public record WorkspaceChangeHint(String repoId, String workspaceId, Topic topic) {
+public record WorkspaceChangeHint(String repoId, Long workspaceRowId, Topic topic) {
 
   /** The kind of change; maps 1:1 to a frontend query-invalidation. */
   public enum Topic {

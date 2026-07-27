@@ -30,8 +30,8 @@ public class WorkspaceContainerEventPublisher {
   @Inject Event<WorkspaceContainerStopping> stopping;
 
   /** Restart-shaped convenience (no process, not a fresh provision) — the test-suite shorthand. */
-  public void fireStarted(String repoId, String workspaceId) {
-    fireStarted(repoId, workspaceId, null, false);
+  public void fireStarted(String repoId, String workspaceId, Long workspaceRowId) {
+    fireStarted(repoId, workspaceId, workspaceRowId, null, false);
   }
 
   /**
@@ -39,9 +39,14 @@ public class WorkspaceContainerEventPublisher {
    * stream; {@code freshProvision} marks the docker-run+clone transition that triggers bootstrap.
    */
   public void fireStarted(
-      String repoId, String workspaceId, String technicalProcessId, boolean freshProvision) {
+      String repoId,
+      String workspaceId,
+      Long workspaceRowId,
+      String technicalProcessId,
+      boolean freshProvision) {
     started.fireAsync(
-        new WorkspaceContainerStarted(repoId, workspaceId, technicalProcessId, freshProvision));
+        new WorkspaceContainerStarted(
+            repoId, workspaceId, workspaceRowId, technicalProcessId, freshProvision));
   }
 
   /**
@@ -49,12 +54,15 @@ public class WorkspaceContainerEventPublisher {
    * service auto-start couples to. Async like {@code started}: firing must never block the
    * bootstrap runner's thread on service startup work.
    */
-  public void fireReadyForServices(String repoId, String workspaceId, String technicalProcessId) {
-    ready.fireAsync(new WorkspaceReadyForServices(repoId, workspaceId, technicalProcessId));
+  public void fireReadyForServices(
+      String repoId, String workspaceId, Long workspaceRowId, String technicalProcessId) {
+    ready.fireAsync(
+        new WorkspaceReadyForServices(repoId, workspaceId, workspaceRowId, technicalProcessId));
   }
 
   /** Synchronous by design — settling must finish before the caller's {@code containers.rm}. */
-  public void fireStopping(String repoId, String workspaceId, boolean graceful) {
-    stopping.fire(new WorkspaceContainerStopping(repoId, workspaceId, graceful));
+  public void fireStopping(
+      String repoId, String workspaceId, Long workspaceRowId, boolean graceful) {
+    stopping.fire(new WorkspaceContainerStopping(repoId, workspaceId, workspaceRowId, graceful));
   }
 }

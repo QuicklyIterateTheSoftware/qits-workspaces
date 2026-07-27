@@ -76,7 +76,15 @@ public class ServiceProxyRoute {
       respond(rc, 404, "No service here.");
       return;
     }
-    String workspaceId = segments[0];
+    // The first segment is the workspace id. A non-numeric one is simply not a workspace — 404
+    // without touching the supervisor, the same as an unknown one.
+    Long workspaceId;
+    try {
+      workspaceId = Long.valueOf(segments[0]);
+    } catch (NumberFormatException notAnId) {
+      respond(rc, 404, "No service here.");
+      return;
+    }
     String serviceId = segments[1];
 
     if (segments.length == 2) {

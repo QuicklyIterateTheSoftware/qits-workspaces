@@ -16,9 +16,13 @@ import org.hibernate.annotations.CreationTimestamp;
  * A workspace, soft-deleted: cleanup/discard removes the on-disk workspace and branch but keeps
  * this row as the persistent record of the unit of work — its {@link #status}, the markdown {@link
  * #preamble} (why it was created) and {@link #result} (how it ended). Its {@link WorkspaceEvent}
- * timeline records what happened. There is no DB unique constraint on {@code (repositoryId,
- * workspaceId)} — resolved rows accumulate; the service enforces at most one {@code ACTIVE}
- * workspace per id.
+ * timeline records what happened.
+ *
+ * <p>There is deliberately no unique constraint on {@code (repositoryId, workspaceId)} — resolved
+ * rows accumulate and would collide with a live one, which is why V10 dropped V1's. What <em>is</em>
+ * constrained is {@code (repositoryId, branch)} among {@code ACTIVE} rows ({@code
+ * UQ_workspace_active_branch}, V3): a workspace is a branch ref plus a container that clones it, so
+ * the branch is the resource it claims and only one live workspace may own one.
  *
  * <p>Rows in other bounded contexts that belong to a workspace (commands, bootstrap runs, prompt
  * drafts) reference it by id and are not reachable from here. Because the delete is soft, no FK
@@ -29,8 +33,22 @@ import org.hibernate.annotations.CreationTimestamp;
 @Table(name = "workspace")
 public class Workspace extends PanacheEntityBase {
 
+  /**
+   * The workspace's identity, inside and out. Every child table ({@code workspace_event}, {@code
+   * workspace_bootstrap_run}, {@code workspace_prompt_draft}) already FKs to it, and it is what
+   * routes, the daemon control socket and every port that names a workspace address. Its entire
+   * specification is "unique", so it needs no {@link #repositoryId} beside it to identify a row.
+   */
   @Id @GeneratedValue public Long id;
 
+  /**
+   * The branch-derived label: a display name and a path/container-name segment, <strong>not</strong>
+   * an identifier. It is slug-validated because it becomes a path segment under the repo's
+   * workspaces dir. It is unique only per repository and only among ACTIVE rows — every repository
+   * tends to have one called {@code main} — and it is reusable once a workspace resolves, which is
+   * why {@link eu.wohlben.qits.workspaces.control.WorkspaceCommandHistory} keys on {@link #id}
+   * instead.
+   */
   @Column(name = "workspace_id", nullable = false)
   public String workspaceId;
 

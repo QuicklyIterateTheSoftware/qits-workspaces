@@ -36,6 +36,7 @@ public class ServiceEventControllerTest {
     return new ServiceEventDto(
         repoId,
         "work",
+         1L,
         "service-1",
         "dev-server",
         kind,

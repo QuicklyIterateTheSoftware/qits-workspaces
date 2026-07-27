@@ -22,6 +22,8 @@ public class IncomingMergePullNotificationTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -50,7 +52,9 @@ public class IncomingMergePullNotificationTest {
 
     assertEquals(
         1, gitSync.pulls().size(), "exactly one incoming-pull notification: " + gitSync.pulls());
-    assertEquals("target-ws target-branch", gitSync.pulls().get(0));
+    // The daemon is told which workspace by id — the label it used to carry was not one.
+    assertEquals(
+        workspaceIds.of(repoId, "target-ws") + " target-branch", gitSync.pulls().get(0));
   }
 
   @Test

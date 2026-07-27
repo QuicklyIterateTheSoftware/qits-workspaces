@@ -18,7 +18,7 @@ import java.util.List;
  * start/stop. {@code {serviceId}} path params carry the config-declared service {@code id:}
  * (defaulting to its name). The event feed moved to the durable {@code /service-events} endpoint.
  */
-@Path("/repositories/{repoId}/workspaces/{workspaceId}/services")
+@Path("/workspaces/{id}/services")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class WorkspaceServiceController {
@@ -32,10 +32,9 @@ public class WorkspaceServiceController {
   }
 
   @GET
-  public ListWorkspaceServicesRequest.Response list(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+  public ListWorkspaceServicesRequest.Response list(@PathParam("id") Long id) {
     var entries =
-        serviceSupervisor.effectiveServices(repoId, workspaceId).stream()
+        serviceSupervisor.effectiveServices(id).stream()
             .map(ListWorkspaceServicesRequest.Response.Entry::new)
             .toList();
     return new ListWorkspaceServicesRequest.Response(entries);
@@ -48,11 +47,8 @@ public class WorkspaceServiceController {
   @POST
   @Path("/{serviceId}/start")
   public StartServiceRequest.Response start(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
-      @PathParam("serviceId") String serviceId) {
-    return new StartServiceRequest.Response(
-        serviceSupervisor.start(repoId, workspaceId, serviceId));
+      @PathParam("id") Long id, @PathParam("serviceId") String serviceId) {
+    return new StartServiceRequest.Response(serviceSupervisor.start(id, serviceId));
   }
 
   public static record StopServiceRequest() {
@@ -62,9 +58,7 @@ public class WorkspaceServiceController {
   @POST
   @Path("/{serviceId}/stop")
   public StopServiceRequest.Response stop(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
-      @PathParam("serviceId") String serviceId) {
-    return new StopServiceRequest.Response(serviceSupervisor.stop(repoId, workspaceId, serviceId));
+      @PathParam("id") Long id, @PathParam("serviceId") String serviceId) {
+    return new StopServiceRequest.Response(serviceSupervisor.stop(id, serviceId));
   }
 }

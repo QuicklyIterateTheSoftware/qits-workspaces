@@ -12,4 +12,5 @@ package eu.wohlben.qits.workspaces.control;
  * false} (the work is being thrown away — settle bookkeeping only and let {@code rm} kill the
  * processes).
  */
-public record WorkspaceContainerStopping(String repoId, String workspaceId, boolean graceful) {}
+public record WorkspaceContainerStopping(
+    String repoId, String workspaceId, Long workspaceRowId, boolean graceful) {}

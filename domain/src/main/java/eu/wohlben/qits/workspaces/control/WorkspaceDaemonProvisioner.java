@@ -39,8 +39,7 @@ public interface WorkspaceDaemonProvisioner {
    *     connectTimeout}
    */
   Optional<ProvisionResult> awaitProvision(
-      String repoId,
-      String workspaceId,
+      Long workspaceId,
       Duration connectTimeout,
       Duration provisionTimeout,
       Consumer<String> onLine);

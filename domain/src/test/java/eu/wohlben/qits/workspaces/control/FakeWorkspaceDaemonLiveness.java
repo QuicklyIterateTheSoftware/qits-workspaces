@@ -16,18 +16,18 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeWorkspaceDaemonLiveness implements WorkspaceDaemonLiveness {
 
-  private final Set<String> live = ConcurrentHashMap.newKeySet();
+  private final Set<Long> live = ConcurrentHashMap.newKeySet();
 
-  public void markLive(String workspaceId) {
+  public void markLive(Long workspaceId) {
     live.add(workspaceId);
   }
 
-  public void markDead(String workspaceId) {
+  public void markDead(Long workspaceId) {
     live.remove(workspaceId);
   }
 
   @Override
-  public boolean isDaemonLive(String workspaceId) {
+  public boolean isDaemonLive(Long workspaceId) {
     return live.contains(workspaceId);
   }
 }

@@ -26,7 +26,7 @@ import org.jboss.logging.Logger;
  * RunCommand} round-trip. It drives no existing behaviour; the {@code docker exec} paths are
  * untouched.
  */
-@WebSocket(path = "/api/workspace-daemon/{workspaceId}")
+@WebSocket(path = "/api/workspace-daemon/id/{id}")
 public class DaemonControlSocket {
 
   private static final Logger LOG = Logger.getLogger(DaemonControlSocket.class);
@@ -37,31 +37,54 @@ public class DaemonControlSocket {
 
   @OnOpen
   @RunOnVirtualThread
-  public void onOpen(@PathParam("workspaceId") String workspaceId, WebSocketConnection connection) {
-    registry.register(workspaceId, connection);
+  public void onOpen(@PathParam("id") String id, WebSocketConnection connection) {
+    Long workspaceId = parse(id);
+    if (workspaceId != null) {
+      registry.register(workspaceId, connection);
+    }
   }
 
   @OnTextMessage
   @RunOnVirtualThread
   public void onMessage(
-      String message,
-      @PathParam("workspaceId") String workspaceId,
-      WebSocketConnection connection) {
+      String message, @PathParam("id") String id, WebSocketConnection connection) {
+    Long workspaceId = parse(id);
+    if (workspaceId == null) {
+      return;
+    }
     DaemonMessage decoded;
     try {
       decoded = codec.decode(message);
     } catch (RuntimeException e) {
       LOG.debugf(
-          "Dropped an undecodable workspace-daemon frame for workspace %s: %s",
-          workspaceId, e.getMessage());
+          "Dropped an undecodable workspace-daemon frame for workspace %s: %s", id, e.getMessage());
       return;
     }
     registry.onMessage(workspaceId, connection, decoded);
   }
 
   @OnClose
-  public void onClose(
-      @PathParam("workspaceId") String workspaceId, WebSocketConnection connection) {
-    registry.unregister(workspaceId, connection);
+  public void onClose(@PathParam("id") String id, WebSocketConnection connection) {
+    Long workspaceId = parse(id);
+    if (workspaceId != null) {
+      registry.unregister(workspaceId, connection);
+    }
+  }
+
+  /**
+   * The path segment as a workspace id, or null when it is not one.
+   *
+   * <p>It arrives as text because websockets-next requires {@code @PathParam} parameters to be
+   * {@code String} — the framework rejects the endpoint at build time otherwise. So the parse is
+   * here rather than in the signature, and a non-numeric segment is simply not a workspace: the
+   * connection is left unregistered rather than guessed at.
+   */
+  private Long parse(String id) {
+    try {
+      return Long.valueOf(id);
+    } catch (NumberFormatException notAnId) {
+      LOG.warnf("Ignoring a workspace-daemon connection on a non-numeric workspace id '%s'", id);
+      return null;
+    }
   }
 }

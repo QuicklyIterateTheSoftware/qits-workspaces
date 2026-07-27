@@ -102,7 +102,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public String run(String repoId, String workspaceId, String branch, String parent) {
+  public String run(String repoId, String workspaceId, Long rowId, String branch, String parent) {
     String name = containerName(workspaceId, repoId);
     Path dir = workspaceDir(repoId, workspaceId);
     try {

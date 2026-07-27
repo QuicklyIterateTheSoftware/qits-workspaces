@@ -22,5 +22,5 @@ public interface WorkspaceAgentActivity {
    * The current rollup activity state for {@code workspaceId}, or {@link Optional#empty()} if no
    * tracked agent is running there (or no live daemon / not yet reported).
    */
-  Optional<AgentActivityState> activityFor(String workspaceId);
+  Optional<AgentActivityState> activityFor(Long workspaceId);
 }

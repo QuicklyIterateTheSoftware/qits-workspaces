@@ -15,18 +15,18 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeWorkspaceAgentActivity implements WorkspaceAgentActivity {
 
-  private final ConcurrentHashMap<String, AgentActivityState> activity = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, AgentActivityState> activity = new ConcurrentHashMap<>();
 
-  public void report(String workspaceId, AgentActivityState state) {
+  public void report(Long workspaceId, AgentActivityState state) {
     activity.put(workspaceId, state);
   }
 
-  public void forget(String workspaceId) {
+  public void forget(Long workspaceId) {
     activity.remove(workspaceId);
   }
 
   @Override
-  public Optional<AgentActivityState> activityFor(String workspaceId) {
+  public Optional<AgentActivityState> activityFor(Long workspaceId) {
     return Optional.ofNullable(activity.get(workspaceId));
   }
 }

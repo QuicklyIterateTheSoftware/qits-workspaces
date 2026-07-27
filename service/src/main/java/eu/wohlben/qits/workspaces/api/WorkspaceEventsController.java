@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.api;
 
+import io.smallrye.common.annotation.Blocking;
 import io.smallrye.mutiny.Multi;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -20,17 +21,22 @@ import org.jboss.resteasy.reactive.RestStreamElementType;
  * automatically, and the frontend re-syncs everything on reconnect, so no replay/{@code
  * Last-Event-ID} protocol is needed.
  */
-@Path("/repositories/{repoId}/workspaces/{workspaceId}/events")
+@Path("/workspaces/{id}/events")
 public class WorkspaceEventsController {
 
   @Inject WorkspaceEventBroadcaster broadcaster;
 
+  /**
+   * {@code @Blocking} because subscribing now resolves the workspace id against the database, and
+   * this method would otherwise run on the IO thread. Only the subscribe is blocking — the returned
+   * {@link Multi} streams as it did before.
+   */
   @GET
   @Produces(MediaType.SERVER_SENT_EVENTS)
   @RestStreamElementType(MediaType.TEXT_PLAIN)
   @Operation(hidden = true)
-  public Multi<String> events(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    return broadcaster.withHeartbeat(broadcaster.subscribe(repoId, workspaceId));
+  @Blocking
+  public Multi<String> events(@PathParam("id") Long id) {
+    return broadcaster.withHeartbeat(broadcaster.subscribeToWorkspace(id));
   }
 }

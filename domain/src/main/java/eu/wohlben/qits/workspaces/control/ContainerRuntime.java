@@ -45,7 +45,7 @@ public interface ContainerRuntime {
    * constraint entirely — a service can gain a web-view port after its container exists and still
    * be reachable without a recreation.
    */
-  String run(String repoId, String workspaceId, String branch, String parent);
+  String run(String repoId, String workspaceId, Long rowId, String branch, String parent);
 
   /**
    * Where the qits process connects to reach {@code containerPort} inside {@code container} — the
@@ -89,10 +89,11 @@ public interface ContainerRuntime {
   default String run(
       String repoId,
       String workspaceId,
+      Long rowId,
       String branch,
       String parent,
       java.util.function.Consumer<String> onLine) {
-    return run(repoId, workspaceId, branch, parent);
+    return run(repoId, workspaceId, rowId, branch, parent);
   }
 
   /**

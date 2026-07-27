@@ -27,6 +27,8 @@ import org.junit.jupiter.api.Test;
 public class WorkspaceRecreateContainerServiceTest {
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
@@ -61,7 +63,7 @@ public class WorkspaceRecreateContainerServiceTest {
    * ensureContainer, then wait for its async started event to land so a later await isn't fooled.
    */
   private void ensureRunning(String repoId, String workspaceId) throws InterruptedException {
-    workspaceService.ensureContainer(repoId, workspaceId);
+    workspaceService.ensureContainer(workspaceIds.of(repoId, workspaceId));
     assertTrue(startedRecorder.awaitCount(repoId, workspaceId, 1, 5_000));
     startedRecorder.clear();
   }
@@ -83,8 +85,8 @@ public class WorkspaceRecreateContainerServiceTest {
         containers.exec(container, "/workspace", Map.of(), "test", "-f", "marker.txt").exitCode());
 
     // Daemon reports the tree clean → the gate passes and recreate runs.
-    gitStatus.report("feat", true);
-    workspaceService.beginRecreateContainer(repoId, "feat");
+    gitStatus.report(workspaceIds.of(repoId, "feat"), true);
+    workspaceService.beginRecreateContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(
         startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
         "recreate fires a fresh-provision started event");
@@ -112,11 +114,11 @@ public class WorkspaceRecreateContainerServiceTest {
     String container = containers.containerName("feat", repoId);
     containers.exec(container, "/workspace", Map.of(), "bash", "-lc", "echo wip > marker.txt");
 
-    gitStatus.report("feat", false);
+    gitStatus.report(workspaceIds.of(repoId, "feat"), false);
     BadRequestException ex =
         assertThrows(
             BadRequestException.class,
-            () -> workspaceService.beginRecreateContainer(repoId, "feat"));
+            () -> workspaceService.beginRecreateContainer(workspaceIds.of(repoId, "feat")));
     assertTrue(ex.getMessage().contains("dirty"), ex.getMessage());
 
     // The rejected recreate never touched the container — the marker (and the container) survive.
@@ -137,11 +139,11 @@ public class WorkspaceRecreateContainerServiceTest {
 
     // No daemon has reported cleanliness → UNKNOWN, which recreate must reject just like dirty:
     // an unknowable tree is not a safe basis to destroy a container.
-    gitStatus.forget("feat");
+    gitStatus.forget(workspaceIds.of(repoId, "feat"));
     BadRequestException ex =
         assertThrows(
             BadRequestException.class,
-            () -> workspaceService.beginRecreateContainer(repoId, "feat"));
+            () -> workspaceService.beginRecreateContainer(workspaceIds.of(repoId, "feat")));
     assertTrue(ex.getMessage().contains("unknown"), ex.getMessage());
     assertEquals(
         0,
@@ -151,9 +153,9 @@ public class WorkspaceRecreateContainerServiceTest {
 
   @Test
   public void recreateThrows404ForAnUnknownWorkspace() throws Exception {
-    String repoId = clonedRepo();
+    clonedRepo();
     assertThrows(
         NotFoundException.class,
-        () -> workspaceService.beginRecreateContainer(repoId, "no-such-workspace"));
+        () -> workspaceService.beginRecreateContainer(-1L));
   }
 }

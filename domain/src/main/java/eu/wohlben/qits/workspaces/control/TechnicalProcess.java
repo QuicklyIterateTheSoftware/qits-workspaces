@@ -97,11 +97,23 @@ public final class TechnicalProcess implements WorkspaceProcessTracker.Handle {
   /** Wall-clock of the last emitted frame — the registry's idle backstop measures against it. */
   private volatile long lastActivityMillis = System.currentTimeMillis();
 
+  /** The workspace this runs against, by id; null for repository-scoped processes. */
+  private final Long workspaceRowId;
+
+  public Long workspaceRowId() {
+    return workspaceRowId;
+  }
+
   TechnicalProcess(
-      String id, String repoId, String workspaceId, Consumer<TechnicalProcess> onDone) {
+      String id,
+      String repoId,
+      String workspaceId,
+      Long workspaceRowId,
+      Consumer<TechnicalProcess> onDone) {
     this.id = id;
     this.repoId = repoId;
     this.workspaceId = workspaceId;
+    this.workspaceRowId = workspaceRowId;
     this.onDone = onDone;
   }
 

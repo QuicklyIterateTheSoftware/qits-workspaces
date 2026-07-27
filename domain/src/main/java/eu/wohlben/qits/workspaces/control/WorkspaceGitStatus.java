@@ -25,7 +25,7 @@ public interface WorkspaceGitStatus {
    * back on moved into the daemon with the rest of the in-container git — so "I cannot tell" and
    * "there are no changes" are genuinely different answers and must not be collapsed.
    */
-  Optional<Boolean> isClean(String workspaceId);
+  Optional<Boolean> isClean(Long workspaceId);
 
   /**
    * The commit {@code workspaceId}'s checkout is currently on, as the daemon last reported it, or
@@ -38,5 +38,5 @@ public interface WorkspaceGitStatus {
    * auto-pushes committed work, so a match is the steady state and a mismatch means work in flight.
    * Same fail-closed rule as {@link #isClean}: empty means refuse, not "in sync".
    */
-  Optional<String> head(String workspaceId);
+  Optional<String> head(Long workspaceId);
 }

@@ -40,6 +40,8 @@ public class ServiceSettleKillSwitchTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -57,7 +59,7 @@ public class ServiceSettleKillSwitchTest {
     workspaceService.createWorkspace(repoId, "work", "master", "work");
     String serviceId = "dev";
     configReader.setConfig(
-        "work",
+        workspaceIds.of(repoId, "work"),
         new QitsConfig(
             null,
             null,
@@ -78,12 +80,12 @@ public class ServiceSettleKillSwitchTest {
                     null,
                     null)),
             null));
-    supervisor.start(repoId, "work", serviceId);
-    driver.sink().onState(repoId, "work", "dev", "READY", null);
+    supervisor.start(workspaceIds.of(repoId, "work"), serviceId);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "dev", "READY", null);
 
     // The settle event fires, but the kill switch means the coupler ignores it: the service (still
     // owned by the live daemon) stays READY rather than being settled STOPPED.
-    containerEvents.fireStopping(repoId, "work", true);
+    containerEvents.fireStopping(repoId, "work", workspaceIds.of(repoId, "work"), true);
 
     Thread.sleep(300);
     assertEquals(
@@ -93,7 +95,7 @@ public class ServiceSettleKillSwitchTest {
   }
 
   private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
-    return supervisor.effectiveServices(repoId, "work").stream()
+    return supervisor.effectiveServices(workspaceIds.of(repoId, "work")).stream()
         .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElseThrow();

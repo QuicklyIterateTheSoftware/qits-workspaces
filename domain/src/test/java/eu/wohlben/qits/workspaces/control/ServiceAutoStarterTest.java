@@ -54,6 +54,8 @@ public class ServiceAutoStarterTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -98,12 +100,12 @@ public class ServiceAutoStarterTest {
             null,
             null,
             null));
-    configReader.setConfig("work", new QitsConfig(null, null, null, staged, null));
+    configReader.setConfig(workspaceIds.of(repoId, "work"), new QitsConfig(null, null, null, staged, null));
     return name;
   }
 
   private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
-    return supervisor.effectiveServices(repoId, "work").stream()
+    return supervisor.effectiveServices(workspaceIds.of(repoId, "work")).stream()
         .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElse(null);
@@ -129,7 +131,7 @@ public class ServiceAutoStarterTest {
     String autoId = createService(repoId, "auto", true);
     String optOutId = createService(repoId, "manual-only", false);
 
-    containerEvents.fireStarted(repoId, "work");
+    containerEvents.fireStarted(repoId, "work", workspaceIds.of(repoId, "work"));
 
     // The auto-start service is registered as a projection (STARTING) and the daemon was asked to
     // start it...
@@ -144,7 +146,7 @@ public class ServiceAutoStarterTest {
     assertTrue(!driver.started().contains("manual-only"), "the opt-out is never asked to start");
 
     // The daemon streams it up; the host projects READY.
-    driver.sink().onState(repoId, "work", "auto", "READY", null);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "auto", "READY", null);
     awaitStatus(repoId, autoId, ServiceStatus.READY);
   }
 
@@ -156,11 +158,11 @@ public class ServiceAutoStarterTest {
 
     // Start the first service manually and bring it READY, so the auto-start pass hits an
     // already-running instance.
-    supervisor.start(repoId, "work", firstId);
-    driver.sink().onState(repoId, "work", "first", "READY", null);
+    supervisor.start(workspaceIds.of(repoId, "work"), firstId);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "first", "READY", null);
     ServiceInstanceDto firstReady = awaitStatus(repoId, firstId, ServiceStatus.READY);
 
-    containerEvents.fireStarted(repoId, "work");
+    containerEvents.fireStarted(repoId, "work", workspaceIds.of(repoId, "work"));
 
     // The second service still registers — the first's tolerated "already running" must not abort
     // the loop — and the first stays the single live instance (not relaunched).
@@ -180,7 +182,7 @@ public class ServiceAutoStarterTest {
     String repoId = repoWithWorkspace();
     String autoId = createService(repoId, "auto", true);
 
-    containerEvents.fireStarted(repoId, "work");
+    containerEvents.fireStarted(repoId, "work", workspaceIds.of(repoId, "work"));
     awaitStatus(repoId, autoId, ServiceStatus.STARTING);
 
     Thread.sleep(300); // let any (wrongful) re-fire happen
@@ -196,9 +198,9 @@ public class ServiceAutoStarterTest {
     String repoId = repoWithWorkspace();
     String optOutId = createService(repoId, "manual-only", false);
 
-    supervisor.start(repoId, "work", optOutId);
+    supervisor.start(workspaceIds.of(repoId, "work"), optOutId);
     assertTrue(driver.started().contains("manual-only"), "a manual start asks the daemon");
-    driver.sink().onState(repoId, "work", "manual-only", "READY", null);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "manual-only", "READY", null);
     awaitStatus(repoId, optOutId, ServiceStatus.READY);
   }
 }

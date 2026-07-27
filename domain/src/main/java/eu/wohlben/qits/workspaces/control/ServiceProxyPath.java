@@ -7,11 +7,10 @@ package eu.wohlben.qits.workspaces.control;
  * route — the base baked into the dev server's emitted URLs at spawn must match what the proxy
  * serves.
  *
- * <p>Keyed by (workspaceId, serviceId), <em>not</em> commandId: the supervisor creates a new
+ * <p>Keyed by (workspace id, serviceId), <em>not</em> commandId: the supervisor creates a new
  * command row per relaunch, but the pair is stable across restarts and known before spawn (the base
- * must be in the environment at launch). Workspace ids are branch-derived slugs (URL-safe, unique
- * only per repository); the pair stays unambiguous because a service id is a UUID owned by exactly
- * one repository.
+ * must be in the environment at launch). The workspace is named by its own id — the branch-derived
+ * label it used to carry is unique only per repository.
  */
 public final class ServiceProxyPath {
 
@@ -20,7 +19,7 @@ public final class ServiceProxyPath {
   private ServiceProxyPath() {}
 
   /** The proxied base path for one service in one workspace, with trailing slash. */
-  public static String base(String workspaceId, String serviceId) {
+  public static String base(Long workspaceId, String serviceId) {
     return PREFIX + workspaceId + "/" + serviceId + "/";
   }
 
@@ -30,7 +29,7 @@ public final class ServiceProxyPath {
    * QITS_PUBLIC_BASE} and {@code ServiceInstanceDto.proxyPath} — the invariant that the dev server
    * serves under exactly the path the proxy exposes it at.
    */
-  public static String servedBase(String workspaceId, String serviceId, String basePath) {
+  public static String servedBase(Long workspaceId, String serviceId, String basePath) {
     String base = base(workspaceId, serviceId);
     return basePath == null || basePath.isEmpty() ? base : base + basePath + "/";
   }

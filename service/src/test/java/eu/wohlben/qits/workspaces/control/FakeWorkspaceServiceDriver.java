@@ -42,12 +42,12 @@ public class FakeWorkspaceServiceDriver implements WorkspaceServiceDriver {
 
   @Override
   public void startService(
-      String workspaceId, String serviceName, String script, Map<String, String> env) {
+      Long workspaceId, String serviceName, String script, Map<String, String> env) {
     started.add(serviceName);
   }
 
   @Override
-  public void signalService(String workspaceId, String serviceName, String signal) {
+  public void signalService(Long workspaceId, String serviceName, String signal) {
     signalled.add(serviceName);
   }
 

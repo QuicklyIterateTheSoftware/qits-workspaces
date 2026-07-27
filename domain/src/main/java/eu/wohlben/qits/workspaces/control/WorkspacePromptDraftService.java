@@ -50,8 +50,10 @@ public class WorkspacePromptDraftService {
    * session stays idle).
    */
   @Transactional
-  public boolean hasDeliverablePrompt(String repoId, String workspaceId) {
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+  public boolean hasDeliverablePrompt(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     boolean hasMarkdown =
         draftRepository
             .findByWorkspaceId(workspace.id)
@@ -62,8 +64,10 @@ public class WorkspacePromptDraftService {
   }
 
   /** The workspace's current draft, or 404 when none has been saved. */
-  public WorkspacePromptDraft getDraft(String repoId, String workspaceId) {
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+  public WorkspacePromptDraft getDraft(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     return draftRepository
         .findByWorkspaceId(workspace.id)
         .orElseThrow(() -> new NotFoundException("No prompt draft for workspace: " + workspaceId));
@@ -75,8 +79,7 @@ public class WorkspacePromptDraftService {
    * verbatim. Returns the persisted entity so the caller can read the fresh {@code updatedAt}.
    */
   @Transactional
-  public WorkspacePromptDraft saveDraft(
-      String repoId, String workspaceId, String content, String serializedPrompt) {
+  public WorkspacePromptDraft saveDraft(Long id, String content, String serializedPrompt) {
     // Validate the payload before touching the DB — the cheap in-memory guards fail fast, so a
     // buggy autosave loop of rejected requests costs no repository round-trips.
     long serializedBytes =
@@ -95,7 +98,9 @@ public class WorkspacePromptDraftService {
       throw new BadRequestException("Prompt draft content is not valid JSON", e);
     }
 
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     // Atomic DB-level upsert (H2 MERGE) rather than a read-then-insert: the draft's PK *is* the
     // workspace id (shared 1:1 PK/FK), so two concurrent first-saves for a draftless workspace —
     // the exact cross-device flow this feature targets — would both find no row and both insert the
@@ -105,7 +110,7 @@ public class WorkspacePromptDraftService {
     draftRepository.upsert(workspace.id, content, serializedPrompt);
     // Notify other open clients (another device/browser) to rehydrate — they apply the refetched
     // draft only when their local copy is pristine, so this never clobbers mid-typing.
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
+    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
     // Re-read so the returned entity carries the DB-assigned updatedAt (the value a later GET will
     // return) — the client stores it to dedup its own SSE echo, so it must match byte-for-byte.
     return draftRepository
@@ -121,10 +126,12 @@ public class WorkspacePromptDraftService {
    * Called from {@code AgentLaunchService} after a launch that delivered the bootstrap turn.
    */
   @Transactional
-  public void recordRun(String repoId, String workspaceId, String commandId) {
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+  public void recordRun(Long id, String commandId) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     draftRepository.recordRun(workspace.id, commandId);
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
+    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
   }
 
   /**
@@ -132,10 +139,12 @@ public class WorkspacePromptDraftService {
    * attachments are the draft's payload, so clearing the draft clears them too.
    */
   @Transactional
-  public void deleteDraft(String repoId, String workspaceId) {
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+  public void deleteDraft(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     draftRepository.deleteByWorkspaceId(workspace.id);
     attachmentRepository.deleteByWorkspaceId(workspace.id);
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
+    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
   }
 }

@@ -42,6 +42,8 @@ public class IntegrateSyncsSourceContainerTest {
   }
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
@@ -67,7 +69,7 @@ public class IntegrateSyncsSourceContainerTest {
   public void integrationRefusesADirtySourceWorkingTree() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "dirty-ws", "master", "dirty-b", null);
-    workspaceService.ensureContainer(repoId, "dirty-ws");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "dirty-ws"));
     String container = containers.containerName("dirty-ws", repoId);
     // An uncommitted change in the container: the origin-side merge would silently leave it behind.
     containers.exec(container, "/workspace", Map.of(), "bash", "-lc", "echo scratch > dirty.txt");

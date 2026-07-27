@@ -41,6 +41,8 @@ public class GitIdentityAttributionTest {
   }
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
@@ -70,7 +72,7 @@ public class GitIdentityAttributionTest {
     // ~/.gitconfig and failed with "Committer identity unknown" in identity-less environments.
     workspaceService.createWorkspace(repoId, "feeder", "feature", "feeder", null);
 
-    workspaceService.mergeWorkspace(repoId, "feeder", "master");
+    workspaceService.mergeWorkspace(workspaceIds.of(repoId, "feeder"), "master");
 
     assertEquals(
         IDENTITY + "|" + IDENTITY,

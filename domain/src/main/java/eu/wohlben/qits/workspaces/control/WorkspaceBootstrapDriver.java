@@ -29,17 +29,11 @@ public interface WorkspaceBootstrapDriver {
    * sink} as steps stream in. Returns {@link Optional#empty()} when no daemon becomes live within
    * {@code connectTimeout} (the caller then withholds service auto-start — the chain never ran).
    *
-   * @param repoId the workspace's repository (the container key; the socket-backed impl awaits by
-   *     {@code workspaceId} alone and ignores it)
    * @param chainTimeout how long, once a daemon is live, to wait for the terminal {@code
    *     Bootstrapped}; a timeout resolves to a failed {@link Result}
    */
   Optional<Result> awaitBootstrap(
-      String repoId,
-      String workspaceId,
-      StepSink sink,
-      Duration connectTimeout,
-      Duration chainTimeout);
+      Long workspaceId, StepSink sink, Duration connectTimeout, Duration chainTimeout);
 
   /**
    * Ask the daemon to re-run the chain (blank {@code name}) or a single step ({@code name}), then
@@ -47,7 +41,7 @@ public interface WorkspaceBootstrapDriver {
    * it.
    */
   Optional<Result> runBootstrap(
-      String repoId, String workspaceId, String name, StepSink sink, Duration chainTimeout);
+      Long workspaceId, String name, StepSink sink, Duration chainTimeout);
 
   /** The chain-complete outcome: {@code ok} false means a step failed and services stay off. */
   record Result(boolean ok) {}

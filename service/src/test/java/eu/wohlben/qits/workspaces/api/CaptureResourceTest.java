@@ -181,7 +181,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
+        .get("/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.workspace.workspaceId", hasItem(workspaceId))
@@ -234,7 +234,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
+        .get("/api/workspaces?repositoryId=" + repoId)
         .then()
         .body("entries.workspace.workspaceId", hasItems(first.workspaceId, second.workspaceId));
   }
@@ -265,7 +265,7 @@ public class CaptureResourceTest {
     // Nothing leaked: only the auto-created main workspace exists.
     given()
         .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
+        .get("/api/workspaces?repositoryId=" + repoId)
         .then()
         .body("entries", hasSize(1));
   }
@@ -302,7 +302,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
+        .get("/api/workspaces?repositoryId=" + repoId)
         .then()
         .body("entries", hasSize(1));
   }
@@ -410,7 +410,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
+        .get("/api/workspaces?repositoryId=" + repoId)
         .then()
         .body(
             "entries.find { it.workspace.workspaceId == '" + workspaceId + "' }.workspace.preamble",

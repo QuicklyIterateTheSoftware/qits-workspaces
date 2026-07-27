@@ -25,7 +25,7 @@ public interface WorkspaceDaemonInfo {
    * The live registry entry for {@code workspaceId}, or {@link Optional#empty()} if no daemon is
    * currently connected for it.
    */
-  Optional<Info> lookup(String workspaceId);
+  Optional<Info> lookup(Long workspaceId);
 
   /**
    * Every live daemon's registry facts, across all workspaces and repositories — the enumeration

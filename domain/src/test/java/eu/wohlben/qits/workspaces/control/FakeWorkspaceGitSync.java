@@ -25,7 +25,7 @@ public class FakeWorkspaceGitSync implements WorkspaceGitSync {
   private final List<String> pulls = new CopyOnWriteArrayList<>();
 
   @Override
-  public void pullFromOrigin(String workspaceId, String branch) {
+  public void pullFromOrigin(Long workspaceId, String branch) {
     pulls.add(workspaceId + " " + branch);
   }
 

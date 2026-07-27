@@ -53,6 +53,8 @@ public class ServiceLifecycleCouplerSettleTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -78,7 +80,7 @@ public class ServiceLifecycleCouplerSettleTest {
 
   private String createService(String repoId, String name, String command, RestartPolicy policy) {
     configReader.setConfig(
-        "work",
+        workspaceIds.of(repoId, "work"),
         new QitsConfig(
             null,
             null,
@@ -92,7 +94,7 @@ public class ServiceLifecycleCouplerSettleTest {
   }
 
   private ServiceInstanceDto instanceOf(String repoId, String serviceId) {
-    return supervisor.effectiveServices(repoId, "work").stream()
+    return supervisor.effectiveServices(workspaceIds.of(repoId, "work")).stream()
         .filter(i -> i.definition().id().equals(serviceId))
         .findFirst()
         .orElse(null);
@@ -116,12 +118,12 @@ public class ServiceLifecycleCouplerSettleTest {
   public void stoppingEventSettlesReadyServiceWithoutCrashOrRelaunch() throws Exception {
     String repoId = repoWithWorkspace();
     String serviceId = createService(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
-    supervisor.start(repoId, "work", serviceId);
-    driver.sink().onState(repoId, "work", "dev", "READY", null);
+    supervisor.start(workspaceIds.of(repoId, "work"), serviceId);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "dev", "READY", null);
     awaitStatus(repoId, serviceId, ServiceStatus.READY);
 
     // A deliberate container stop: settle, don't crash.
-    containerEvents.fireStopping(repoId, "work", true);
+    containerEvents.fireStopping(repoId, "work", workspaceIds.of(repoId, "work"), true);
 
     ServiceInstanceDto settled = awaitStatus(repoId, serviceId, ServiceStatus.STOPPED);
     assertEquals(0, settled.restartCount(), "a settled service is not restarted");
@@ -140,13 +142,13 @@ public class ServiceLifecycleCouplerSettleTest {
   public void stoppingEventSettlesARestartingInstance() throws Exception {
     String repoId = repoWithWorkspace();
     String serviceId = createService(repoId, "flaky", "sh -c 'exit 1'", RestartPolicy.ON_FAILURE);
-    supervisor.start(repoId, "work", serviceId);
+    supervisor.start(workspaceIds.of(repoId, "work"), serviceId);
     // Play the daemon dropping it into RESTARTING (the daemon owns the backoff).
-    driver.sink().onState(repoId, "work", "flaky", "CRASHED", 1);
-    driver.sink().onState(repoId, "work", "flaky", "RESTARTING", 1);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "flaky", "CRASHED", 1);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "flaky", "RESTARTING", 1);
     awaitStatus(repoId, serviceId, ServiceStatus.RESTARTING);
 
-    containerEvents.fireStopping(repoId, "work", true);
+    containerEvents.fireStopping(repoId, "work", workspaceIds.of(repoId, "work"), true);
 
     awaitStatus(repoId, serviceId, ServiceStatus.STOPPED);
     Thread.sleep(300);
@@ -162,15 +164,15 @@ public class ServiceLifecycleCouplerSettleTest {
     String serviceId = createService(repoId, "dev", "sleep 300", RestartPolicy.ON_FAILURE);
     // A real running container to stop — the projection start no longer provisions one (the daemon
     // owns execution), so this test that exercises WorkspaceService.stopContainer provisions it.
-    workspaceService.ensureContainer(repoId, "work");
-    supervisor.start(repoId, "work", serviceId);
-    driver.sink().onState(repoId, "work", "dev", "READY", null);
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
+    supervisor.start(workspaceIds.of(repoId, "work"), serviceId);
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "dev", "READY", null);
     awaitStatus(repoId, serviceId, ServiceStatus.READY);
     String container = containers.containerName("work", repoId);
 
     // A deliberate stop must settle the service synchronously (before the container is paused/
     // removed) so nothing reads the disappearance as a crash to resurrect.
-    workspaceService.stopContainer(repoId, "work");
+    workspaceService.stopContainer(workspaceIds.of(repoId, "work"));
 
     Thread.sleep(300);
     // A graceful stop PAUSES in place (docker stop, lossless) rather than removing the container.

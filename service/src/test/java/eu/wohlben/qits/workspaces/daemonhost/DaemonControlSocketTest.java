@@ -66,7 +66,11 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class DaemonControlSocketTest {
 
+  /** The label the daemon announces for itself in its protocol frames. */
   private static final String WORKSPACE_ID = "ws-daemonhost-test";
+
+  /** The identity the control socket is addressed by — the registry keys on this, not the label. */
+  private static final long WORKSPACE_ROW_ID = 7L;
 
   @Inject Vertx vertx;
   @Inject WorkspaceDaemonRegistry registry;
@@ -76,7 +80,7 @@ class DaemonControlSocketTest {
 
   @Inject RecordingAgentSessionReporter agentSessions;
 
-  @TestHTTPResource("/api/workspace-daemon/" + WORKSPACE_ID)
+  @TestHTTPResource("/api/workspace-daemon/id/" + WORKSPACE_ROW_ID)
   URI endpoint;
 
   /** The {@code configJson}/{@code warning} the fake peer answers a {@link DescribeConfig} with. */
@@ -154,8 +158,8 @@ class DaemonControlSocketTest {
   @Test
   void handshakeRegistersLivenessAndAcks() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
-      assertTrue(registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
+      assertTrue(registry.isDaemonLive(WORKSPACE_ROW_ID));
       assertInstanceOf(Ack.class, peer.take());
     }
   }
@@ -165,8 +169,8 @@ class DaemonControlSocketTest {
     try (FakePeer peer = connect()) {
       // The entry appears on socket registration (connectedAt), but version/buildTime are filled
       // when the Hello frame is processed — await that, not mere presence.
-      await(() -> registry.lookup(WORKSPACE_ID).map(i -> i.version() != null).orElse(false));
-      WorkspaceDaemonInfo.Info info = registry.lookup(WORKSPACE_ID).orElseThrow();
+      await(() -> registry.lookup(WORKSPACE_ROW_ID).map(i -> i.version() != null).orElse(false));
+      WorkspaceDaemonInfo.Info info = registry.lookup(WORKSPACE_ROW_ID).orElseThrow();
       // The build identity the fake peer announced in its Hello is retained for the registry, the
       // build timestamp parsed to an Instant; connectedAt is stamped server-side on registration.
       assertEquals("1.0.0-SNAPSHOT", info.version());
@@ -177,17 +181,17 @@ class DaemonControlSocketTest {
 
   @Test
   void lookupIsEmptyForAnUnknownWorkspace() {
-    assertTrue(registry.lookup("no-such-workspace").isEmpty());
+    assertTrue(registry.lookup(-1L).isEmpty());
   }
 
   @Test
   void runCommandRoundTripsOverTheSocket() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
       WorkspaceDaemonRegistry.CommandResult result =
           registry
-              .runCommand(WORKSPACE_ID, List.of("echo", "hi"), "/workspace", Map.of())
+              .runCommand(WORKSPACE_ROW_ID, List.of("echo", "hi"), "/workspace", Map.of())
               .get(5, TimeUnit.SECONDS);
 
       assertEquals(0, result.exitCode());
@@ -199,9 +203,9 @@ class DaemonControlSocketTest {
   @Test
   void describeReturnsWorkspaceInfo() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
-      WorkspaceInfo info = registry.describe(WORKSPACE_ID).get(5, TimeUnit.SECONDS);
+      WorkspaceInfo info = registry.describe(WORKSPACE_ROW_ID).get(5, TimeUnit.SECONDS);
 
       assertEquals("deadbeef", info.head());
       assertTrue(info.dirty());
@@ -224,9 +228,9 @@ class DaemonControlSocketTest {
             + "\"bootstrap\":[]}";
     configWarning = null;
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
-      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ID);
+      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ROW_ID);
 
       assertTrue(read.isPresent());
       WorkspaceConfigView view = read.get();
@@ -259,9 +263,9 @@ class DaemonControlSocketTest {
             + "{\"name\":\"seed\",\"execute\":\"./seed.sh\"}]}";
     configWarning = null;
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
-      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ID);
+      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ROW_ID);
 
       assertTrue(read.isPresent());
       QitsConfig config = read.get().config();
@@ -279,9 +283,9 @@ class DaemonControlSocketTest {
     configJson = "{\"frameworks\":[],\"actions\":[],\"daemons\":[],\"bootstrap\":[]}";
     configWarning = "Unsupported or missing 'version' (expected 1): null";
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
-      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ID);
+      Optional<WorkspaceConfigView> read = registry.readConfig(WORKSPACE_ROW_ID);
 
       assertTrue(read.isPresent());
       assertEquals("Unsupported or missing 'version' (expected 1): null", read.get().warning());
@@ -291,20 +295,19 @@ class DaemonControlSocketTest {
 
   @Test
   void readConfigIsEmptyWhenNoDaemonIsLive() {
-    assertTrue(registry.readConfig("ws-no-daemon-here").isEmpty());
+    assertTrue(registry.readConfig(-1L).isEmpty());
   }
 
   @Test
   void awaitProvisionCompletesOnProvisionedAndStreamsOutput() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
       var awaiting =
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitProvision(
-                      "repo-1",
-                      WORKSPACE_ID,
+                      WORKSPACE_ROW_ID,
                       Duration.ofSeconds(5),
                       Duration.ofSeconds(5),
                       lines::add));
@@ -313,7 +316,7 @@ class DaemonControlSocketTest {
       // than
       // dropped (chunk routing is best-effort before an awaiter exists). The terminal Provisioned
       // itself is race-proof via complete-or-retain.
-      await(() -> registry.isAwaitingProvision(WORKSPACE_ID));
+      await(() -> registry.isAwaitingProvision(WORKSPACE_ROW_ID));
       peer.ws()
           .writeTextMessage(
               codec.encode(
@@ -340,12 +343,12 @@ class DaemonControlSocketTest {
   @Test
   void awaitProvisionFailsOnProvisionFailed() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       var awaiting =
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitProvision(
-                      "repo-1", WORKSPACE_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), null));
+                      WORKSPACE_ROW_ID, Duration.ofSeconds(5), Duration.ofSeconds(5), null));
 
       peer.ws()
           .writeTextMessage(
@@ -367,21 +370,20 @@ class DaemonControlSocketTest {
     // provision
     // FAILURE — there is no host-driven fallback.
     var result =
-        registry.awaitProvision(
-            "repo-none", "ws-never-connects", Duration.ofMillis(200), Duration.ofSeconds(1), null);
+        registry.awaitProvision(-1L, Duration.ofMillis(200), Duration.ofSeconds(1), null);
     assertTrue(result.isEmpty());
   }
 
   @Test
   void awaitBootstrapStreamsStepsAndCompletesOk() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       CapturingSink sink = new CapturingSink();
       var awaiting =
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitBootstrap(
-                      "repo-1", WORKSPACE_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5)));
+                      WORKSPACE_ROW_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5)));
 
       // The daemon streams the chain autonomously, then the terminal.
       peer.ws()
@@ -414,13 +416,13 @@ class DaemonControlSocketTest {
   @Test
   void awaitBootstrapReportsFailedChain() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       CapturingSink sink = new CapturingSink();
       var awaiting =
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitBootstrap(
-                      "repo-1", WORKSPACE_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5)));
+                      WORKSPACE_ROW_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5)));
 
       peer.ws()
           .writeTextMessage(
@@ -439,7 +441,7 @@ class DaemonControlSocketTest {
   @Test
   void awaitBootstrapPicksUpATerminalThatArrivedBeforeTheAwait() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       // The autonomous chain finishes before the host's observer registers its await: the terminal
       // (and the step events) must be buffered/retained and replayed when the sink registers.
       peer.ws()
@@ -453,11 +455,11 @@ class DaemonControlSocketTest {
       peer.ws().writeTextMessage(codec.encode(new Bootstrapped(WORKSPACE_ID, true)));
 
       // Give the frames time to land on the registry ahead of the await.
-      await(() -> registry.isBootstrapPending(WORKSPACE_ID));
+      await(() -> registry.isBootstrapPending(WORKSPACE_ROW_ID));
       CapturingSink sink = new CapturingSink();
       var result =
           registry.awaitBootstrap(
-              "repo-1", WORKSPACE_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5));
+              WORKSPACE_ROW_ID, sink, Duration.ofSeconds(5), Duration.ofSeconds(5));
 
       assertTrue(result.isPresent());
       assertTrue(result.get().ok());
@@ -468,10 +470,11 @@ class DaemonControlSocketTest {
   @Test
   void runBootstrapSendsRunBootstrapAndAwaitsTheReply() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       CapturingSink sink = new CapturingSink();
 
-      var result = registry.runBootstrap("repo-1", WORKSPACE_ID, null, sink, Duration.ofSeconds(5));
+      var result = registry.runBootstrap(
+                      WORKSPACE_ROW_ID, null, sink, Duration.ofSeconds(5));
 
       assertTrue(result.isPresent());
       assertTrue(result.get().ok());
@@ -484,7 +487,7 @@ class DaemonControlSocketTest {
     // A sink whose onOutcome throws (the recordOutcome-on-deleted-workspace case) must not escape
     // onMessage and tear down the socket — the terminal Bootstrapped must still complete the await.
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       WorkspaceBootstrapDriver.StepSink throwingSink =
           new WorkspaceBootstrapDriver.StepSink() {
             @Override
@@ -502,8 +505,7 @@ class DaemonControlSocketTest {
           java.util.concurrent.CompletableFuture.supplyAsync(
               () ->
                   registry.awaitBootstrap(
-                      "repo-1",
-                      WORKSPACE_ID,
+                      WORKSPACE_ROW_ID,
                       throwingSink,
                       Duration.ofSeconds(5),
                       Duration.ofSeconds(5)));
@@ -526,8 +528,7 @@ class DaemonControlSocketTest {
   void runBootstrapIsEmptyWhenNoDaemonIsLive() {
     var result =
         registry.runBootstrap(
-            "repo-none",
-            "ws-no-daemon-bootstrap",
+            -1L,
             null,
             new CapturingSink(),
             Duration.ofSeconds(1));
@@ -537,69 +538,69 @@ class DaemonControlSocketTest {
   @Test
   void closingTheSocketPrunesTheRegistry() throws Exception {
     FakePeer peer = connect();
-    await(() -> registry.isDaemonLive(WORKSPACE_ID));
+    await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
     peer.close();
-    await(() -> !registry.isDaemonLive(WORKSPACE_ID));
-    assertFalse(registry.isDaemonLive(WORKSPACE_ID));
+    await(() -> !registry.isDaemonLive(WORKSPACE_ROW_ID));
+    assertFalse(registry.isDaemonLive(WORKSPACE_ROW_ID));
   }
 
   @Test
   void gitStatusReportCachesTheFlagAndFiresFilesAndGitStatusHints() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       hints.clear();
 
       peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, false, "abc123")));
 
       // The flag is cached for the DTO read path.
-      await(() -> registry.isClean(WORKSPACE_ID).isPresent());
-      assertEquals(Optional.of(false), registry.isClean(WORKSPACE_ID));
+      await(() -> registry.isClean(WORKSPACE_ROW_ID).isPresent());
+      assertEquals(Optional.of(false), registry.isClean(WORKSPACE_ROW_ID));
       // Every report re-homes the old host watcher's FILES trigger (workspace channel)…
-      await(() -> hints.has(Topic.FILES, "repo-1", WORKSPACE_ID));
-      assertTrue(hints.has(Topic.FILES, "repo-1", WORKSPACE_ID), hints.toString());
+      await(() -> hints.has(Topic.FILES, "repo-1", WORKSPACE_ROW_ID));
+      assertTrue(hints.has(Topic.FILES, "repo-1", WORKSPACE_ROW_ID), hints.toString());
       // …and a flag change nudges the branch-tree badge on the repository channel (repoId, null).
-      await(() -> hints.has(Topic.GIT_STATUS, "repo-1", null));
-      assertTrue(hints.has(Topic.GIT_STATUS, "repo-1", null), hints.toString());
+      await(() -> hints.has(Topic.GIT_STATUS, "repo-1", (Long) null));
+      assertTrue(hints.has(Topic.GIT_STATUS, "repo-1", (Long) null), hints.toString());
     }
   }
 
   @Test
   void unchangedGitStatusFiresFilesButNotGitStatus() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
       // First report establishes clean=true (fires FILES + GIT_STATUS).
       peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, true, "abc123")));
-      await(() -> registry.isClean(WORKSPACE_ID).equals(Optional.of(true)));
+      await(() -> registry.isClean(WORKSPACE_ROW_ID).equals(Optional.of(true)));
       hints.clear();
 
       // A second report with the SAME flag (a dirty→dirty content edit would look like this): the
       // marker moved on the daemon, so FILES must fire again, but the badge flag didn't change so
       // GIT_STATUS must NOT.
       peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, true, "abc123")));
-      await(() -> hints.has(Topic.FILES, "repo-1", WORKSPACE_ID));
-      assertTrue(hints.has(Topic.FILES, "repo-1", WORKSPACE_ID), hints.toString());
-      assertFalse(hints.has(Topic.GIT_STATUS, "repo-1", null), hints.toString());
+      await(() -> hints.has(Topic.FILES, "repo-1", WORKSPACE_ROW_ID));
+      assertTrue(hints.has(Topic.FILES, "repo-1", WORKSPACE_ROW_ID), hints.toString());
+      assertFalse(hints.has(Topic.GIT_STATUS, "repo-1", (Long) null), hints.toString());
     }
   }
 
   @Test
   void disconnectEvictsTheCachedGitStatus() throws Exception {
     FakePeer peer = connect();
-    await(() -> registry.isDaemonLive(WORKSPACE_ID));
+    await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
     peer.ws().writeTextMessage(codec.encode(new GitStatus(WORKSPACE_ID, false, "abc123")));
-    await(() -> registry.isClean(WORKSPACE_ID).isPresent());
+    await(() -> registry.isClean(WORKSPACE_ROW_ID).isPresent());
 
     peer.close();
 
-    await(() -> registry.isClean(WORKSPACE_ID).isEmpty());
-    assertTrue(registry.isClean(WORKSPACE_ID).isEmpty(), "cache cleared on disconnect (unknown)");
+    await(() -> registry.isClean(WORKSPACE_ROW_ID).isEmpty());
+    assertTrue(registry.isClean(WORKSPACE_ROW_ID).isEmpty(), "cache cleared on disconnect (unknown)");
   }
 
   @Test
   void agentActivityCachesTheRollupAndFiresTheHintOnlyOnAFlip() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
       hints.clear();
 
       // A prompt was submitted: BUSY becomes the workspace rollup and fires AGENT_ACTIVITY on the
@@ -616,13 +617,13 @@ class DaemonControlSocketTest {
                       null,
                       null,
                       1L)));
-      await(() -> registry.activityFor(WORKSPACE_ID).isPresent());
-      assertEquals(Optional.of(AgentActivityState.BUSY), registry.activityFor(WORKSPACE_ID));
-      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID));
+      await(() -> registry.activityFor(WORKSPACE_ROW_ID).isPresent());
+      assertEquals(Optional.of(AgentActivityState.BUSY), registry.activityFor(WORKSPACE_ROW_ID));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID));
       // The flip is mirrored onto the repository channel (repoId, null) and the global channel
       // (null, null) — the agent-activity bars on the repository/project detail routes ride those.
-      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", null));
-      await(() -> hints.has(Topic.AGENT_ACTIVITY, null, null));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", (Long) null));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, null, (Long) null));
 
       hints.clear();
       // A reconnect-style replay of the same BUSY state: the rollup doesn't flip, so no hint.
@@ -645,19 +646,19 @@ class DaemonControlSocketTest {
               codec.encode(
                   new AgentActivity(
                       "cmd-1", null, DaemonProtocol.AgentState.IDLE, "Stop", null, null, 3L)));
-      await(() -> registry.activityFor(WORKSPACE_ID).equals(Optional.of(AgentActivityState.IDLE)));
-      await(() -> hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID) >= 1);
-      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ID), hints.toString());
+      await(() -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.IDLE)));
+      await(() -> hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID) >= 1);
+      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID), hints.toString());
       // The no-flip duplicate stayed silent on the mirrored channels too.
-      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", null), hints.toString());
-      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, null, null), hints.toString());
+      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", (Long) null), hints.toString());
+      assertEquals(1L, hints.count(Topic.AGENT_ACTIVITY, null, (Long) null), hints.toString());
     }
   }
 
   @Test
   void disconnectEvictsTheCachedAgentActivity() throws Exception {
     FakePeer peer = connect();
-    await(() -> registry.isDaemonLive(WORKSPACE_ID));
+    await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
     peer.ws()
         .writeTextMessage(
             codec.encode(
@@ -669,12 +670,12 @@ class DaemonControlSocketTest {
                     null,
                     null,
                     1L)));
-    await(() -> registry.activityFor(WORKSPACE_ID).isPresent());
+    await(() -> registry.activityFor(WORKSPACE_ROW_ID).isPresent());
 
     peer.close();
 
-    await(() -> registry.activityFor(WORKSPACE_ID).isEmpty());
-    assertTrue(registry.activityFor(WORKSPACE_ID).isEmpty(), "cache cleared on disconnect");
+    await(() -> registry.activityFor(WORKSPACE_ROW_ID).isEmpty());
+    assertTrue(registry.activityFor(WORKSPACE_ROW_ID).isEmpty(), "cache cleared on disconnect");
   }
 
   @Test
@@ -687,7 +688,7 @@ class DaemonControlSocketTest {
     String commandId = UUID.randomUUID().toString();
     agentSessions.clear();
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
       peer.ws()
           .writeTextMessage(
@@ -711,10 +712,10 @@ class DaemonControlSocketTest {
   @Test
   void pullFromOriginSendsAPullBranchToTheLiveDaemon() throws Exception {
     try (FakePeer peer = connect()) {
-      await(() -> registry.isDaemonLive(WORKSPACE_ID));
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
 
       // A host-side merge advanced this workspace's branch; the registry asks the daemon to pull.
-      registry.pullFromOrigin(WORKSPACE_ID, "feature");
+      registry.pullFromOrigin(WORKSPACE_ROW_ID, "feature");
 
       PullBranch pull = null;
       for (int i = 0; i < 10 && pull == null; i++) {
@@ -731,7 +732,7 @@ class DaemonControlSocketTest {
   void pullFromOriginIsANoOpWithoutALiveDaemon() {
     // No daemon connected for this id: fire-and-forget, must not throw (the checkout syncs on its
     // next host git op).
-    registry.pullFromOrigin("nobody-home", "feature");
+    registry.pullFromOrigin(-1L, "feature");
   }
 
   /** Spin until {@code condition} holds or a 5s deadline passes. */
@@ -785,17 +786,17 @@ class DaemonControlSocketTest {
       received.clear();
     }
 
-    boolean has(Topic topic, String repoId, String workspaceId) {
+    boolean has(Topic topic, String repoId, Long workspaceId) {
       return count(topic, repoId, workspaceId) > 0;
     }
 
-    long count(Topic topic, String repoId, String workspaceId) {
+    long count(Topic topic, String repoId, Long workspaceId) {
       return received.stream()
           .filter(
               h ->
                   h.topic() == topic
                       && java.util.Objects.equals(h.repoId(), repoId)
-                      && java.util.Objects.equals(h.workspaceId(), workspaceId))
+                      && java.util.Objects.equals(h.workspaceRowId(), workspaceId))
           .count();
     }
 

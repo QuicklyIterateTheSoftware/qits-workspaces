@@ -43,34 +43,32 @@ public class FakeWorkspaceDaemonProvisioner implements WorkspaceDaemonProvisione
 
   @Override
   public Optional<ProvisionResult> awaitProvision(
-      String repoId,
-      String workspaceId,
+      Long workspaceId,
       Duration connectTimeout,
       Duration provisionTimeout,
       Consumer<String> onLine) {
-    // (repoId, workspaceId) is the unique key — workspaceId alone repeats across repos (each repo
-    // has
-    // a "master" workspace), so resolving by it alone would target the wrong repo's container.
+    // The workspace id is the key outright — it needs no repository beside it, which is what the
+    // old (repoId, label) pair was compensating for.
     Target target =
         QuarkusTransaction.requiringNew()
             .call(
                 () -> {
                   Workspace ws =
                       workspaces
-                          .findActiveByRepositoryAndWorkspaceId(repoId, workspaceId)
+                          .findActiveById(workspaceId)
                           .orElseThrow(
                               () ->
-                                  new IllegalStateException(
-                                      "no such workspace " + workspaceId + " in repo " + repoId));
+                                  new IllegalStateException("no such workspace " + workspaceId));
+                  String repoId = ws.repositoryId;
                   String url =
                       nameResolver
                           .resolve(repoId)
                           .map(psn -> GIT_BASE + psn.projectId() + "/" + psn.name())
                           .orElse(GIT_BASE + repoId);
-                  return new Target(ws.branch, url);
+                  return new Target(ws.repositoryId, ws.workspaceId, ws.branch, url);
                 });
 
-    String container = containers.containerName(workspaceId, repoId);
+    String container = containers.containerName(target.label(), target.repoId());
     // Idempotent reconnect: the real workspace-daemon skips its self-clone when /workspace/.git
     // already exists (a persistent /workspace volume reattached after container recreation —
     // docs/epics/qits-workspace-daemon/features/2026-07-23_autonomous-self-clone-on-boot.md).
@@ -191,5 +189,5 @@ public class FakeWorkspaceDaemonProvisioner implements WorkspaceDaemonProvisione
     return paths;
   }
 
-  private record Target(String branch, String url) {}
+  private record Target(String repoId, String label, String branch, String url) {}
 }

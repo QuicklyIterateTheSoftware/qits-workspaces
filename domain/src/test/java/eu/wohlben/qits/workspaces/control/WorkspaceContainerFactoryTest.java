@@ -76,7 +76,7 @@ class WorkspaceContainerFactoryTest {
   @Test
   void alwaysSeedsTheCredentialVolumeLabelsHostUserImageAndCommand() {
     List<String> argv =
-        factory().forWorkspace("repo12345678abc", "work", "main", "0parent").toRunArgv();
+        factory().forWorkspace("repo12345678abc", "work", 1L, "main", "0parent").toRunArgv();
 
     // The guarantee: the shared credential volume is mounted on every container.
     assertSequence(argv, "-v", "qits_shared_dot_claude:/claude-home");
@@ -116,7 +116,7 @@ class WorkspaceContainerFactoryTest {
     // — workspace-daemon runs in-container so it can't call QitsHostResolver; the URL is composed
     // here.
     assertSequence(
-        argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/api/workspace-daemon/work");
+        argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/api/workspace-daemon/id/1");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=work");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");
@@ -156,7 +156,7 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.nameResolver = nameResolver(Optional.empty());
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 
     // Blank scope ⇒ the Provisioner clones id-addressed (/git/<repositoryId>), mirroring cloneUrl's
     // fallback.
@@ -169,7 +169,7 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.gitIdentity = identity("qits-bot", "qits-bot@example.com");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 
     assertSequence(argv, "-e", "GIT_AUTHOR_NAME=qits-bot");
     assertSequence(argv, "-e", "GIT_AUTHOR_EMAIL=qits-bot@example.com");
@@ -182,7 +182,7 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.timezone = Optional.of("Pacific/Auckland");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 
     assertSequence(argv, "-e", "TZ=Pacific/Auckland");
   }
@@ -192,7 +192,7 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.memoryLimit = Optional.of("  ");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 
     assertFalse(argv.contains("--memory"), argv.toString());
     assertFalse(argv.contains("--memory-swap"), argv.toString());
@@ -204,7 +204,7 @@ class WorkspaceContainerFactoryTest {
     f.pidsLimit = Optional.of("2048");
     f.cpus = Optional.of("2.5");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 
     assertSequence(argv, "--pids-limit", "2048");
     assertSequence(argv, "--cpus", "2.5");
@@ -216,7 +216,7 @@ class WorkspaceContainerFactoryTest {
     f.claudeVolume = "";
     f.pnpmVolume = "";
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", "main", null).toRunArgv();
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 
     // The blanked caches drop their mount (and, for claude/kimi, the credential-dir env too)...
     assertFalse(argv.contains("qits_shared_dot_claude:/claude-home"), argv.toString());

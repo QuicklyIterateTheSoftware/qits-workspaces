@@ -24,5 +24,5 @@ public interface WorkspaceConfigReader {
    * WorkspaceConfigView#warning()} is non-null means the file was there but could not be
    * read/parsed (the config is empty) — still a successful read, just degraded.
    */
-  Optional<WorkspaceConfigView> readConfig(String workspaceId);
+  Optional<WorkspaceConfigView> readConfig(Long workspaceId);
 }

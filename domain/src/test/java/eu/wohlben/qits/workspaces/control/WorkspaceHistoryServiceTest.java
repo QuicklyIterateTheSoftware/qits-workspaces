@@ -26,6 +26,8 @@ public class WorkspaceHistoryServiceTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @Inject WorkspaceService workspaceService;
 
   @Inject WorkspaceHistoryService workspaceHistoryService;
@@ -65,11 +67,11 @@ public class WorkspaceHistoryServiceTest {
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", "build the feature");
     assertTrue(activeContains(repoId, "feat"));
 
-    workspaceService.discardWorkspace(repoId, "feat", "did not work out");
+    workspaceService.discardWorkspace(workspaceIds.of(repoId, "feat"), "did not work out");
 
     assertFalse(activeContains(repoId, "feat"), "discarded workspace leaves the active list");
     WorkspaceHistoryDetailDto detail =
-        workspaceHistoryService.get(repoId, historyFor(repoId, "feat").id());
+        workspaceHistoryService.get(historyFor(repoId, "feat").id());
     assertEquals(WorkspaceStatus.ABANDONED, detail.status());
     assertEquals("build the feature", detail.preamble());
     assertEquals("did not work out", detail.result());
@@ -93,7 +95,7 @@ public class WorkspaceHistoryServiceTest {
   public void workspaceIdCanBeReusedAfterResolution() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.discardWorkspace(repoId, "feat", null);
+    workspaceService.discardWorkspace(workspaceIds.of(repoId, "feat"), null);
 
     // Reuse the id — only an ACTIVE duplicate is rejected, so this succeeds.
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);

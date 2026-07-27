@@ -6,6 +6,11 @@ import eu.wohlben.qits.workspaces.entity.WorkspaceStatus;
 import java.time.Instant;
 
 /**
+ * @param id the workspace's identifier — the generated surrogate key, which is what routes, the
+ *     daemon control socket and the ports address. Stable and unique on its own; needs no
+ *     repository beside it
+ * @param workspaceId the branch-derived label. A display name and a path/container-name segment,
+ *     not an identifier: unique only per repository, and reusable once the workspace resolves
  * @param ahead commits the workspace's branch has that its parent does not (commits in front)
  * @param behind commits the parent has that the workspace's branch does not (commits it trails by)
  * @param conflictsWithParent whether merging the parent into this branch would hit merge conflicts.
@@ -46,6 +51,7 @@ import java.time.Instant;
  *     (docs/epics/qits-workspace-registry/)
  */
 public record WorkspaceDto(
+    Long id,
     String workspaceId,
     String parent,
     String branch,

@@ -18,4 +18,4 @@ package eu.wohlben.qits.workspaces.control;
  * manual chain re-run also passes null, and the coupler tolerates services that are already up.
  */
 public record WorkspaceReadyForServices(
-    String repoId, String workspaceId, String technicalProcessId) {}
+    String repoId, String workspaceId, Long workspaceRowId, String technicalProcessId) {}

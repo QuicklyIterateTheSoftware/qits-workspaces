@@ -22,6 +22,8 @@ import org.junit.jupiter.api.Test;
 public class WorkspaceDefaultMainBranchTest {
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject WorkspaceHistoryService workspaceHistoryService;
   @Inject GitExecutor git;
@@ -76,7 +78,7 @@ public class WorkspaceDefaultMainBranchTest {
     workspaceService.createWorkspace(repoId, "feeder", null, "feeder", null);
     String masterBefore = revParse(repoId, "refs/heads/master");
 
-    workspaceService.mergeWorkspace(repoId, "feeder", null);
+    workspaceService.mergeWorkspace(workspaceIds.of(repoId, "feeder"), null);
 
     assertEquals(
         masterBefore,
@@ -89,7 +91,7 @@ public class WorkspaceDefaultMainBranchTest {
             .orElseThrow()
             .id();
     assertTrue(
-        workspaceHistoryService.get(repoId, historyId).events().stream()
+        workspaceHistoryService.get(historyId).events().stream()
             .anyMatch(e -> e.type() == WorkspaceEventType.MERGED && "feature".equals(e.target())),
         "the MERGED event names the configured main branch as target");
   }

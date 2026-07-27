@@ -21,6 +21,8 @@ public class WorkspaceDaemonOutdatedTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -45,7 +47,7 @@ public class WorkspaceDaemonOutdatedTest {
 
   private WorkspaceDto runningWorkspace(String repoId, String id, String parent) {
     workspaceService.createWorkspace(repoId, id, parent, id, null);
-    workspaceService.ensureContainer(repoId, id);
+    workspaceService.ensureContainer(workspaceIds.of(repoId, id));
     return workspaceService.listWorkspaces(repoId).stream()
         .filter(w -> id.equals(w.workspaceId()))
         .findFirst()
@@ -66,8 +68,8 @@ public class WorkspaceDaemonOutdatedTest {
     runningWorkspace(repoId, "old-ws", "master");
     runningWorkspace(repoId, "new-ws", "master");
 
-    daemonInfo.report("old-ws", "1.0.0", OLD);
-    daemonInfo.report("new-ws", "1.0.0", NEW);
+    daemonInfo.report(workspaceIds.of(repoId, "old-ws"), "1.0.0", OLD);
+    daemonInfo.report(workspaceIds.of(repoId, "new-ws"), "1.0.0", NEW);
 
     assertEquals(Boolean.TRUE, outdated(repoId, "old-ws"), "the older build is outdated");
     assertNull(outdated(repoId, "new-ws"), "the newest build is not outdated");
@@ -77,7 +79,7 @@ public class WorkspaceDaemonOutdatedTest {
   public void aSingleDaemonIsNeverOutdated() throws Exception {
     String repoId = clonedRepo();
     runningWorkspace(repoId, "solo", "master");
-    daemonInfo.report("solo", "1.0.0", OLD);
+    daemonInfo.report(workspaceIds.of(repoId, "solo"), "1.0.0", OLD);
 
     assertNull(outdated(repoId, "solo"), "the only daemon connected is by definition the latest");
   }
@@ -90,8 +92,8 @@ public class WorkspaceDaemonOutdatedTest {
 
     // 'untimed' reports a version but no build time (an older image). It can't be ordered, so it
     // neither becomes "the latest" (which would wrongly flag 'timed') nor is itself flagged.
-    daemonInfo.report("timed", "1.0.0", OLD);
-    daemonInfo.report("untimed", "1.0.0", null);
+    daemonInfo.report(workspaceIds.of(repoId, "timed"), "1.0.0", OLD);
+    daemonInfo.report(workspaceIds.of(repoId, "untimed"), "1.0.0", null);
 
     assertNull(
         outdated(repoId, "timed"), "the only build-timed daemon is the latest, not outdated");
@@ -104,9 +106,9 @@ public class WorkspaceDaemonOutdatedTest {
     // Created but never provisioned → STOPPED, so no daemon is connected and no badge is computed,
     // even if a stale registry entry existed.
     workspaceService.createWorkspace(repoId, "stopped", "master", "stopped", null);
-    daemonInfo.report("stopped", "0.9.0", OLD);
+    daemonInfo.report(workspaceIds.of(repoId, "stopped"), "0.9.0", OLD);
     runningWorkspace(repoId, "live", "master");
-    daemonInfo.report("live", "1.0.0", NEW);
+    daemonInfo.report(workspaceIds.of(repoId, "live"), "1.0.0", NEW);
 
     assertNull(outdated(repoId, "stopped"), "no outdated badge while not RUNNING");
   }

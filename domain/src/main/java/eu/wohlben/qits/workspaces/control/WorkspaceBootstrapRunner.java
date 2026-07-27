@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspaces.control;
 
 import eu.wohlben.qits.workspaces.entity.BootstrapOutcome;
+import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
 import jakarta.annotation.PreDestroy;
@@ -57,6 +58,8 @@ public class WorkspaceBootstrapRunner {
   @Inject BootstrapRunService bootstrapRunService;
 
   @Inject WorkspaceService workspaceService;
+
+  @Inject WorkspaceResolver workspaceResolver;
 
   @Inject WorkspaceContainerEventPublisher containerEvents;
 
@@ -120,8 +123,9 @@ public class WorkspaceBootstrapRunner {
   }
 
   /** Whether a bootstrap run is currently in flight for the workspace. */
-  public boolean isChainRunning(String repoId, String workspaceId) {
-    return inFlight.containsKey(key(repoId, workspaceId));
+  public boolean isChainRunning(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    return inFlight.containsKey(key(workspace.repositoryId, workspace.workspaceId));
   }
 
   void onContainerStarted(@ObservesAsync WorkspaceContainerStarted evt) {
@@ -130,7 +134,7 @@ public class WorkspaceBootstrapRunner {
       // Plain restart, kill switch, or no daemon control plane: nothing between the container and
       // its services — the daemon didn't (re)run the chain, so go straight to auto-start.
       containerEvents.fireReadyForServices(
-          evt.repoId(), evt.workspaceId(), evt.technicalProcessId());
+          evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), evt.technicalProcessId());
       return;
     }
     if (inFlight.putIfAbsent(key(evt.repoId(), evt.workspaceId()), Boolean.TRUE) != null) {
@@ -152,11 +156,11 @@ public class WorkspaceBootstrapRunner {
     }
     try {
       Optional<WorkspaceBootstrapDriver.Result> result =
-          awaitChain(evt.repoId(), evt.workspaceId(), process);
+          awaitChain(evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), process);
       boolean ok = result.map(WorkspaceBootstrapDriver.Result::ok).orElse(false);
       if (ok) {
         containerEvents.fireReadyForServices(
-            evt.repoId(), evt.workspaceId(), evt.technicalProcessId());
+            evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), evt.technicalProcessId());
       } else if (process != null) {
         // Failed chain (or no daemon answered): no service phase. Declaring the empty set ends the
         // process now — its verdict is already `failed` via the failed bootstrap segment.
@@ -177,7 +181,7 @@ public class WorkspaceBootstrapRunner {
       inFlight.remove(key(evt.repoId(), evt.workspaceId()));
       // A final BOOTSTRAP hint after the guard is released so the surface's "chain running"
       // indicator clears even when the chain aborted.
-      changePublisher.fire(evt.repoId(), evt.workspaceId(), WorkspaceChangeHint.Topic.BOOTSTRAP);
+      changePublisher.fire(evt.repoId(), evt.workspaceRowId(), WorkspaceChangeHint.Topic.BOOTSTRAP);
     }
   }
 
@@ -185,16 +189,20 @@ public class WorkspaceBootstrapRunner {
    * Re-run the whole chain on demand (async; progress arrives over BOOTSTRAP hints). On success,
    * service auto-start proceeds — the recovery path after a failed provision-time run.
    */
-  public void runChainAsync(String repoId, String workspaceId) {
+  public void runChainAsync(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     submitManual(
         repoId,
         workspaceId,
+        id,
         () -> {
-          workspaceService.ensureContainer(repoId, workspaceId);
+          workspaceService.ensureContainer(id);
           Optional<WorkspaceBootstrapDriver.Result> result =
-              runDaemon(repoId, workspaceId, null, null);
+              runDaemon(repoId, workspaceId, id, null, null);
           if (result.map(WorkspaceBootstrapDriver.Result::ok).orElse(false)) {
-            containerEvents.fireReadyForServices(repoId, workspaceId, null);
+            containerEvents.fireReadyForServices(repoId, workspaceId, id, null);
           }
         });
   }
@@ -204,14 +212,18 @@ public class WorkspaceBootstrapRunner {
    * config-declared {@code id:} (which defaults to the step name) — resolved against the
    * workspace's ConfigView to the step name the daemon understands.
    */
-  public void runSingleAsync(String repoId, String workspaceId, String stepId) {
-    String stepName = resolveStepName(workspaceId, stepId);
+  public void runSingleAsync(Long id, String stepId) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
+    String stepName = resolveStepName(id, stepId);
     submitManual(
         repoId,
         workspaceId,
+        id,
         () -> {
-          workspaceService.ensureContainer(repoId, workspaceId);
-          runDaemon(repoId, workspaceId, stepName, null);
+          workspaceService.ensureContainer(id);
+          runDaemon(repoId, workspaceId, id, stepName, null);
         });
   }
 
@@ -221,7 +233,7 @@ public class WorkspaceBootstrapRunner {
    * manual run itself provisions), the id passes through (ids default to names, so it is usually
    * already the step name, and the daemon errors on a genuine mismatch).
    */
-  private String resolveStepName(String workspaceId, String stepId) {
+  private String resolveStepName(Long workspaceId, String stepId) {
     if (configReader.isUnsatisfied()) {
       return stepId;
     }
@@ -243,7 +255,7 @@ public class WorkspaceBootstrapRunner {
   }
 
   /** Enter the in-flight guard and hand the work to the manual-run executor. */
-  private void submitManual(String repoId, String workspaceId, Runnable work) {
+  private void submitManual(String repoId, String workspaceId, Long rowId, Runnable work) {
     if (driver.isUnsatisfied()) {
       throw new BadRequestException(
           "No workspace-daemon control plane is available to run bootstrap for this workspace");
@@ -251,7 +263,7 @@ public class WorkspaceBootstrapRunner {
     if (inFlight.putIfAbsent(key(repoId, workspaceId), Boolean.TRUE) != null) {
       throw new BadRequestException("A bootstrap run is already in flight for this workspace");
     }
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+    changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
     manualRunExecutor.submit(
         () -> {
           try {
@@ -260,21 +272,20 @@ public class WorkspaceBootstrapRunner {
             LOG.warnf(e, "Manual bootstrap run failed for workspace %s/%s", repoId, workspaceId);
           } finally {
             inFlight.remove(key(repoId, workspaceId));
-            changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+            changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
           }
         });
   }
 
   /** Await the daemon's autonomous boot-time chain, recording each step through {@code sink}. */
   private Optional<WorkspaceBootstrapDriver.Result> awaitChain(
-      String repoId, String workspaceId, TechnicalProcess process) {
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+      String repoId, String workspaceId, Long rowId, TechnicalProcess process) {
+    changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
     return driver
         .get()
         .awaitBootstrap(
-            repoId,
-            workspaceId,
-            new RecordingSink(repoId, workspaceId, process),
+            rowId,
+            new RecordingSink(repoId, workspaceId, rowId, process),
             Duration.ofMillis(connectMillis),
             Duration.ofMillis(chainAwaitMillis));
   }
@@ -283,15 +294,14 @@ public class WorkspaceBootstrapRunner {
    * Ask the daemon to re-run the chain (or one step) and await it, recording through {@code sink}.
    */
   private Optional<WorkspaceBootstrapDriver.Result> runDaemon(
-      String repoId, String workspaceId, String onlyName, TechnicalProcess process) {
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+      String repoId, String workspaceId, Long rowId, String onlyName, TechnicalProcess process) {
+    changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
     return driver
         .get()
         .runBootstrap(
-            repoId,
-            workspaceId,
+            rowId,
             onlyName,
-            new RecordingSink(repoId, workspaceId, process),
+            new RecordingSink(repoId, workspaceId, rowId, process),
             Duration.ofMillis(chainAwaitMillis));
   }
 
@@ -302,12 +312,16 @@ public class WorkspaceBootstrapRunner {
    * by {@link BootstrapRunService#recordOutcome}).
    */
   private final class RecordingSink implements WorkspaceBootstrapDriver.StepSink {
+
+    private final Long rowId;
     private final String repoId;
     private final String workspaceId;
     private final TechnicalProcess process;
     private final Set<String> openedSegments = new HashSet<>();
 
-    private RecordingSink(String repoId, String workspaceId, TechnicalProcess process) {
+    private RecordingSink(
+        String repoId, String workspaceId, Long rowId, TechnicalProcess process) {
+      this.rowId = rowId;
       this.repoId = repoId;
       this.workspaceId = workspaceId;
       this.process = process;
@@ -341,7 +355,7 @@ public class WorkspaceBootstrapRunner {
       // log).
       Integer recordedExit = resolved == BootstrapOutcome.SKIPPED ? null : exitCode;
       bootstrapRunService.recordOutcome(
-          repoId, workspaceId, name, name, resolved, null, recordedExit);
+          repoId, workspaceId, rowId, name, name, resolved, null, recordedExit);
       if (process != null) {
         String segment = bootstrapSegment(name);
         if (openedSegments.add(segment)) {

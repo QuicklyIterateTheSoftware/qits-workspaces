@@ -25,4 +25,8 @@ package eu.wohlben.qits.workspaces.control;
  * clone and bootstrap state, so the chain does not re-run for it.
  */
 public record WorkspaceContainerStarted(
-    String repoId, String workspaceId, String technicalProcessId, boolean freshProvision) {}
+    String repoId,
+    String workspaceId,
+    Long workspaceRowId,
+    String technicalProcessId,
+    boolean freshProvision) {}

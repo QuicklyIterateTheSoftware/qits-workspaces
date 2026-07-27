@@ -45,8 +45,7 @@ public class WorkspacePromptAttachmentService {
    */
   @Transactional
   public WorkspacePromptAttachment addAttachment(
-      String repoId,
-      String workspaceId,
+      Long id,
       String claimedMimeType,
       String label,
       String source,
@@ -67,7 +66,9 @@ public class WorkspacePromptAttachmentService {
       throw new BadRequestException("Attachment is not a PNG or JPEG image");
     }
 
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     WorkspacePromptAttachment attachment = new WorkspacePromptAttachment();
     attachment.id = UUID.randomUUID().toString();
     attachment.workspaceId = workspace.id;
@@ -78,7 +79,7 @@ public class WorkspacePromptAttachmentService {
     attachmentRepository.persist(attachment);
     // Fire the attachments-only SSE topic (not prompt-draft) so another open view refreshes its
     // GET-list without every prompt-text autosave re-downloading the image payloads.
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
+    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
     return attachment;
   }
 
@@ -89,8 +90,10 @@ public class WorkspacePromptAttachmentService {
    * has none.
    */
   @Transactional
-  public List<WorkspacePromptAttachmentDataDto> listAttachments(String repoId, String workspaceId) {
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+  public List<WorkspacePromptAttachmentDataDto> listAttachments(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     return attachmentRepository.listByWorkspaceId(workspace.id).stream()
         .map(
             a ->
@@ -106,12 +109,14 @@ public class WorkspacePromptAttachmentService {
 
   /** Removes one attachment scoped to its workspace; 404 if the workspace or the row is unknown. */
   @Transactional
-  public void deleteAttachment(String repoId, String workspaceId, String attachmentId) {
-    Workspace workspace = workspaceResolver.resolveActive(repoId, workspaceId);
+  public void deleteAttachment(Long id, String attachmentId) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
     if (!attachmentRepository.deleteByWorkspaceIdAndId(workspace.id, attachmentId)) {
       throw new NotFoundException("Attachment not found: " + attachmentId);
     }
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
+    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
   }
 
   private static PromptAttachmentSource parseSource(String source) {

@@ -25,19 +25,19 @@ class WorkspaceEventBroadcasterTest {
     broadcaster.debounceMillis = 100;
   }
 
-  private void fire(String repoId, String workspaceId, Topic topic) {
-    broadcaster.onHint(new WorkspaceChangeHint(repoId, workspaceId, topic));
+  private void fire(String repoId, Long workspaceRowId, Topic topic) {
+    broadcaster.onHint(new WorkspaceChangeHint(repoId, workspaceRowId, topic));
   }
 
   @Test
   void deliversTheHyphenatedTopicNameToTheWorkspaceChannel() {
     AssertSubscriber<String> sub =
         broadcaster
-            .subscribe("repo-1", "wt-1")
+            .subscribe("repo-1", 1L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-1", Topic.SERVICE_EVENTS);
+    fire("repo-1", 1L, Topic.SERVICE_EVENTS);
 
     sub.awaitItems(1, Duration.ofSeconds(2));
     assertEquals("service-events", sub.getItems().get(0));
@@ -47,16 +47,16 @@ class WorkspaceEventBroadcasterTest {
   void aHintForOneWorkspaceDoesNotReachAnother() {
     AssertSubscriber<String> a =
         broadcaster
-            .subscribe("repo-1", "wt-a")
+            .subscribe("repo-1", 101L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
     AssertSubscriber<String> b =
         broadcaster
-            .subscribe("repo-1", "wt-b")
+            .subscribe("repo-1", 102L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-a", Topic.SERVICES);
+    fire("repo-1", 101L, Topic.SERVICES);
 
     a.awaitItems(1, Duration.ofSeconds(2));
     assertEquals(1, a.getItems().size());
@@ -75,7 +75,7 @@ class WorkspaceEventBroadcasterTest {
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
     AssertSubscriber<String> workspace =
         broadcaster
-            .subscribe("repo-1", "wt-1")
+            .subscribe("repo-1", 1L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
     AssertSubscriber<String> repository =
@@ -84,7 +84,7 @@ class WorkspaceEventBroadcasterTest {
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-1", Topic.AGENT_ACTIVITY);
+    fire("repo-1", 1L, Topic.AGENT_ACTIVITY);
     fire("repo-1", null, Topic.AGENT_ACTIVITY);
     fire(null, null, Topic.AGENT_ACTIVITY);
 
@@ -101,12 +101,12 @@ class WorkspaceEventBroadcasterTest {
   void debounceCollapsesABurstToAtMostLeadingPlusTrailing() throws InterruptedException {
     AssertSubscriber<String> sub =
         broadcaster
-            .subscribe("repo-1", "wt-1")
+            .subscribe("repo-1", 1L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
     for (int i = 0; i < 8; i++) {
-      fire("repo-1", "wt-1", Topic.TELEMETRY);
+      fire("repo-1", 1L, Topic.TELEMETRY);
     }
 
     // Leading edge is immediate; the burst coalesces into one trailing after the window.
@@ -120,12 +120,12 @@ class WorkspaceEventBroadcasterTest {
   void distinctTopicsForTheSameWorkspaceEachEmitTheirLeadingHint() {
     AssertSubscriber<String> sub =
         broadcaster
-            .subscribe("repo-1", "wt-1")
+            .subscribe("repo-1", 1L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
 
-    fire("repo-1", "wt-1", Topic.SERVICES);
-    fire("repo-1", "wt-1", Topic.COMMANDS);
+    fire("repo-1", 1L, Topic.SERVICES);
+    fire("repo-1", 1L, Topic.COMMANDS);
 
     sub.awaitItems(2, Duration.ofSeconds(2));
     assertTrue(sub.getItems().contains("services"));
@@ -136,10 +136,10 @@ class WorkspaceEventBroadcasterTest {
   void theChannelIsDroppedWhenItsLastSubscriberCancels() {
     AssertSubscriber<String> sub =
         broadcaster
-            .subscribe("repo-1", "wt-1")
+            .subscribe("repo-1", 1L)
             .subscribe()
             .withSubscriber(AssertSubscriber.create(Long.MAX_VALUE));
-    fire("repo-1", "wt-1", Topic.SERVICES);
+    fire("repo-1", 1L, Topic.SERVICES);
     sub.awaitItems(1, Duration.ofSeconds(2));
     assertEquals(1, broadcaster.openChannelCount());
 
@@ -151,7 +151,7 @@ class WorkspaceEventBroadcasterTest {
   @Test
   void hintsForAWorkspaceWithNoSubscribersAreSafelyDropped() {
     // No subscriber for wt-gone: firing must not throw and must open no channel.
-    fire("repo-1", "wt-gone", Topic.SERVICES);
+    fire("repo-1", 999L, Topic.SERVICES);
     assertEquals(0, broadcaster.openChannelCount());
   }
 }

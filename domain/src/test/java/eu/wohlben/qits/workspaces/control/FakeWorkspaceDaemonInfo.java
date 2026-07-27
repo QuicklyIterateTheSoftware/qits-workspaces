@@ -20,22 +20,22 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeWorkspaceDaemonInfo implements WorkspaceDaemonInfo {
 
-  private final ConcurrentHashMap<String, Info> infos = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, Info> infos = new ConcurrentHashMap<>();
 
   /**
    * Announce a live daemon for {@code workspaceId} with the given build identity. A null {@code
    * buildTime} mimics an older image that reported none — never orderable, so never "the latest".
    */
-  public void report(String workspaceId, String version, Instant buildTime) {
+  public void report(Long workspaceId, String version, Instant buildTime) {
     infos.put(workspaceId, new Info(Instant.EPOCH, version, buildTime));
   }
 
-  public void forget(String workspaceId) {
+  public void forget(Long workspaceId) {
     infos.remove(workspaceId);
   }
 
   @Override
-  public Optional<Info> lookup(String workspaceId) {
+  public Optional<Info> lookup(Long workspaceId) {
     return Optional.ofNullable(infos.get(workspaceId));
   }
 

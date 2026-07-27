@@ -17,6 +17,7 @@ import java.time.Instant;
 public record ServiceEventDto(
     String repoId,
     String workspaceId,
+    Long workspaceRowId,
     String serviceId,
     String serviceName,
     ServiceEventKind kind,

@@ -60,6 +60,8 @@ public class WorkspaceBootstrapControllerTest {
 
   @Inject FakeWorkspaceConfigReader configReader;
 
+  @Inject eu.wohlben.qits.workspaces.control.WorkspaceIds workspaceIds;
+
   @Inject WorkspaceService workspaceService;
 
   @Inject FakeRepositoryLookup repositories;
@@ -85,16 +87,18 @@ public class WorkspaceBootstrapControllerTest {
     workspaceService.createMainWorkspace(repoId, "master");
     given()
         .contentType(ContentType.JSON)
-        .body(new WorkspaceController.CreateWorkspaceRequest("work", "master", "work", null))
-        .post("/api/repositories/" + repoId + "/workspaces")
+        .body(new WorkspaceController.CreateWorkspaceRequest(repoId, "work", "master", "work", null))
+        .post("/api/workspaces")
         .then()
         .statusCode(200);
     return repoId;
   }
 
   /** Stage the chain the surface lists (the workspace's in-container ConfigView). */
-  private void stageChain(QitsConfig.BootstrapDecl... steps) {
-    configReader.setConfig("work", new QitsConfig(null, null, null, List.of(), List.of(steps)));
+  private void stageChain(String repoId, QitsConfig.BootstrapDecl... steps) {
+    configReader.setConfig(
+        workspaceIds.of(repoId, "work"),
+        new QitsConfig(null, null, null, List.of(), List.of(steps)));
   }
 
   /**
@@ -106,7 +110,7 @@ public class WorkspaceBootstrapControllerTest {
    */
   private void stageChainInCheckout(String repoId, QitsConfig.BootstrapDecl... steps)
       throws Exception {
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
     StringBuilder yaml = new StringBuilder("version: 1\nbootstrap:\n");
     for (QitsConfig.BootstrapDecl step : steps) {
       yaml.append("  - name: ").append(step.name()).append('\n');
@@ -117,11 +121,11 @@ public class WorkspaceBootstrapControllerTest {
             .resolve(CONFIG_PATH);
     Files.createDirectories(config.getParent());
     Files.writeString(config, yaml.toString());
-    stageChain(steps);
+    stageChain(repoId, steps);
   }
 
   private String surface(String repoId) {
-    return "/api/repositories/" + repoId + "/workspaces/work/bootstrap-commands";
+    return "/api/workspaces/" + workspaceIds.of(repoId, "work") + "/bootstrap-commands";
   }
 
   private String awaitOutcome(String repoId, int entryIndex, String expected)
@@ -148,6 +152,7 @@ public class WorkspaceBootstrapControllerTest {
   public void listShowsChainWithNullLastRunBeforeAnyRun() throws Exception {
     String repoId = repoWithWorkspace();
     stageChain(
+        repoId,
         new QitsConfig.BootstrapDecl(null, "install", null, "echo install", null, null),
         new QitsConfig.BootstrapDecl("seed-db", "seed", null, "echo seed", null, null));
 

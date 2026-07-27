@@ -27,13 +27,14 @@ public interface WorkspaceServiceDriver {
    * can still be started; blank {@code script} means "look it up in the in-container config by
    * name". A no-op when no daemon is live.
    */
-  void startService(String workspaceId, String serviceName, String script, Map<String, String> env);
+  void startService(
+      Long workspaceId, String serviceName, String script, Map<String, String> env);
 
   /**
    * Ask the daemon to deliver {@code signal} (bare name, e.g. {@code TERM}) to a running service —
    * the stop request. A no-op when no daemon is live.
    */
-  void signalService(String workspaceId, String serviceName, String signal);
+  void signalService(Long workspaceId, String serviceName, String signal);
 
   /**
    * Register a sink to receive every service's streamed lifecycle events and output, for the life
@@ -57,9 +58,20 @@ public interface WorkspaceServiceDriver {
      * CRASHED}, or {@code STOPPED}, with the process exit code ({@code null} unless it exited).
      */
     void onState(
-        String repoId, String workspaceId, String serviceName, String state, Integer exitCode);
+        String repoId,
+        String workspaceId,
+        Long workspaceRowId,
+        String serviceName,
+        String state,
+        Integer exitCode);
 
     /** A line of a service's streamed output ({@code stream} is {@code STDOUT}/{@code STDERR}). */
-    void onLine(String repoId, String workspaceId, String serviceName, String stream, String line);
+    void onLine(
+        String repoId,
+        String workspaceId,
+        Long workspaceRowId,
+        String serviceName,
+        String stream,
+        String line);
   }
 }

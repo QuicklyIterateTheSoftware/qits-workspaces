@@ -1,11 +1,14 @@
 package eu.wohlben.qits.workspaces.api;
 
 import eu.wohlben.qits.workspaces.control.WorkspaceChangeHint;
+import eu.wohlben.qits.workspaces.control.WorkspaceResolver;
+import eu.wohlben.qits.workspaces.entity.Workspace;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.operators.multi.processors.BroadcastProcessor;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.ObservesAsync;
+import jakarta.inject.Inject;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,6 +38,8 @@ import org.jboss.logging.Logger;
 public class WorkspaceEventBroadcaster {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceEventBroadcaster.class);
+
+  @Inject WorkspaceResolver workspaceResolver;
 
   @ConfigProperty(name = "qits.events.debounce-ms", defaultValue = "1000")
   long debounceMillis;
@@ -70,8 +75,19 @@ public class WorkspaceEventBroadcaster {
    * The live topic stream for one workspace, hot and shared: created on first subscriber, dropped
    * on last cancellation. Overflow is dropped (hints are recoverable).
    */
-  public Multi<String> subscribe(String repoId, String workspaceId) {
-    String key = key(repoId, workspaceId);
+  public Multi<String> subscribeToWorkspace(Long id) {
+    // Resolved purely to 404 an unknown workspace — the channel key is the id itself.
+    workspaceResolver.resolveActive(id);
+    return subscribe(null, id);
+  }
+
+  /**
+   * The channel for a scope key. The workspace scope is reached through {@link
+   * #subscribeToWorkspace}; the repository ({@code (repoId, null)}) and global ({@code (null,
+   * null)}) scopes have no workspace to name and address themselves directly.
+   */
+  public Multi<String> subscribe(String repoId, Long workspaceRowId) {
+    String key = key(repoId, workspaceRowId);
     return Multi.createFrom()
         .deferred(
             () -> {
@@ -101,7 +117,7 @@ public class WorkspaceEventBroadcaster {
 
   /** Routes a fired hint into its workspace's stream, through the debounce gate. */
   void onHint(@ObservesAsync WorkspaceChangeHint hint) {
-    String key = key(hint.repoId(), hint.workspaceId());
+    String key = key(hint.repoId(), hint.workspaceRowId());
     DebounceKey debounceKey = new DebounceKey(key, hint.topic());
     boolean emitNow = false;
     synchronized (windows) {
@@ -149,8 +165,15 @@ public class WorkspaceEventBroadcaster {
     }
   }
 
-  private static String key(String repoId, String workspaceId) {
-    return repoId + "/" + workspaceId;
+  /**
+   * The channel key. A workspace channel is named by the workspace id alone — it needs no
+   * repository beside it, and the three scopes are prefixed so they can never collide.
+   */
+  private static String key(String repoId, Long workspaceRowId) {
+    if (workspaceRowId != null) {
+      return "w:" + workspaceRowId;
+    }
+    return repoId != null ? "r:" + repoId : "g";
   }
 
   /**

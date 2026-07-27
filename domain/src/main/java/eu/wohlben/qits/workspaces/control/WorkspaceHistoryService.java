@@ -45,8 +45,8 @@ public class WorkspaceHistoryService {
   }
 
   @Transactional
-  public WorkspaceHistoryDetailDto get(String repoId, Long id) {
-    Workspace workspace = requireWorkspace(repoId, id);
+  public WorkspaceHistoryDetailDto get(Long id) {
+    Workspace workspace = requireWorkspace(id);
     List<WorkspaceEventDto> events =
         workspaceEventRepository.findByWorkspaceOrderByAt(id).stream()
             .map(WorkspaceHistoryService::toEventDto)
@@ -68,21 +68,25 @@ public class WorkspaceHistoryService {
 
   /** Edit the markdown narrative; null fields are left unchanged. */
   @Transactional
-  public WorkspaceHistoryDetailDto updateNarrative(
-      String repoId, Long id, String preamble, String result) {
-    Workspace workspace = requireWorkspace(repoId, id);
+  public WorkspaceHistoryDetailDto updateNarrative(Long id, String preamble, String result) {
+    Workspace workspace = requireWorkspace(id);
     if (preamble != null) {
       workspace.preamble = preamble;
     }
     if (result != null) {
       workspace.result = result;
     }
-    return get(repoId, id);
+    return get(id);
   }
 
-  private Workspace requireWorkspace(String repoId, Long id) {
-    Workspace workspace = workspaceRepository.findById(id);
-    if (workspace == null || !workspace.repositoryId.equals(repoId)) {
+  /**
+   * The history row with this id, resolved or active. No repository is passed in to cross-check:
+   * the id identifies the row on its own, and a caller that supplied a mismatched repository was
+   * only ever telling us something we could read off the row itself.
+   */
+  private Workspace requireWorkspace(Long id) {
+    Workspace workspace = id == null ? null : workspaceRepository.findById(id);
+    if (workspace == null) {
       throw new NotFoundException("Workspace not found: " + id);
     }
     return workspace;

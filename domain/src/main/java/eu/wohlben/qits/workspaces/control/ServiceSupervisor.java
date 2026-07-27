@@ -9,6 +9,7 @@ import eu.wohlben.qits.workspaces.dto.ServiceDefinitionDto;
 import eu.wohlben.qits.workspaces.dto.ServiceEventDto;
 import eu.wohlben.qits.workspaces.dto.ServiceInstanceDto;
 import eu.wohlben.qits.workspaces.entity.ServiceEventKind;
+import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.entity.ServiceEventSeverity;
 import eu.wohlben.qits.workspaces.entity.ServiceStatus;
 import eu.wohlben.qits.workspaces.mapper.ServiceDefinitionMapper;
@@ -57,6 +58,7 @@ public class ServiceSupervisor {
   private static final class Instance {
     final String repoId;
     final String workspaceId;
+    final Long rowId;
     ServiceDefinitionDto definition;
     ServiceStatus status = ServiceStatus.STOPPED;
     int restartCount;
@@ -79,14 +81,19 @@ public class ServiceSupervisor {
      */
     TechnicalProcess process;
 
-    Instance(String repoId, String workspaceId, ServiceDefinitionDto definition) {
+    Instance(String repoId, String workspaceId, Long rowId, ServiceDefinitionDto definition) {
       this.repoId = repoId;
       this.workspaceId = workspaceId;
+      this.rowId = rowId;
       this.definition = definition;
     }
   }
 
-  private record Key(String repoId, String workspaceId, String serviceId) {}
+  /**
+   * The workspace by its id, not by (repository, label). The old triple existed because the label
+   * alone was never unique; an id needs nothing beside it.
+   */
+  private record Key(Long workspaceRowId, String serviceId) {}
 
   private final Map<Key, Instance> instances = new ConcurrentHashMap<>();
 
@@ -96,6 +103,8 @@ public class ServiceSupervisor {
    * definitions).
    */
   @Inject jakarta.enterprise.inject.Instance<WorkspaceConfigReader> configReader;
+
+  @Inject WorkspaceResolver workspaceResolver;
 
   @Inject ServiceDefinitionMapper definitions;
 
@@ -129,7 +138,7 @@ public class ServiceSupervisor {
    * read via {@link WorkspaceConfigReader}, mapped to flat DTOs. Empty when no daemon is live (no
    * control socket ⇒ no config) or the file declares no services.
    */
-  private List<ServiceDefinitionDto> resolveDefinitions(String workspaceId) {
+  private List<ServiceDefinitionDto> resolveDefinitions(Long workspaceId) {
     if (configReader.isUnsatisfied()) {
       return List.of();
     }
@@ -145,9 +154,9 @@ public class ServiceSupervisor {
    * instance per (workspace, service) is enforced — "restart" beats two dev servers fighting over a
    * port.
    */
-  public synchronized ServiceInstanceDto start(
-      String repoId, String workspaceId, String serviceId) {
-    return start(repoId, workspaceId, serviceId, null);
+  public synchronized ServiceInstanceDto start(Long id, String serviceId) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    return start(workspace.repositoryId, workspace.workspaceId, workspace.id, serviceId, null);
   }
 
   /**
@@ -161,22 +170,26 @@ public class ServiceSupervisor {
    * manual start (process == null) asks the daemon to start it now over the socket.
    */
   public synchronized ServiceInstanceDto start(
-      String repoId, String workspaceId, String serviceId, TechnicalProcess process) {
+      String repoId,
+      String workspaceId,
+      Long rowId,
+      String serviceId,
+      TechnicalProcess process) {
     ServiceDefinitionDto definition =
-        resolveDefinitions(workspaceId).stream()
+        resolveDefinitions(rowId).stream()
             .filter(d -> d.id().equals(serviceId))
             .findFirst()
             .orElseThrow(
                 () ->
                     new NotFoundException(
                         "Service not declared in the workspace qits config: " + serviceId));
-    Key key = new Key(repoId, workspaceId, serviceId);
+    Key key = new Key(rowId, serviceId);
     Instance existing = instances.get(key);
     if (existing != null && isLive(existing.status)) {
       throw new BadRequestException(
           "Service '" + definition.name() + "' is already running in this workspace");
     }
-    Instance instance = new Instance(repoId, workspaceId, definition);
+    Instance instance = new Instance(repoId, workspaceId, rowId, definition);
     instance.process = process;
     instance.tail = new TailSink();
     instance.status = ServiceStatus.STARTING;
@@ -185,9 +198,9 @@ public class ServiceSupervisor {
       serviceDriver
           .get()
           .startService(
-              workspaceId, definition.name(), definition.startScript(), definition.environment());
+              rowId, definition.name(), definition.startScript(), definition.environment());
     }
-    return toInstanceDto(instance, null, workspaceId);
+    return toInstanceDto(instance, null, rowId);
   }
 
   /**
@@ -196,8 +209,11 @@ public class ServiceSupervisor {
    * settles. Without a live driver there is nothing to signal — settle STOPPED locally so the UI
    * doesn't hang on a service the host can no longer reach.
    */
-  public synchronized ServiceInstanceDto stop(String repoId, String workspaceId, String serviceId) {
-    Instance instance = instances.get(new Key(repoId, workspaceId, serviceId));
+  public synchronized ServiceInstanceDto stop(Long id, String serviceId) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
+    Instance instance = instances.get(new Key(workspace.id, serviceId));
     if (instance == null || !isLive(instance.status)) {
       throw new NotFoundException("Daemon is not running in this workspace");
     }
@@ -205,11 +221,11 @@ public class ServiceSupervisor {
     if (!serviceDriver.isUnsatisfied()) {
       serviceDriver
           .get()
-          .signalService(workspaceId, instance.definition.name(), instance.definition.stopSignal());
+          .signalService(workspace.id, instance.definition.name(), instance.definition.stopSignal());
     } else {
       transition(instance, ServiceStatus.STOPPED, ServiceEventSeverity.INFO, "stopped", null);
     }
-    return toInstanceDto(instance, null, workspaceId);
+    return toInstanceDto(instance, null, workspace.id);
   }
 
   /**
@@ -224,10 +240,11 @@ public class ServiceSupervisor {
    * signal each service for a clean flush; false (discard) settles bookkeeping only and lets {@code
    * rm} kill the processes.
    */
-  public synchronized void settleForWorkspace(String repoId, String workspaceId, boolean graceful) {
+  public synchronized void settleForWorkspace(
+      String repoId, String workspaceId, Long rowId, boolean graceful) {
     for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
       Key key = entry.getKey();
-      if (!key.repoId().equals(repoId) || !key.workspaceId().equals(workspaceId)) {
+      if (!key.workspaceRowId().equals(rowId)) {
         continue;
       }
       Instance instance = entry.getValue();
@@ -239,7 +256,7 @@ public class ServiceSupervisor {
         serviceDriver
             .get()
             .signalService(
-                workspaceId, instance.definition.name(), instance.definition.stopSignal());
+                rowId, instance.definition.name(), instance.definition.stopSignal());
       }
       transition(
           instance, ServiceStatus.STOPPED, ServiceEventSeverity.INFO, "workspace stopped", null);
@@ -247,13 +264,15 @@ public class ServiceSupervisor {
   }
 
   /** Every config-declared service of the workspace with its projected runtime state. */
-  public synchronized List<ServiceInstanceDto> effectiveServices(
-      String repoId, String workspaceId) {
-    List<ServiceDefinitionDto> definitions = resolveDefinitions(workspaceId);
+  public synchronized List<ServiceInstanceDto> effectiveServices(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    String repoId = workspace.repositoryId;
+    String workspaceId = workspace.workspaceId;
+    List<ServiceDefinitionDto> definitions = resolveDefinitions(workspace.id);
     List<ServiceInstanceDto> result = new ArrayList<>(definitions.size());
     for (ServiceDefinitionDto definition : definitions) {
-      Instance instance = instances.get(new Key(repoId, workspaceId, definition.id()));
-      result.add(toInstanceDto(instance, definition, workspaceId));
+      Instance instance = instances.get(new Key(workspace.id, definition.id()));
+      result.add(toInstanceDto(instance, definition, workspace.id));
     }
     return result;
   }
@@ -282,10 +301,10 @@ public class ServiceSupervisor {
    * target with a null {@code origin} means the service isn't reachable (e.g. the container is
    * gone) — the proxy 502s.
    */
-  public synchronized Optional<ProxyTarget> proxyTarget(String workspaceId, String serviceId) {
+  public synchronized Optional<ProxyTarget> proxyTarget(Long workspaceId, String serviceId) {
     for (Map.Entry<Key, Instance> entry : instances.entrySet()) {
       Key key = entry.getKey();
-      if (key.workspaceId().equals(workspaceId) && key.serviceId().equals(serviceId)) {
+      if (key.workspaceRowId().equals(workspaceId) && key.serviceId().equals(serviceId)) {
         Instance instance = entry.getValue();
         if (instance.definition.webView() == null) {
           return Optional.empty();
@@ -306,7 +325,7 @@ public class ServiceSupervisor {
   }
 
   private ServiceInstanceDto toInstanceDto(
-      Instance instance, ServiceDefinitionDto declared, String workspaceId) {
+      Instance instance, ServiceDefinitionDto declared, Long workspaceId) {
     ServiceDefinitionDto definition = declared != null ? declared : instance.definition;
     String proxyPath =
         definition.webView() != null
@@ -358,11 +377,12 @@ public class ServiceSupervisor {
       String logExcerpt) {
     instance.status = status;
     settleProcessSegment(instance, status, summary);
-    changePublisher.fire(instance.repoId, instance.workspaceId, WorkspaceChangeHint.Topic.SERVICES);
+    changePublisher.fire(instance.repoId, instance.rowId, WorkspaceChangeHint.Topic.SERVICES);
     events.publish(
         new ServiceEventDto(
             instance.repoId,
             instance.workspaceId,
+            instance.rowId,
             instance.definition.id(),
             instance.definition.name(),
             ServiceEventKind.STATUS_CHANGED,
@@ -419,7 +439,12 @@ public class ServiceSupervisor {
 
     @Override
     public void onState(
-        String repoId, String workspaceId, String serviceName, String state, Integer exitCode) {
+        String repoId,
+        String workspaceId,
+        Long workspaceRowId,
+        String serviceName,
+        String state,
+        Integer exitCode) {
       if (repoId == null) {
         return; // no repo context (daemon Hello not yet seen) — can't resolve the definition
       }
@@ -429,21 +454,21 @@ public class ServiceSupervisor {
         return;
       }
       synchronized (ServiceSupervisor.this) {
-        Instance instance = findByName(repoId, workspaceId, serviceName);
+        Instance instance = findByName(workspaceRowId, serviceName);
         if (instance == null) {
           // The daemon reports a service the host didn't pre-register (a reconnect re-report after
           // a qits restart, or a config-declared service with no coupler run) — event-driven
           // adoption.
-          ServiceDefinitionDto definition = resolveDefinition(workspaceId, serviceName);
+          ServiceDefinitionDto definition = resolveDefinition(workspaceRowId, serviceName);
           if (definition == null) {
             LOG.debugf(
                 "Ignoring event for service '%s' with no config definition in workspace %s",
                 serviceName, workspaceId);
             return;
           }
-          instance = new Instance(repoId, workspaceId, definition);
+          instance = new Instance(repoId, workspaceId, workspaceRowId, definition);
           instance.tail = new TailSink();
-          instances.put(new Key(repoId, workspaceId, definition.id()), instance);
+          instances.put(new Key(workspaceRowId, definition.id()), instance);
         }
         if (mapped == ServiceStatus.READY) {
           resolveOrigin(instance); // the service is bound now — resolve the proxy target
@@ -461,9 +486,14 @@ public class ServiceSupervisor {
 
     @Override
     public void onLine(
-        String repoId, String workspaceId, String serviceName, String stream, String line) {
+        String repoId,
+        String workspaceId,
+        Long workspaceRowId,
+        String serviceName,
+        String stream,
+        String line) {
       synchronized (ServiceSupervisor.this) {
-        Instance instance = findByName(repoId, workspaceId, serviceName);
+        Instance instance = findByName(workspaceRowId, serviceName);
         if (instance == null) {
           return;
         }
@@ -486,10 +516,9 @@ public class ServiceSupervisor {
    * Keyed by repoId too: a workspace slug like {@code work} repeats across repositories, so name +
    * slug alone would cross-match another repo's service.
    */
-  private Instance findByName(String repoId, String workspaceId, String serviceName) {
+  private Instance findByName(Long rowId, String serviceName) {
     for (Instance instance : instances.values()) {
-      if (instance.repoId.equals(repoId)
-          && instance.workspaceId.equals(workspaceId)
+      if (java.util.Objects.equals(instance.rowId, rowId)
           && instance.definition.name().equals(serviceName)) {
         return instance;
       }
@@ -501,7 +530,7 @@ public class ServiceSupervisor {
    * Resolve a workspace's config-declared service definition by service name (the orphan case is
    * null).
    */
-  private ServiceDefinitionDto resolveDefinition(String workspaceId, String serviceName) {
+  private ServiceDefinitionDto resolveDefinition(Long workspaceId, String serviceName) {
     try {
       for (ServiceDefinitionDto definition : resolveDefinitions(workspaceId)) {
         if (definition.name().equals(serviceName)) {

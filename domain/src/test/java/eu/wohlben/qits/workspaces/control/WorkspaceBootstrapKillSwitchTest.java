@@ -42,6 +42,8 @@ public class WorkspaceBootstrapKillSwitchTest {
   private static final long AWAIT_MILLIS = 15_000;
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceReadyForServicesRecorder readyRecorder;
@@ -71,7 +73,7 @@ public class WorkspaceBootstrapKillSwitchTest {
     workspaceService.createWorkspace(repoId, "work", "master", "work");
     readyRecorder.clear();
 
-    workspaceService.ensureContainer(repoId, "work");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
 
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     while (System.currentTimeMillis() < deadline && readyRecorder.countFor(repoId, "work") == 0) {
@@ -81,7 +83,7 @@ public class WorkspaceBootstrapKillSwitchTest {
         readyRecorder.countFor(repoId, "work") >= 1,
         "the switched-off runner still releases service auto-start");
     assertTrue(
-        bootstrapRunService.listForWorkspace(repoId, "work").isEmpty(),
+        bootstrapRunService.listForWorkspace(workspaceIds.of(repoId, "work")).isEmpty(),
         "no bootstrap command ran");
   }
 }

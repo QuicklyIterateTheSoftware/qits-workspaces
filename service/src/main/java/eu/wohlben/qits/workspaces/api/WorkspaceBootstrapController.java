@@ -6,6 +6,7 @@ import eu.wohlben.qits.workspaces.dto.BootstrapRunDto;
 import eu.wohlben.qits.workspaces.dto.BootstrapStepDto;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
 import eu.wohlben.qits.workspaces.control.WorkspaceConfigReader;
+import eu.wohlben.qits.workspaces.control.WorkspaceResolver;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -28,7 +29,7 @@ import java.util.stream.Collectors;
  * and progress arrives over the workspace SSE channel's {@code bootstrap} hints; a run already in
  * flight is a 400.
  */
-@Path("/repositories/{repoId}/workspaces/{workspaceId}/bootstrap-commands")
+@Path("/workspaces/{id}/bootstrap-commands")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class WorkspaceBootstrapController {
@@ -39,6 +40,8 @@ public class WorkspaceBootstrapController {
 
   @Inject WorkspaceBootstrapRunner bootstrapRunner;
 
+  @Inject WorkspaceResolver workspaceResolver;
+
   public static record ListWorkspaceBootstrapRequest() {
     public record Response(boolean chainRunning, List<Entry> entries) {
       public record Entry(BootstrapStepDto step, BootstrapRunDto lastRun) {}
@@ -47,16 +50,16 @@ public class WorkspaceBootstrapController {
 
   @GET
   public ListWorkspaceBootstrapRequest.Response list(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
+      @PathParam("id") Long id) {
     Map<String, BootstrapRunDto> lastRuns =
-        bootstrapRunService.listForWorkspace(repoId, workspaceId).stream()
+        bootstrapRunService.listForWorkspace(id).stream()
             .collect(Collectors.toMap(BootstrapRunDto::bootstrapCommandId, Function.identity()));
     List<QitsConfig.BootstrapDecl> chain =
         configReader.isUnsatisfied()
             ? List.of()
             : configReader
                 .get()
-                .readConfig(workspaceId)
+                .readConfig(id)
                 .map(view -> view.config().bootstrap())
                 .orElse(List.of());
     var entries =
@@ -70,7 +73,7 @@ public class WorkspaceBootstrapController {
                         lastRuns.get(decl.name())))
             .toList();
     return new ListWorkspaceBootstrapRequest.Response(
-        bootstrapRunner.isChainRunning(repoId, workspaceId), entries);
+        bootstrapRunner.isChainRunning(id), entries);
   }
 
   public static record RunBootstrapChainRequest() {
@@ -80,8 +83,8 @@ public class WorkspaceBootstrapController {
   @POST
   @Path("/run")
   public RunBootstrapChainRequest.Response runChain(
-      @PathParam("repoId") String repoId, @PathParam("workspaceId") String workspaceId) {
-    bootstrapRunner.runChainAsync(repoId, workspaceId);
+      @PathParam("id") Long id) {
+    bootstrapRunner.runChainAsync(id);
     return new RunBootstrapChainRequest.Response(true);
   }
 
@@ -95,10 +98,8 @@ public class WorkspaceBootstrapController {
   @POST
   @Path("/{stepId}/run")
   public RunBootstrapCommandRequest.Response runSingle(
-      @PathParam("repoId") String repoId,
-      @PathParam("workspaceId") String workspaceId,
-      @PathParam("stepId") String stepId) {
-    bootstrapRunner.runSingleAsync(repoId, workspaceId, stepId);
+      @PathParam("id") Long id, @PathParam("stepId") String stepId) {
+    bootstrapRunner.runSingleAsync(id, stepId);
     return new RunBootstrapCommandRequest.Response(true);
   }
 }

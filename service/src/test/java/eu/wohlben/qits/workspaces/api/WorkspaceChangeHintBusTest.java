@@ -39,8 +39,16 @@ class WorkspaceChangeHintBusTest {
 
   @Inject HintCollector collector;
 
-  @TestHTTPResource("/api/repositories/repo-sse/workspaces/wt-sse/events")
-  URL sseUrl;
+  @Inject eu.wohlben.qits.workspaces.control.FakeRepositoryLookup repositories;
+
+  @Inject eu.wohlben.qits.workspaces.control.WorkspaceService workspaceService;
+
+  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
+  String dataDir;
+
+  /** The collection root; a workspace's channel hangs off its id, which only exists at runtime. */
+  @TestHTTPResource("/api/workspaces/")
+  URL workspacesUrl;
 
   @TestHTTPResource("/api/events")
   URL globalSseUrl;
@@ -68,19 +76,28 @@ class WorkspaceChangeHintBusTest {
 
   @Test
   void firedHintsAreDeliveredToAsyncObservers() throws InterruptedException {
-    publisher.fire("repo-bus", "wt-bus", Topic.COMMANDS);
+    publisher.fire("repo-bus", 42L, Topic.COMMANDS);
 
     WorkspaceChangeHint hint = awaitHint("repo-bus", 2000);
     assertNotNull(hint, "expected the fired hint to reach the async observer");
     assertEquals(Topic.COMMANDS, hint.topic());
-    assertEquals("wt-bus", hint.workspaceId());
+    assertEquals(42L, hint.workspaceRowId());
   }
 
 
+  /**
+   * The workspace channel is addressed by the workspace's id, so this needs a real one — the route
+   * resolves it and 404s otherwise — and the hint that has to reach it names the same id.
+   */
   @Test
   void theSseEndpointStreamsAHintFrameOverHttp() throws Exception {
+    String repoId = eu.wohlben.qits.workspaces.control.TestOrigin.create(dataDir);
+    repositories.register(repoId);
+    var workspace = workspaceService.createWorkspace(repoId, "wt-sse", "master", "wt-sse");
+
+    URL sseUrl = new URL(workspacesUrl, workspace.id + "/events");
     assertSseDataFrame(
-        sseUrl, () -> publisher.fire("repo-sse", "wt-sse", Topic.SERVICES), "services");
+        sseUrl, () -> publisher.fire(repoId, workspace.id, Topic.SERVICES), "services");
   }
 
   @Test

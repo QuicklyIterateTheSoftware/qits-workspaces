@@ -50,6 +50,8 @@ public class ServiceProcessCorrelationTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -84,7 +86,7 @@ public class ServiceProcessCorrelationTest {
     workspaceService.createMainWorkspace(repoId, "master");
     workspaceService.createWorkspace(repoId, "work", "master", "work");
     configReader.setConfig(
-        "work",
+        workspaceIds.of(repoId, "work"),
         new QitsConfig(
             null,
             null,
@@ -106,7 +108,7 @@ public class ServiceProcessCorrelationTest {
                     null)),
             null));
 
-    String processId = workspaceService.beginEnsureContainer(repoId, "work");
+    String processId = workspaceService.beginEnsureContainer(workspaceIds.of(repoId, "work"));
     TechnicalProcess process = registry.find(processId).orElseThrow();
 
     // Wait until the auto-start coupler pre-registered the process-tracked "web" projection
@@ -114,8 +116,8 @@ public class ServiceProcessCorrelationTest {
     awaitStatus(repoId, "web", ServiceStatus.STARTING);
 
     // Play the daemon: it streams the service's startup output, then reports READY.
-    driver.sink().onLine(repoId, "work", "web", "STDOUT", "hello-from-service");
-    driver.sink().onState(repoId, "work", "web", "READY", null);
+    driver.sink().onLine(repoId, "work", workspaceIds.of(repoId, "work"), "web", "STDOUT", "hello-from-service");
+    driver.sink().onState(repoId, "work", workspaceIds.of(repoId, "work"), "web", "READY", null);
 
     long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
     while (!process.isTerminal() && System.currentTimeMillis() < deadline) {
@@ -155,7 +157,7 @@ public class ServiceProcessCorrelationTest {
     ServiceStatus last = null;
     while (System.currentTimeMillis() < deadline) {
       var i =
-          supervisor.effectiveServices(repoId, "work").stream()
+          supervisor.effectiveServices(workspaceIds.of(repoId, "work")).stream()
               .filter(d -> d.definition().id().equals(serviceId))
               .findFirst()
               .orElse(null);

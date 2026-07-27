@@ -42,6 +42,8 @@ public class ServiceAutoStartKillSwitchTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -59,7 +61,7 @@ public class ServiceAutoStartKillSwitchTest {
     workspaceService.createWorkspace(repoId, "work", "master", "work");
     String serviceId = "auto";
     configReader.setConfig(
-        "work",
+        workspaceIds.of(repoId, "work"),
         new QitsConfig(
             null,
             null,
@@ -82,13 +84,13 @@ public class ServiceAutoStartKillSwitchTest {
                     null)),
             null));
 
-    containerEvents.fireStarted(repoId, "work");
+    containerEvents.fireStarted(repoId, "work", workspaceIds.of(repoId, "work"));
 
     // Give the async observer ample time to (not) act, then confirm nothing launched — the service
     // is still listed, but as an unstarted STOPPED placeholder.
     Thread.sleep(1500);
     ServiceInstanceDto instance =
-        supervisor.effectiveServices(repoId, "work").stream()
+        supervisor.effectiveServices(workspaceIds.of(repoId, "work")).stream()
             .filter(i -> i.definition().id().equals(serviceId))
             .findFirst()
             .orElseThrow();

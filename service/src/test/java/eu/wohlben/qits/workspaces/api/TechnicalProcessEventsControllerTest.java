@@ -101,7 +101,7 @@ public class TechnicalProcessEventsControllerTest {
 
   @Test
   public void aTerminalProcessReplaysAllFramesAndCompletesTheStream() throws Exception {
-    TechnicalProcess process = registry.begin("repo-sse", "ws-terminal");
+    TechnicalProcess process = registry.begin("repo-sse", "ws-terminal", 1L);
     process.openSegment("docker-run");
     process.appendLine("docker-run", "created abc");
     process.settleSegment("docker-run", true);
@@ -129,7 +129,7 @@ public class TechnicalProcessEventsControllerTest {
 
   @Test
   public void aLiveProcessStreamsReplayThenLiveThenDone() throws Exception {
-    TechnicalProcess process = registry.begin("repo-sse", "ws-live");
+    TechnicalProcess process = registry.begin("repo-sse", "ws-live", 1L);
     process.openSegment("clone");
     process.appendLine("clone", "replayed-line");
 
@@ -147,7 +147,7 @@ public class TechnicalProcessEventsControllerTest {
 
   @Test
   public void theHeartbeatPingsALiveStream() throws Exception {
-    TechnicalProcess process = registry.begin("repo-sse", "ws-ping");
+    TechnicalProcess process = registry.begin("repo-sse", "ws-ping", 1L);
     BlockingQueue<String> lines = dataLines(open(process.id()));
 
     assertNotNull(await(lines, "\"ping\""), "a ping frame arrives within the heartbeat period");
@@ -166,7 +166,7 @@ public class TechnicalProcessEventsControllerTest {
   @Test
   public void frameJsonCarriesSegmentLineAndStatusFields() throws Exception {
     // The wire contract: line frames carry segment+line, settled frames carry segment+status.
-    TechnicalProcess process = registry.begin("repo-sse", "ws-shape");
+    TechnicalProcess process = registry.begin("repo-sse", "ws-shape", 1L);
     process.openSegment("clone");
     process.appendLine("clone", "hello");
     process.settleSegment("clone", false);

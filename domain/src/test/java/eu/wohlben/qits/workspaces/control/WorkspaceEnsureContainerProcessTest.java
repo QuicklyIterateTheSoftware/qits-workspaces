@@ -28,6 +28,8 @@ public class WorkspaceEnsureContainerProcessTest {
   private static final long AWAIT_MILLIS = 15_000;
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject TechnicalProcessRegistry registry;
   @Inject GitExecutor git;
@@ -95,7 +97,7 @@ public class WorkspaceEnsureContainerProcessTest {
   public void aFreshProvisionStreamsDockerRunAndCloneSegmentsAndEndsDoneOk() throws Exception {
     String repoId = repoWithWorkspace("stream");
 
-    String processId = workspaceService.beginEnsureContainer(repoId, "stream");
+    String processId = workspaceService.beginEnsureContainer(workspaceIds.of(repoId, "stream"));
     assertNotNull(processId);
     assertEquals(processId, registry.activeFor(repoId, "stream").orElseThrow());
 
@@ -115,15 +117,15 @@ public class WorkspaceEnsureContainerProcessTest {
     assertTrue(registry.activeFor(repoId, "stream").isEmpty(), "done clears the active mapping");
     assertEquals(
         eu.wohlben.qits.workspaces.entity.WorkspaceRuntimeStatus.RUNNING,
-        workspaceService.getWorkspace(repoId, "stream").runtimeStatus());
+        workspaceService.getWorkspace(workspaceIds.of(repoId, "stream")).runtimeStatus());
   }
 
   @Test
   public void aSecondStartCompletesAsANoOpWithoutReprovisioning() throws Exception {
     String repoId = repoWithWorkspace("noop");
-    awaitTerminal(workspaceService.beginEnsureContainer(repoId, "noop"));
+    awaitTerminal(workspaceService.beginEnsureContainer(workspaceIds.of(repoId, "noop")));
 
-    Replay replay = replayOf(awaitTerminal(workspaceService.beginEnsureContainer(repoId, "noop")));
+    Replay replay = replayOf(awaitTerminal(workspaceService.beginEnsureContainer(workspaceIds.of(repoId, "noop"))));
     assertEquals("ok", settled(replay, "container-start").status());
     assertEquals("ok", doneFrame(replay).status());
     assertTrue(
@@ -139,7 +141,7 @@ public class WorkspaceEnsureContainerProcessTest {
     git.exec(Path.of(dataDir, repoId, "origin").toFile(), "git", "branch", "-D", "--", "doomed");
 
     Replay replay =
-        replayOf(awaitTerminal(workspaceService.beginEnsureContainer(repoId, "doomed")));
+        replayOf(awaitTerminal(workspaceService.beginEnsureContainer(workspaceIds.of(repoId, "doomed"))));
     assertEquals("failed", doneFrame(replay).status());
     assertTrue(
         replay.frames.stream()
@@ -150,6 +152,6 @@ public class WorkspaceEnsureContainerProcessTest {
   @Test
   public void anUnknownWorkspaceFailsFastInRequest() {
     assertThrows(
-        NotFoundException.class, () -> workspaceService.beginEnsureContainer("nope", "nope"));
+        NotFoundException.class, () -> workspaceService.beginEnsureContainer(-1L));
   }
 }

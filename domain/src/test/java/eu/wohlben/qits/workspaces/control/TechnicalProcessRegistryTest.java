@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
  */
 class TechnicalProcessRegistryTest {
 
-  private record Fired(String repoId, String workspaceId, WorkspaceChangeHint.Topic topic) {}
+  private record Fired(String repoId, Long workspaceRowId, WorkspaceChangeHint.Topic topic) {}
 
   private final List<Fired> fired = new CopyOnWriteArrayList<>();
   private TechnicalProcessRegistry registry;
@@ -31,24 +31,24 @@ class TechnicalProcessRegistryTest {
     registry.changePublisher =
         new WorkspaceChangePublisher() {
           @Override
-          public void fire(String repoId, String workspaceId, WorkspaceChangeHint.Topic topic) {
-            fired.add(new Fired(repoId, workspaceId, topic));
+          public void fire(String repoId, Long workspaceRowId, WorkspaceChangeHint.Topic topic) {
+            fired.add(new Fired(repoId, workspaceRowId, topic));
           }
         };
   }
 
   @Test
   void beginRegistersTheProcessAsTheWorkspacesActiveOneAndFiresAProcessHint() {
-    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    TechnicalProcess process = registry.begin("repo-1", "ws-1", 1L);
 
     assertEquals(process.id(), registry.activeFor("repo-1", "ws-1").orElseThrow());
     assertEquals(process, registry.find(process.id()).orElseThrow());
-    assertEquals(List.of(new Fired("repo-1", "ws-1", WorkspaceChangeHint.Topic.PROCESS)), fired);
+    assertEquals(List.of(new Fired("repo-1", 1L, WorkspaceChangeHint.Topic.PROCESS)), fired);
   }
 
   @Test
   void doneClearsTheActiveMappingFiresAHintAndEvictsAfterTheRetentionWindow() throws Exception {
-    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    TechnicalProcess process = registry.begin("repo-1", "ws-1", 1L);
     process.completeNoOp("container-start", "already running");
 
     assertTrue(registry.activeFor("repo-1", "ws-1").isEmpty(), "done means no longer active");
@@ -66,8 +66,8 @@ class TechnicalProcessRegistryTest {
 
   @Test
   void aNewerProcessForTheSameWorkspaceBecomesTheActiveOne() {
-    TechnicalProcess first = registry.begin("repo-1", "ws-1");
-    TechnicalProcess second = registry.begin("repo-1", "ws-1");
+    TechnicalProcess first = registry.begin("repo-1", "ws-1", 1L);
+    TechnicalProcess second = registry.begin("repo-1", "ws-1", 1L);
 
     assertEquals(second.id(), registry.activeFor("repo-1", "ws-1").orElseThrow());
     // The older process finishing must not clear the newer active mapping.
@@ -153,7 +153,7 @@ class TechnicalProcessRegistryTest {
   @Test
   void theIdleBackstopForceFinishesAProcessThatGoesQuiet() throws Exception {
     registry.maxIdleMillis = 100;
-    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    TechnicalProcess process = registry.begin("repo-1", "ws-1", 1L);
     process.openSegment("docker-run"); // never settled — e.g. a ready pattern that never matches
 
     long deadline = System.currentTimeMillis() + 5_000;
@@ -167,7 +167,7 @@ class TechnicalProcessRegistryTest {
   @Test
   void theIdleBackstopReArmsForAnActivelyStreamingProcess() throws Exception {
     registry.maxIdleMillis = 200;
-    TechnicalProcess process = registry.begin("repo-1", "ws-1");
+    TechnicalProcess process = registry.begin("repo-1", "ws-1", 1L);
     process.openSegment("chain");
 
     // Keep emitting past a single idle window: each line resets the idle clock, so a legitimately

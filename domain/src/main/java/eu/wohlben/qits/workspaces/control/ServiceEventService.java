@@ -40,7 +40,7 @@ public class ServiceEventService {
       LOG.warnf(e, "Failed to persist service event: %s", event.summary());
     }
     changePublisher.fire(
-        event.repoId(), event.workspaceId(), WorkspaceChangeHint.Topic.SERVICE_EVENTS);
+        event.repoId(), event.workspaceRowId(), WorkspaceChangeHint.Topic.SERVICE_EVENTS);
     if (event.severity() != null && event.severity() != ServiceEventSeverity.INFO) {
       try {
         agentNotifier.deliver(event);

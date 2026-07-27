@@ -77,6 +77,8 @@ public class ServiceProxyRouteTest {
 
   @Inject FakeRepositoryLookup repositories;
 
+  @Inject eu.wohlben.qits.workspaces.control.WorkspaceIds workspaceIds;
+
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
@@ -139,8 +141,8 @@ public class ServiceProxyRouteTest {
   /**
    * Stage a web-viewable service, provision its (fake) container, and register the projection by
    * starting it (leaving it STARTING — the caller decides whether to drive it READY). Config is
-   * staged before the workspace so the supervisor resolves the definition from the in-container
-   * config when the start registers it.
+   * staged before the container is provisioned, so the supervisor resolves the definition from the
+   * in-container config when the start registers it.
    */
   private Setup startService(String basePath) throws Exception {
     String repoId = TestOrigin.create(dataDir);
@@ -149,8 +151,12 @@ public class ServiceProxyRouteTest {
     // Unique per setup: the proxy/supervisor key instances by (workspaceId, serviceId) alone, so a
     // fixed id would collide with a previous test's stopped instance ("work" repeats across repos).
     String serviceId = SERVICE_NAME + "-" + serviceSeq.incrementAndGet();
+    // The workspace exists before its config is staged, because the config is keyed by the
+    // workspace's id and there is no id until the row is written. Creation writes only the row (the
+    // container is provisioned below), so nothing reads the config in between.
+    workspaceService.createWorkspace(repoId, "work", "master", "work");
     configReader.setConfig(
-        "work",
+        workspaceIds.of(repoId, "work"),
         new QitsConfig(
             null,
             null,
@@ -171,17 +177,17 @@ public class ServiceProxyRouteTest {
                     new QitsConfig.WebViewDecl(echoServer.actualPort(), null, basePath),
                     null)), // healthChecks
             null));
-    workspaceService.createWorkspace(repoId, "work", "master", "work");
     // The proxy origin resolves against a real (fake) container; provision it before READY.
-    workspaceService.ensureContainer(repoId, "work");
-    supervisor.start(repoId, "work", serviceId);
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "work"));
+    supervisor.start(workspaceIds.of(repoId, "work"), serviceId);
     return new Setup(repoId, serviceId);
   }
 
   /** Bring a started service READY by playing the service event the supervisor projects. */
   private Setup setUpReadyService(String basePath) throws Exception {
     Setup setup = startService(basePath);
-    driver.sink().onState(setup.repoId(), "work", SERVICE_NAME, "READY", null);
+    driver.sink().onState(
+        setup.repoId(), "work", workspaceIds.of(setup.repoId(), "work"), SERVICE_NAME, "READY", null);
     awaitStatus(setup, ServiceStatus.READY);
     return setup;
   }
@@ -193,7 +199,7 @@ public class ServiceProxyRouteTest {
     ServiceStatus last = null;
     while (System.currentTimeMillis() < deadline) {
       last =
-          supervisor.effectiveServices(setup.repoId(), "work").stream()
+          supervisor.effectiveServices(workspaceIds.of(setup.repoId(), "work")).stream()
               .filter(i -> i.definition().id().equals(setup.serviceId()))
               .findFirst()
               .map(i -> i.status())
@@ -208,9 +214,10 @@ public class ServiceProxyRouteTest {
 
   private void stopQuietly(Setup setup) {
     try {
-      supervisor.stop(setup.repoId(), "work", setup.serviceId());
+      supervisor.stop(workspaceIds.of(setup.repoId(), "work"), setup.serviceId());
       // The daemon owns the process — it reports STOPPED, which the projection settles.
-      driver.sink().onState(setup.repoId(), "work", SERVICE_NAME, "STOPPED", 0);
+      driver.sink().onState(
+        setup.repoId(), "work", workspaceIds.of(setup.repoId(), "work"), SERVICE_NAME, "STOPPED", 0);
       awaitStatus(setup, ServiceStatus.STOPPED);
     } catch (Exception ignored) {
       // already stopped or never live
@@ -221,7 +228,7 @@ public class ServiceProxyRouteTest {
   public void forwardsVerbatimRedirectsBareKeyAndRefusesAfterStop() throws Exception {
     Setup setup = setUpReadyService(null);
     try {
-      String base = "/service/work/" + setup.serviceId();
+      String base = "/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId();
 
       // Verbatim passthrough: the origin sees the unstripped path and query.
       given()
@@ -265,7 +272,7 @@ public class ServiceProxyRouteTest {
     // Stopped: the instance still resolves, but the proxy answers 502 instead of forwarding.
     int hitsBefore = echoHits.get();
     given()
-        .get("/service/work/" + setup.serviceId() + "/")
+        .get("/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/")
         .then()
         .statusCode(502)
         .body(containsString("not running"));
@@ -281,7 +288,7 @@ public class ServiceProxyRouteTest {
     Setup setup = setUpReadyService(null);
     try {
       given()
-          .get("/service/work/" + setup.serviceId() + "/index.html")
+          .get("/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/index.html")
           .then()
           .statusCode(200)
           .body(containsString("echo:"));
@@ -300,7 +307,7 @@ public class ServiceProxyRouteTest {
     // passthrough; the extra sub-path is part of the verbatim-forwarded path, never stripped.
     Setup setup = setUpReadyService("app");
     try {
-      String servedBase = "/service/work/" + setup.serviceId() + "/app";
+      String servedBase = "/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/app";
       given()
           .get(servedBase + "/main.js")
           .then()
@@ -327,7 +334,7 @@ public class ServiceProxyRouteTest {
     try {
       String body =
           given()
-              .get("/service/work/" + setup.serviceId() + "/")
+              .get("/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/")
               .then()
               .statusCode(200)
               .extract()

@@ -17,7 +17,11 @@ public class WorkspaceChangePublisher {
 
   @Inject Event<WorkspaceChangeHint> event;
 
-  public void fire(String repoId, String workspaceId, Topic topic) {
-    event.fireAsync(new WorkspaceChangeHint(repoId, workspaceId, topic));
+  /**
+   * Announce a change. { workspaceRowId} names the workspace scope; pass { null} for the
+   * repository scope, and null for both to reach the global channel.
+   */
+  public void fire(String repoId, Long workspaceRowId, Topic topic) {
+    event.fireAsync(new WorkspaceChangeHint(repoId, workspaceRowId, topic));
   }
 }

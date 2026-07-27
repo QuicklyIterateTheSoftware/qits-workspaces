@@ -32,23 +32,21 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
 
   @Inject ContainerRuntime containers;
 
+  @Inject eu.wohlben.qits.workspaces.persistence.WorkspaceRepository workspaces;
+
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
   @Override
   public Optional<Result> awaitBootstrap(
-      String repoId,
-      String workspaceId,
-      StepSink sink,
-      Duration connectTimeout,
-      Duration chainTimeout) {
-    return Optional.of(runChain(repoId, workspaceId, null, sink));
+      Long workspaceId, StepSink sink, Duration connectTimeout, Duration chainTimeout) {
+    return Optional.of(runChain(workspaceId, null, sink));
   }
 
   @Override
   public Optional<Result> runBootstrap(
-      String repoId, String workspaceId, String name, StepSink sink, Duration chainTimeout) {
-    return Optional.of(runChain(repoId, workspaceId, name, sink));
+      Long workspaceId, String name, StepSink sink, Duration chainTimeout) {
+    return Optional.of(runChain(workspaceId, name, sink));
   }
 
   /**
@@ -141,7 +139,20 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
   }
 
   /** Run the chain (or one named step) through the fake container, streaming to {@code sink}. */
-  private Result runChain(String repoId, String workspaceId, String onlyName, StepSink sink) {
+  /** The workspace the daemon would be running in, by id — what the real driver is keyed on. */
+  private eu.wohlben.qits.workspaces.entity.Workspace requireWorkspace(Long rowId) {
+    return io.quarkus.narayana.jta.QuarkusTransaction.requiringNew()
+        .call(
+            () ->
+                workspaces
+                    .findActiveById(rowId)
+                    .orElseThrow(() -> new IllegalStateException("no such workspace " + rowId)));
+  }
+
+  private Result runChain(Long rowId, String onlyName, StepSink sink) {
+    eu.wohlben.qits.workspaces.entity.Workspace ws = requireWorkspace(rowId);
+    String repoId = ws.repositoryId;
+    String workspaceId = ws.workspaceId;
     String container = containers.containerName(workspaceId, repoId);
     boolean ok = true;
     for (QitsConfig.BootstrapDecl step : readChain(repoId, workspaceId)) {

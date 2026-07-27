@@ -42,6 +42,8 @@ public class WorkspaceRelativeDataDirTest {
    * jar, so the same state is set up directly instead — the endpoints under test here are the
    * workspace ones below, not the seeding ones.
    */
+  @jakarta.inject.Inject eu.wohlben.qits.workspaces.control.WorkspaceIds workspaceIds;
+
   @jakarta.inject.Inject
   eu.wohlben.qits.workspaces.control.FakeRepositoryLookup repositories;
 
@@ -65,9 +67,9 @@ public class WorkspaceRelativeDataDirTest {
     given()
         .contentType(ContentType.JSON)
         .body(
-            new WorkspaceController.CreateWorkspaceRequest("rel-01", "master", "rel-branch", null))
+            new WorkspaceController.CreateWorkspaceRequest(repoId, "rel-01", "master", "rel-branch", null))
         .when()
-        .post("/api/repositories/" + repoId + "/workspaces")
+        .post("/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
@@ -76,7 +78,7 @@ public class WorkspaceRelativeDataDirTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/repositories/" + repoId + "/workspaces")
+        .get("/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -88,7 +90,7 @@ public class WorkspaceRelativeDataDirTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.MergeWorkspaceRequest("master"))
         .when()
-        .post("/api/repositories/" + repoId + "/workspaces/rel-01/merge")
+        .post("/api/workspaces/" + workspaceIds.of(repoId, "rel-01") + "/merge")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("hasConflicts", equalTo(false));
@@ -97,7 +99,7 @@ public class WorkspaceRelativeDataDirTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.DiscardWorkspaceRequest(null))
         .when()
-        .post("/api/repositories/" + repoId + "/workspaces/rel-01/discard")
+        .post("/api/workspaces/" + workspaceIds.of(repoId, "rel-01") + "/discard")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("success", equalTo(true));

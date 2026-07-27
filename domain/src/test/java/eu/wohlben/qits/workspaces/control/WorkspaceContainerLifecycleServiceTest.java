@@ -34,6 +34,8 @@ public class WorkspaceContainerLifecycleServiceTest {
   // context has no reconciler of its own to drive.
 
   @Inject FakeRepositoryLookup repositories;
+
+  @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
   @Inject GitExecutor git;
@@ -88,7 +90,7 @@ public class WorkspaceContainerLifecycleServiceTest {
         "exec against the never-provisioned container fails cleanly");
 
     // First use provisions: container up, branch checked out, status live.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.exists(container), "first use provisions the container");
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
     assertEquals(
@@ -104,21 +106,21 @@ public class WorkspaceContainerLifecycleServiceTest {
 
     // STOPPED (not provisioned): the daemon can't be connected, so clean stays unknown even if a
     // stale value were reported.
-    gitStatus.report("feat", false);
+    gitStatus.report(workspaceIds.of(repoId, "feat"), false);
     assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
     assertNull(workspaceDto(repoId, "feat").clean(), "no clean/dirty badge while not RUNNING");
 
     // RUNNING + reported dirty → clean == false.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
     assertEquals(Boolean.FALSE, workspaceDto(repoId, "feat").clean());
 
     // RUNNING + reported clean → clean == true.
-    gitStatus.report("feat", true);
+    gitStatus.report(workspaceIds.of(repoId, "feat"), true);
     assertEquals(Boolean.TRUE, workspaceDto(repoId, "feat").clean());
 
     // RUNNING but the daemon hasn't reported (yet) → unknown (null), not a stale value.
-    gitStatus.forget("feat");
+    gitStatus.forget(workspaceIds.of(repoId, "feat"));
     assertNull(workspaceDto(repoId, "feat").clean(), "RUNNING but unreported ⇒ unknown");
   }
 
@@ -128,21 +130,21 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
 
     // STOPPED: no daemon, so activity stays unknown even if a stale value were reported.
-    agentActivity.report("feat", AgentActivityState.BUSY);
+    agentActivity.report(workspaceIds.of(repoId, "feat"), AgentActivityState.BUSY);
     assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
     assertNull(workspaceDto(repoId, "feat").agentActivity(), "no activity while not RUNNING");
 
     // RUNNING + reported BUSY → surfaced.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
     assertEquals(AgentActivityState.BUSY, workspaceDto(repoId, "feat").agentActivity());
 
     // A later WAITING flip is reflected.
-    agentActivity.report("feat", AgentActivityState.WAITING);
+    agentActivity.report(workspaceIds.of(repoId, "feat"), AgentActivityState.WAITING);
     assertEquals(AgentActivityState.WAITING, workspaceDto(repoId, "feat").agentActivity());
 
     // RUNNING but nothing reported (no active agent) → null.
-    agentActivity.forget("feat");
+    agentActivity.forget(workspaceIds.of(repoId, "feat"));
     assertNull(workspaceDto(repoId, "feat").agentActivity(), "RUNNING but unreported ⇒ null");
   }
 
@@ -155,7 +157,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "master").runtimeStatus());
 
     // First use checks out the existing main branch (no branch ref to create).
-    workspaceService.ensureContainer(repoId, "master");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "master"));
     assertTrue(containers.exists(container));
     Path originPath = Path.of(dataDir, repoId, "origin");
     assertEquals(
@@ -173,7 +175,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     String masterBefore =
         git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim();
 
-    var result = workspaceService.mergeWorkspace(repoId, "feeder", "master");
+    var result = workspaceService.mergeWorkspace(workspaceIds.of(repoId, "feeder"), "master");
 
     assertFalse(result.hasConflicts(), "the host-side merge succeeds without a container");
     assertNotEquals(
@@ -202,7 +204,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerRecreatesALostContainerFromTheBranch() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     assertTrue(containers.exists(container));
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
@@ -213,7 +215,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
 
     // ensureContainer re-provisions from the durable branch and the workspace stays ACTIVE.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.exists(container), "container is re-provisioned");
     WorkspaceDto dto = workspaceDto(repoId, "feat");
     assertEquals(WorkspaceStatus.ACTIVE, dto.status());
@@ -224,10 +226,10 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerIsANoOpWhenAlreadyRunning() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
 
     // Should not throw and should leave the (same) container running.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.exists(containers.containerName("feat", repoId)));
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
   }
@@ -237,7 +239,7 @@ public class WorkspaceContainerLifecycleServiceTest {
       throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     String head = commitInContainer(container, "unpushed.txt");
 
@@ -249,7 +251,7 @@ public class WorkspaceContainerLifecycleServiceTest {
 
     // ensureContainer must start it back up in place — NOT no-op on mere presence, NOT re-clone —
     // so the unpushed commit survives and the runtime status reflects the live container.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.isRunning(container), "the exited container is started back up");
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
     assertEquals(head, containerHead(container), "restart-in-place keeps the unpushed commit");
@@ -259,7 +261,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerAbandonsWhenTheBranchIsGone() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
 
     // Both the container AND the durable branch disappear: the work no longer exists anywhere.
@@ -267,7 +269,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     Path originPath = Path.of(dataDir, repoId, "origin");
     git.exec(originPath.toFile(), "git", "branch", "-D", "--", "feat");
 
-    assertThrows(NotFoundException.class, () -> workspaceService.ensureContainer(repoId, "feat"));
+    assertThrows(NotFoundException.class, () -> workspaceService.ensureContainer(workspaceIds.of(repoId, "feat")));
 
     // The workspace is abandoned (the only path to abandonment) and drops off the active list.
     assertFalse(
@@ -281,10 +283,10 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void stopContainerPausesInPlaceKeepingTheWorkspaceActive() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
 
-    workspaceService.stopContainer(repoId, "feat");
+    workspaceService.stopContainer(workspaceIds.of(repoId, "feat"));
 
     // A graceful stop PAUSES in place (docker stop), it does not remove the container: the
     // container
@@ -296,7 +298,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertEquals(WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus());
 
     // ...and it can be brought straight back — resumed in place (start), not re-provisioned.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.isRunning(container));
   }
 
@@ -304,16 +306,16 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void stopContainerPreservesUncommittedWorkingTreeChanges() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
 
     // Working-tree state that is NOT a pushed commit — the exact thing the old stop (docker rm -f +
     // re-clone) silently destroyed: an untracked file. A real pause must keep it.
     containers.exec(container, "/workspace", Map.of(), "bash", "-lc", "echo draft > scratch.txt");
 
-    workspaceService.stopContainer(repoId, "feat");
+    workspaceService.stopContainer(workspaceIds.of(repoId, "feat"));
     // Resumed in place (same container, not a fresh clone).
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
 
     assertEquals(
         "draft",
@@ -332,14 +334,14 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void deleteContainerRemovesTheContainerButKeepsBranchAndWorkspace() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     // The realistic entry point: the UI offers "Delete container" on a stopped workspace, whose
     // container is still present (docker stop, not rm).
-    workspaceService.stopContainer(repoId, "feat");
+    workspaceService.stopContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.exists(container), "a stopped container is still present");
 
-    workspaceService.deleteContainer(repoId, "feat");
+    workspaceService.deleteContainer(workspaceIds.of(repoId, "feat"));
 
     // The container is torn down (docker rm)...
     assertFalse(containers.exists(container), "delete removes the container");
@@ -351,7 +353,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertEquals(WorkspaceRuntimeStatus.STOPPED, dto.runtimeStatus());
 
     // ...and Start recreates a fresh container from the branch.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(containers.isRunning(container), "Start recreates the container from the branch");
   }
 
@@ -359,10 +361,10 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void deleteContainerFiresStoppingImmediatelyBeforeRm() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     stoppingRecorder.clear();
 
-    workspaceService.deleteContainer(repoId, "feat");
+    workspaceService.deleteContainer(workspaceIds.of(repoId, "feat"));
 
     var seen = stoppingRecorder.forKey(repoId, "feat");
     assertEquals(1, seen.size(), "deleteContainer fires exactly one stopping event");
@@ -374,8 +376,9 @@ public class WorkspaceContainerLifecycleServiceTest {
 
   @Test
   public void deleteContainerOnAnUnknownWorkspaceIs404() throws Exception {
-    String repoId = clonedRepo();
-    assertThrows(NotFoundException.class, () -> workspaceService.deleteContainer(repoId, "nope"));
+    // An id no workspace has — the label is no longer what identifies one.
+    clonedRepo();
+    assertThrows(NotFoundException.class, () -> workspaceService.deleteContainer(-1L));
   }
 
   @Test
@@ -383,7 +386,7 @@ public class WorkspaceContainerLifecycleServiceTest {
       throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     String head = commitInContainer(container, "survivor.txt");
 
@@ -394,7 +397,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     // ensureContainer reattaches it (the daemon skips re-clone on the populated /workspace).
     containers.rm(container);
     assertTrue(workspaceVolumeExists("feat"), "an incidental rm keeps the per-workspace volume");
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertEquals(
         head,
         containerHead(container),
@@ -407,7 +410,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     startedRecorder.clear();
 
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
 
     assertTrue(
         startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
@@ -418,13 +421,13 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerFiresStartedOnExitedRestart() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     ((FakeContainerRuntime) containers).markExited(container);
     startedRecorder.clear();
 
     // Restart-in-place of an Exited container is the second cold->RUNNING transition.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
 
     assertTrue(
         startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
@@ -435,7 +438,7 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void ensureContainerDoesNotFireStartedWhenAlreadyRunning() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     // Wait for the fresh provision's (async) event to land before clearing, so a late delivery of
     // it
     // can't masquerade as a second fire below.
@@ -444,7 +447,7 @@ public class WorkspaceContainerLifecycleServiceTest {
 
     // The already-running short-circuit must NOT fire — this is what terminates the auto-start
     // reentrancy loop.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
 
     Thread.sleep(500); // give any (erroneous) async fire time to land
     assertEquals(
@@ -457,10 +460,10 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void stopContainerFiresStoppingWhileTheContainerIsStillRunning() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     stoppingRecorder.clear();
 
-    workspaceService.stopContainer(repoId, "feat");
+    workspaceService.stopContainer(workspaceIds.of(repoId, "feat"));
 
     var seen = stoppingRecorder.forKey(repoId, "feat");
     assertEquals(1, seen.size(), "stopContainer fires exactly one stopping event");
@@ -475,11 +478,11 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void discardFiresStoppingImmediatelyBeforeRm() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
-    gitStatus.report("feat", true); // a discard is destructive: only an explicit CLEAN permits it
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
+    gitStatus.report(workspaceIds.of(repoId, "feat"), true); // a discard is destructive: only an explicit CLEAN permits it
     stoppingRecorder.clear();
 
-    workspaceService.discardWorkspace(repoId, "feat");
+    workspaceService.discardWorkspace(workspaceIds.of(repoId, "feat"));
 
     var seen = stoppingRecorder.forKey(repoId, "feat");
     assertEquals(1, seen.size(), "discard fires exactly one stopping event");
@@ -504,9 +507,9 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void integrateRefusesADirtyWorkspaceBranch() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     makeDirty(containers.containerName("feat", repoId));
-    gitStatus.report("feat", false); // the daemon is what tells the host a tree is dirty
+    gitStatus.report(workspaceIds.of(repoId, "feat"), false); // the daemon is what tells the host a tree is dirty
 
     BadRequestException ex =
         assertThrows(
@@ -519,13 +522,13 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void abandonRefusesADirtyWorkspace() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     makeDirty(containers.containerName("feat", repoId));
-    gitStatus.report("feat", false); // the daemon is what tells the host a tree is dirty
+    gitStatus.report(workspaceIds.of(repoId, "feat"), false); // the daemon is what tells the host a tree is dirty
 
     BadRequestException ex =
         assertThrows(
-            BadRequestException.class, () -> workspaceService.discardWorkspace(repoId, "feat"));
+            BadRequestException.class, () -> workspaceService.discardWorkspace(workspaceIds.of(repoId, "feat")));
     assertTrue(ex.getMessage().contains("uncommitted changes"), ex.getMessage());
     assertTrue(
         workspaceService.listWorkspaces(repoId).stream()
@@ -537,11 +540,11 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void abandonSucceedsOnACleanWorkspace() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
-    gitStatus.report("feat", true); // "clean" is now a daemon report, not a host git status
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
+    gitStatus.report(workspaceIds.of(repoId, "feat"), true); // "clean" is now a daemon report, not a host git status
 
     // A clean working tree passes the guard: abandon proceeds and drops the workspace off the list.
-    workspaceService.discardWorkspace(repoId, "feat");
+    workspaceService.discardWorkspace(workspaceIds.of(repoId, "feat"));
     assertFalse(
         workspaceService.listWorkspaces(repoId).stream()
             .anyMatch(w -> "feat".equals(w.workspaceId())),
@@ -552,18 +555,18 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void beginRecreateContainerKeepsThePersistentVolumeAndItsCheckout() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     String head = commitInContainer(container, "keep.txt"); // committed ⇒ working tree clean
     // Recreate's gate admits only an explicit-clean daemon report; a committed tree qualifies.
-    gitStatus.report("feat", true);
+    gitStatus.report(workspaceIds.of(repoId, "feat"), true);
     assertTrue(
         workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
     startedRecorder.clear();
 
     // An image-update recreate tears the container down and provisions a fresh one — but must KEEP
     // the volume (the core win), so the checkout is reattached, not re-cloned from scratch.
-    workspaceService.beginRecreateContainer(repoId, "feat");
+    workspaceService.beginRecreateContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(
         startedRecorder.awaitCount(repoId, "feat", 1, 5_000),
         "recreate re-provisions the container");
@@ -576,20 +579,20 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void deleteContainerRemovesThePersistentVolumeSoStartReClonesFresh() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     String container = containers.containerName("feat", repoId);
     String unpushed = commitInContainer(container, "doomed.txt");
     assertTrue(
         workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
 
     // The one deliberate reset: delete-container drops the container AND its volume.
-    workspaceService.deleteContainer(repoId, "feat");
+    workspaceService.deleteContainer(workspaceIds.of(repoId, "feat"));
     assertFalse(workspaceVolumeExists("feat"), "delete-container removes the persistent volume");
 
     // Start therefore re-creates an empty volume and re-clones a fresh checkout from origin — so
     // the
     // never-pushed commit is gone, honoring the verb's "loses uncommitted changes" contract.
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(workspaceVolumeExists("feat"), "Start re-creates the volume");
     assertNotEquals(
         unpushed, containerHead(container), "the fresh clone does not carry the discarded commit");
@@ -599,13 +602,13 @@ public class WorkspaceContainerLifecycleServiceTest {
   public void discardWorkspaceRemovesThePersistentVolume() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
-    workspaceService.ensureContainer(repoId, "feat");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     assertTrue(
         workspaceVolumeExists("feat"), "precondition: the workspace has a persistent volume");
-    gitStatus.report("feat", true); // a discard is destructive: only an explicit CLEAN permits it
+    gitStatus.report(workspaceIds.of(repoId, "feat"), true); // a discard is destructive: only an explicit CLEAN permits it
 
     // Abandon (discard) throws the work away: container + branch + volume all go.
-    workspaceService.discardWorkspace(repoId, "feat");
+    workspaceService.discardWorkspace(workspaceIds.of(repoId, "feat"));
 
     assertFalse(workspaceVolumeExists("feat"), "discard removes the persistent volume");
     assertFalse(

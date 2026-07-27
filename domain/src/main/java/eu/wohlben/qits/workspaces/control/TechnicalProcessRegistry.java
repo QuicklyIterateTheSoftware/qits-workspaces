@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.control;
 
+import eu.wohlben.qits.workspaces.entity.Workspace;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -48,6 +49,8 @@ public class TechnicalProcessRegistry implements WorkspaceProcessTracker {
 
   @Inject WorkspaceChangePublisher changePublisher;
 
+  @Inject WorkspaceResolver workspaceResolver;
+
   private final Map<String, TechnicalProcess> byId = new ConcurrentHashMap<>();
   private final Map<String, String> activeByWorkspace = new ConcurrentHashMap<>();
   private final Map<String, RepoActive> activeByRepository = new ConcurrentHashMap<>();
@@ -86,13 +89,14 @@ public class TechnicalProcessRegistry implements WorkspaceProcessTracker {
 
   /** Register a new process for a workspace; the newest one is the workspace's active process. */
   @Override
-  public TechnicalProcess begin(String repoId, String workspaceId) {
+  public TechnicalProcess begin(String repoId, String workspaceId, Long workspaceRowId) {
     String id = UUID.randomUUID().toString();
-    TechnicalProcess process = new TechnicalProcess(id, repoId, workspaceId, this::onDone);
+    TechnicalProcess process =
+        new TechnicalProcess(id, repoId, workspaceId, workspaceRowId, this::onDone);
     byId.put(id, process);
     activeByWorkspace.put(workspaceKey(repoId, workspaceId), id);
     scheduleIdleReaper(process);
-    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.PROCESS);
+    changePublisher.fire(repoId, workspaceRowId, WorkspaceChangeHint.Topic.PROCESS);
     return process;
   }
 
@@ -125,7 +129,7 @@ public class TechnicalProcessRegistry implements WorkspaceProcessTracker {
       return new RepoProcessLease.Reused(current.processId());
     }
     String id = UUID.randomUUID().toString();
-    TechnicalProcess process = new TechnicalProcess(id, repoId, null, this::onDone);
+    TechnicalProcess process = new TechnicalProcess(id, repoId, null, null, this::onDone);
     byId.put(id, process);
     activeByRepository.put(repoId, RepoActive.process(id, kind));
     scheduleIdleReaper(process);
@@ -198,8 +202,23 @@ public class TechnicalProcessRegistry implements WorkspaceProcessTracker {
     return Optional.ofNullable(id == null ? null : byId.get(id));
   }
 
-  /** The id of the workspace's currently-running process, if any (cleared on done). */
+  /**
+   * The id of the workspace's currently-running process, if any (cleared on done) — the port's
+   * route-facing form, addressing the workspace by its identifier.
+   *
+   * <p>It resolves the id to the (repository, label) pair the in-memory index is keyed on. The
+   * index stays keyed that way deliberately: it is a pure in-process map that also holds
+   * repository-scoped processes, and it is populated by {@link #begin} from the container
+   * lifecycle, which knows the pair and not the row. The composite key exists only because the
+   * label alone was never unique; the id is what callers name.
+   */
   @Override
+  public Optional<String> activeFor(Long id) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    return activeFor(workspace.repositoryId, workspace.workspaceId);
+  }
+
+  /** The in-memory lookup behind {@link #activeFor(Long)}, keyed as the index itself is. */
   public Optional<String> activeFor(String repoId, String workspaceId) {
     return Optional.ofNullable(activeByWorkspace.get(workspaceKey(repoId, workspaceId)));
   }
@@ -225,7 +244,7 @@ public class TechnicalProcessRegistry implements WorkspaceProcessTracker {
     if (process.workspaceId() != null) {
       activeByWorkspace.remove(workspaceKey(process.repoId(), process.workspaceId()), process.id());
       changePublisher.fire(
-          process.repoId(), process.workspaceId(), WorkspaceChangeHint.Topic.PROCESS);
+          process.repoId(), process.workspaceRowId(), WorkspaceChangeHint.Topic.PROCESS);
     } else if (process.repoId() != null) {
       clearRepositoryIfCurrent(process);
       changePublisher.fire(process.repoId(), null, WorkspaceChangeHint.Topic.PROCESS);

@@ -23,15 +23,15 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeWorkspaceConfigReader implements WorkspaceConfigReader {
 
-  private final Map<String, WorkspaceConfigView> views = new ConcurrentHashMap<>();
+  private final Map<Long, WorkspaceConfigView> views = new ConcurrentHashMap<>();
 
   @Override
-  public Optional<WorkspaceConfigView> readConfig(String workspaceId) {
+  public Optional<WorkspaceConfigView> readConfig(Long workspaceId) {
     return Optional.ofNullable(views.get(workspaceId));
   }
 
   /** Stage {@code config} as {@code workspaceId}'s in-container config (warning-free). */
-  public void setConfig(String workspaceId, QitsConfig config) {
+  public void setConfig(Long workspaceId, QitsConfig config) {
     views.put(workspaceId, new WorkspaceConfigView(config, null));
   }
 

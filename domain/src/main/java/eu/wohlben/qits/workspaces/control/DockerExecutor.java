@@ -103,7 +103,7 @@ public class DockerExecutor implements ContainerRuntime {
   }
 
   @Override
-  public String run(String repoId, String workspaceId, String branch, String parent) {
+  public String run(String repoId, String workspaceId, Long rowId, String branch, String parent) {
     String name = containerName(workspaceId, repoId);
     // Create-if-absent the labeled per-workspace /workspace volume before the container mounts it,
     // so recreation reattaches the same checkout (and dangling-volume reconcile has its handle).
@@ -114,7 +114,8 @@ public class DockerExecutor implements ContainerRuntime {
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
-    argv.addAll(containerFactory.forWorkspace(repoId, workspaceId, branch, parent).toRunArgv());
+    argv.addAll(
+        containerFactory.forWorkspace(repoId, workspaceId, rowId, branch, parent).toRunArgv());
 
     ExecResult result = runCapturing(null, argv);
     if (result.exitCode() != 0) {
@@ -148,6 +149,7 @@ public class DockerExecutor implements ContainerRuntime {
   public String run(
       String repoId,
       String workspaceId,
+      Long rowId,
       String branch,
       String parent,
       java.util.function.Consumer<String> onLine) {
@@ -156,7 +158,8 @@ public class DockerExecutor implements ContainerRuntime {
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
-    argv.addAll(containerFactory.forWorkspace(repoId, workspaceId, branch, parent).toRunArgv());
+    argv.addAll(
+        containerFactory.forWorkspace(repoId, workspaceId, rowId, branch, parent).toRunArgv());
 
     ExecResult result = runCapturing(null, argv, onLine);
     if (result.exitCode() != 0) {

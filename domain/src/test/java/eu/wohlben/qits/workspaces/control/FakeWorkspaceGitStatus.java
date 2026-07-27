@@ -23,35 +23,35 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeWorkspaceGitStatus implements WorkspaceGitStatus {
 
-  private final ConcurrentHashMap<String, Boolean> clean = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<String, String> head = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, Boolean> clean = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Long, String> head = new ConcurrentHashMap<>();
 
-  public void report(String workspaceId, boolean isClean) {
+  public void report(Long workspaceId, boolean isClean) {
     clean.put(workspaceId, isClean);
   }
 
   /** Report both halves of a {@code GitStatus} frame, as a live daemon sends them together. */
-  public void report(String workspaceId, boolean isClean, String headSha) {
+  public void report(Long workspaceId, boolean isClean, String headSha) {
     clean.put(workspaceId, isClean);
     head.put(workspaceId, headSha);
   }
 
-  public void reportHead(String workspaceId, String headSha) {
+  public void reportHead(Long workspaceId, String headSha) {
     head.put(workspaceId, headSha);
   }
 
-  public void forget(String workspaceId) {
+  public void forget(Long workspaceId) {
     clean.remove(workspaceId);
     head.remove(workspaceId);
   }
 
   @Override
-  public Optional<Boolean> isClean(String workspaceId) {
+  public Optional<Boolean> isClean(Long workspaceId) {
     return Optional.ofNullable(clean.get(workspaceId));
   }
 
   @Override
-  public Optional<String> head(String workspaceId) {
+  public Optional<String> head(Long workspaceId) {
     return Optional.ofNullable(head.get(workspaceId));
   }
 }
