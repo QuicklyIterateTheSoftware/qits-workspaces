@@ -55,7 +55,7 @@ public class WorkspaceControllerTest {
         .body(
             new WorkspaceController.CreateWorkspaceRequest(repoId, "step-01", "feature", "step-work", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("workspace.workspaceId", equalTo("step-01"));
@@ -65,7 +65,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.MergeWorkspaceRequest("master"))
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "step-01") + "/merge")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "step-01") + "/merge")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("hasConflicts", equalTo(false));
@@ -75,7 +75,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.DiscardWorkspaceRequest(null))
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "step-01") + "/discard")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "step-01") + "/discard")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("success", equalTo(true));
@@ -90,14 +90,14 @@ public class WorkspaceControllerTest {
         .body(
             new WorkspaceController.CreateWorkspaceRequest(repoId, "wt-list", "master", "wt-branch", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.workspace.workspaceId", hasItem("wt-list"))
@@ -118,7 +118,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest(repoId, "fork-a", "master", "branch-a", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
@@ -126,14 +126,14 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest(repoId, "fork-b", "master", "branch-b", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -156,7 +156,7 @@ public class WorkspaceControllerTest {
             new WorkspaceController.CreateWorkspaceRequest(repoId, 
                 "feature-ws", "master", "feature", null, true))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("workspace.workspaceId", equalTo("feature-ws"))
@@ -168,7 +168,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -186,7 +186,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest(repoId, "dup-ws", "master", "feature", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.CONFLICT.getStatusCode());
   }
@@ -199,7 +199,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest(repoId, "ab-wt", "master", "ab-branch", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
@@ -208,7 +208,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.find { it.workspace.workspaceId == 'ab-wt' }.workspace.ahead", equalTo(0))
@@ -220,7 +220,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest(repoId, id, parent, branch, null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
   }
@@ -230,7 +230,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.MergeWorkspaceRequest(target))
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, workspaceId) + "/merge")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, workspaceId) + "/merge")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
   }
@@ -252,7 +252,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -282,7 +282,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -326,7 +326,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, workspaceId) + "/ensure-container")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, workspaceId) + "/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("technicalProcessId", notNullValue());
@@ -350,7 +350,7 @@ public class WorkspaceControllerTest {
       String processId =
           given()
               .when()
-              .get("/api/workspaces/" + workspaceIds.of(repoId, workspaceId) + "/active-process")
+              .get("/workspaces/api/workspaces/" + workspaceIds.of(repoId, workspaceId) + "/active-process")
               .then()
               .statusCode(Response.Status.OK.getStatusCode())
               .extract()
@@ -407,7 +407,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries", hasSize(1))
@@ -430,7 +430,7 @@ public class WorkspaceControllerTest {
         .contentType(ContentType.JSON)
         .when()
         .get(
-            "/api/workspaces/"
+            "/workspaces/api/workspaces/"
                 + workspaceIds.of(repoId, "master")
                 + "/files/content?path=does-not-exist.txt")
         .then()
@@ -452,7 +452,7 @@ public class WorkspaceControllerTest {
           .contentType(ContentType.JSON)
           .body(new WorkspaceController.CreateWorkspaceRequest(repoId, badId, "master", "wt-branch", null))
           .when()
-          .post("/api/workspaces")
+          .post("/workspaces/api/workspaces")
           .then()
           .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
     }
@@ -468,7 +468,7 @@ public class WorkspaceControllerTest {
         .body(
             new WorkspaceController.CreateWorkspaceRequest(repoId, "wt-run", "master", "run-branch", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("workspace.runtimeStatus", equalTo("STOPPED"));
@@ -478,7 +478,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "wt-run") + "/ensure-container")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "wt-run") + "/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("technicalProcessId", notNullValue());
@@ -489,7 +489,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "wt-run") + "/stop-container")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "wt-run") + "/stop-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("runtimeStatus", equalTo("STOPPED"));
@@ -498,7 +498,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "wt-run") + "/ensure-container")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "wt-run") + "/ensure-container")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("technicalProcessId", notNullValue());
@@ -517,7 +517,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "rc-unknown") + "/recreate-container")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "rc-unknown") + "/recreate-container")
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -530,7 +530,7 @@ public class WorkspaceControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .post("/api/workspaces/-1/recreate-container")
+        .post("/workspaces/api/workspaces/-1/recreate-container")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode());
   }
@@ -539,7 +539,7 @@ public class WorkspaceControllerTest {
   private void assertRuntimeStatus(String repoId, String workspaceId, String expected) {
     given()
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -566,7 +566,7 @@ public class WorkspaceControllerTest {
       """;
 
   private String componentMapUrl(String repoId) {
-    return "/api/workspaces/" + workspaceIds.of(repoId, "master") + "/component-map";
+    return "/workspaces/api/workspaces/" + workspaceIds.of(repoId, "master") + "/component-map";
   }
 
 
@@ -575,7 +575,7 @@ public class WorkspaceControllerTest {
 
 
   private String detectionUrl(String repoId) {
-    return "/api/workspaces/" + workspaceIds.of(repoId, "master") + "/detection";
+    return "/workspaces/api/workspaces/" + workspaceIds.of(repoId, "master") + "/detection";
   }
 
 

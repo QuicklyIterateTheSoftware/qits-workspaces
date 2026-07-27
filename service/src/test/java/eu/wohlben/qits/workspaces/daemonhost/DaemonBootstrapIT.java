@@ -109,7 +109,7 @@ public class DaemonBootstrapIT {
             .actualPort();
 
     try {
-      String url = "ws://host.docker.internal:" + port + "/api/workspace-daemon/it-ws";
+      String url = "ws://host.docker.internal:" + port + "/workspaces/daemon/it-ws";
       run(
           RUNTIME,
           "run",

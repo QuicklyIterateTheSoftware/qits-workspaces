@@ -32,6 +32,14 @@ import org.jboss.logging.Logger;
  * unqualified key used to produce. A refused connection is a workspace whose daemon needs its
  * container recreated to pick up the id-addressed URL.
  *
+ * <p><strong>Its path deliberately keeps no {@code /workspaces} segment</strong>, while {@link
+ * DaemonControlSocket} moved to {@code /workspaces/daemon/{id}} with the rest of this service's
+ * surface. Prefixing this one would defeat the only thing it does: the address is not ours to
+ * choose, it is whatever was already baked into a running container's environment. That leaves it
+ * unreachable through qits-gateway, which routes {@code /workspaces/*} and nothing else here — and
+ * that is correct too, since its callers are daemons on qits-net dialling the container directly,
+ * never a browser coming through the gateway.
+ *
  * <p>Delete this once no container provisioned against the old URL can still be running.
  */
 @WebSocket(path = "/api/workspace-daemon/{workspaceId}")

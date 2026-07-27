@@ -12,9 +12,12 @@ import org.jboss.logging.Logger;
 /**
  * Resolves the address a workspace container uses to reach this qits instance. Every host-facing
  * URL a container consumes is composed as {@code http://<qitsHost()>:<qits-port>/...} from this one
- * resolver: the git clone/push endpoint ({@code /git/...}, {@code WorkspaceService}), the OTLP
- * receiver ({@code /api/otel}, {@code OtelEnvironment}), and the coding agent's MCP servers ({@code
- * /mcp/...}, {@code AgentLaunchService}). Made a first-class concern because the right value
+ * resolver: the git clone/push endpoint ({@code /artifacts/git/...}, {@code WorkspaceService}), the
+ * OTLP receiver ({@code /observability/api/otel}, {@code OtelEnvironment}), the coding agent's MCP
+ * servers ({@code /projects/mcp}, {@code AgentLaunchService}) and this service's own daemon control
+ * socket ({@code /workspaces/daemon/<id>}, {@code WorkspaceContainerFactory}) — each under its
+ * owning service's gateway segment, which the gateway routes verbatim by prefix. Only the host and
+ * port come from here; the path is the callee's. Made a first-class concern because the right value
  * differs by environment and getting it wrong is the silent failure mode of the whole feature:
  *
  * <ul>

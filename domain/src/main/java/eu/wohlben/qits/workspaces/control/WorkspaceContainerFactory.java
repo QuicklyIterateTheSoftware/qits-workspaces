@@ -296,7 +296,7 @@ public class WorkspaceContainerFactory {
             + qitsHostResolver.qitsHost()
             + ":"
             + qitsPort
-            + "/api/workspace-daemon/id/"
+            + "/workspaces/daemon/"
             + rowId);
     container.env("QITS_WORKSPACE_DAEMON_WORKSPACE_ID", workspaceId);
     container.env("QITS_WORKSPACE_DAEMON_REPOSITORY_ID", repoId);

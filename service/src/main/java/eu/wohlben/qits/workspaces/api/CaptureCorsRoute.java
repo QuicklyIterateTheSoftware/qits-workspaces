@@ -5,12 +5,13 @@ import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * Opens CORS on exactly {@code /api/capture} — and nothing else. The capturing app's browser posts
- * cross-origin from whatever origin the app runs on, so this one path answers preflight and echoes
- * permissive headers; the rest of the qits API stays same-origin-only (deliberately not {@code
- * quarkus.http.cors}, which would open every endpoint).
+ * Opens CORS on exactly {@link CaptureResource}'s path — and nothing else. The capturing app's
+ * browser posts cross-origin from whatever origin the app runs on, so this one path answers
+ * preflight and echoes permissive headers; the rest of the qits API stays same-origin-only
+ * (deliberately not {@code quarkus.http.cors}, which would open every endpoint).
  */
 @ApplicationScoped
 public class CaptureCorsRoute {
@@ -23,8 +24,19 @@ public class CaptureCorsRoute {
    */
   private static final int BEFORE_REST = 500;
 
+  /**
+   * The JAX-RS prefix, read rather than repeated. This is a raw router route, so it does <b>not</b>
+   * move with {@code quarkus.rest.path} the way {@link CaptureResource}'s {@code POST} does — and a
+   * preflight on a different path from the request it clears is worth nothing. Deriving it from the
+   * same key is what keeps the two from drifting apart.
+   */
+  @ConfigProperty(name = "quarkus.rest.path", defaultValue = "/")
+  String restPath;
+
   void init(@Observes Router router) {
-    router.route("/api/capture").order(BEFORE_REST).handler(this::cors);
+    // Route patterns are relative to quarkus.http.root-path (the router is mounted under it), so
+    // only the JAX-RS prefix belongs here — RootPath just normalizes it to a strippable form.
+    router.route(RootPath.prefix(restPath) + "/capture").order(BEFORE_REST).handler(this::cors);
   }
 
   private void cors(RoutingContext rc) {

@@ -58,7 +58,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.CreateWorkspaceRequest(repoId, id, parent, branch, null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
   }
@@ -80,7 +80,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", null, null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("commitHash", not(emptyOrNullString()))
@@ -95,7 +95,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("commitHash", not(emptyOrNullString()));
@@ -109,7 +109,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("master", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -122,7 +122,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("-D", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -135,7 +135,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -146,7 +146,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", "master", null))
         .when()
-        .post("/api/repositories/does-not-exist/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=does-not-exist")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode());
   }
@@ -161,7 +161,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("auto-b", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("hasConflicts", equalTo(false))
@@ -170,7 +170,7 @@ public class BranchControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.workspace.workspaceId", not(hasItem("auto-wt")));
@@ -187,7 +187,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("pb", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("cleanedUp", equalTo(false));
@@ -195,7 +195,7 @@ public class BranchControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.workspace.workspaceId", hasItem("pwt"));
@@ -211,7 +211,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", "master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("hasConflicts", equalTo(false))
@@ -233,7 +233,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.CleanupBranchRequest("elig-b", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/cleanup")
+        .post("/workspaces/api/branches/cleanup?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("success", equalTo(true));
@@ -241,7 +241,7 @@ public class BranchControllerTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.workspace.workspaceId", not(hasItem("elig-wt")));
@@ -256,7 +256,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", "ahead-b", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/merge")
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
@@ -264,7 +264,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.CleanupBranchRequest("ahead-b", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/cleanup")
+        .post("/workspaces/api/branches/cleanup?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -279,7 +279,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.CleanupBranchRequest("par-b", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/cleanup")
+        .post("/workspaces/api/branches/cleanup?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -292,7 +292,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.CleanupBranchRequest("master", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/cleanup")
+        .post("/workspaces/api/branches/cleanup?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
@@ -305,7 +305,7 @@ public class BranchControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.CleanupBranchRequest("", null))
         .when()
-        .post("/api/repositories/" + repoId + "/branches/cleanup")
+        .post("/workspaces/api/branches/cleanup?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }

@@ -111,7 +111,7 @@ public class WorkspaceController {
     /**
      * The workspace's state at submit time plus the technical process streaming the start — watch
      * it live (replay + live + terminal {@code done}) at {@code
-     * /api/technical-processes/{technicalProcessId}/events}.
+     * /workspaces/api/technical-processes/{technicalProcessId}/events}.
      */
     public record Response(WorkspaceDto workspace, String technicalProcessId) {}
   }
@@ -186,7 +186,7 @@ public class WorkspaceController {
   public static record RecreateContainerRequest() {
     /**
      * The workspace's state at submit time plus the technical process streaming the recreate —
-     * watch it live at {@code /api/technical-processes/{technicalProcessId}/events}.
+     * watch it live at {@code /workspaces/api/technical-processes/{technicalProcessId}/events}.
      */
     public record Response(WorkspaceDto workspace, String technicalProcessId) {}
   }

@@ -16,17 +16,24 @@ import org.jboss.logging.Logger;
  * (docs/epics/qits-workspace-daemon/). It owns only the WebSocket lifecycle and JSON framing —
  * {@link WorkspaceDaemonRegistry} owns the state and correlated traffic.
  *
- * <p>Reachability mirrors the container's other channels ({@code /git}, {@code /api/otel}, {@code
- * /mcp}): a plain {@code ws://} connection over qits-net on the main HTTP port, made token-free in
- * {@code PublicPaths}. {@code SameOriginUpgradeCheck} permits it because {@code workspace-daemon}
- * is a non-browser client and sends no {@code Origin}.
+ * <p>Reachability mirrors the container's other channels ({@code /artifacts/git}, {@code
+ * /observability/api/otel}, {@code /projects/mcp}): a plain {@code ws://} connection over qits-net
+ * on the main HTTP port, made token-free in {@code PublicPaths}. {@code SameOriginUpgradeCheck}
+ * permits it because {@code workspace-daemon} is a non-browser client and sends no {@code Origin}.
+ *
+ * <p><strong>The path is a cross-repo contract.</strong> {@code WorkspaceContainerFactory} injects
+ * {@code ws://qits-workspaces:8080/workspaces/daemon/<id>} as {@code QITS_WORKSPACE_DAEMON_URL} into
+ * every container it creates, and qits-workspace-daemon dials exactly that; the two must be changed
+ * together. {@code daemon} is a second-level segment beside {@code api} because this is not a JSON
+ * API — and note a {@code @WebSocket} path is a literal that does <em>not</em> follow {@code
+ * quarkus.rest.path}, so it carries the {@code /workspaces} segment itself.
  *
  * <p>Part 1: the socket carries the {@code Hello}/{@code Ack} handshake, heartbeats, {@code
  * workspace-daemon}'s own logs, and — for the demonstration/extended tests only — a {@code
  * RunCommand} round-trip. It drives no existing behaviour; the {@code docker exec} paths are
  * untouched.
  */
-@WebSocket(path = "/api/workspace-daemon/id/{id}")
+@WebSocket(path = "/workspaces/daemon/{id}")
 public class DaemonControlSocket {
 
   private static final Logger LOG = Logger.getLogger(DaemonControlSocket.class);

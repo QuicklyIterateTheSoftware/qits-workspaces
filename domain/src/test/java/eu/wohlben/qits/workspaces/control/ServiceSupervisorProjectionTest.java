@@ -200,7 +200,7 @@ public class ServiceSupervisorProjectionTest {
     ServiceInstanceDto ready = instanceOf(repoId, id);
     assertEquals(ServiceStatus.READY, ready.status());
     assertEquals(
-        "/service/" + workspaceIds.of(repoId, "work") + "/" + id + "/app/",
+        "/workspaces/service/" + workspaceIds.of(repoId, "work") + "/" + id + "/app/",
         ready.proxyPath(),
         "the served base is the proxy prefix plus the basePath (entryPath is not part of it)");
     assertEquals("greeting", ready.definition().webView().entryPath());

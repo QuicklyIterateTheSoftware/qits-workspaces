@@ -75,7 +75,7 @@ The **branch** is the resource a workspace claims. At most one ACTIVE workspace 
 `(repositoryId, branch)`, enforced in `createWorkspace` and structurally by `UQ_workspace_active_branch`.
 
 The **daemon control plane** is keyed on the id too: `DaemonControlSocket` is
-`/api/workspace-daemon/id/{id}` and `WorkspaceDaemonRegistry`'s maps are `Map<Long, …>`. A daemon
+`/workspaces/daemon/{id}` and `WorkspaceDaemonRegistry`'s maps are `Map<Long, …>`. A daemon
 still announces its own label in its `Hello`, and the registry keeps it (`DaemonConnection.label`)
 purely so events and log lines read readably.
 
@@ -86,7 +86,58 @@ class, not as a compile error, so it is worth knowing before you type `Long`.
 `LegacyDaemonControlSocket` serves the old label path for containers provisioned before the move —
 their `QITS_WORKSPACE_DAEMON_URL` was injected at creation and only a recreate re-injects it. It
 resolves the label and **refuses when more than one active workspace carries it**, which is the
-collision the id exists to remove. Delete it once no such container can still be running.
+collision the id exists to remove. Its path deliberately keeps no `/workspaces` segment: the address
+is not ours to pick, it is whatever is already baked into a running container. Delete it once no
+such container can still be running.
+
+## Where this service answers
+
+`/workspaces/<second level>/…`, always. The gateway routes **verbatim by prefix**, so the service
+serves the prefixed path itself; there is no unprefixed form, on the gateway or on `qits-net`, and
+anything left at the root is unreachable. `README.md` has the table.
+
+The one thing to know before you add a route: **`quarkus.rest.path` moves the JAX-RS routes and
+nothing else.** A raw Vert.x route or a `@WebSocket` path registers straight onto the router with a
+literal and must carry `/workspaces` itself. Three do, each for its own reason:
+
+- `DaemonControlSocket` — `/workspaces/daemon/{id}`, and a **cross-repo contract**:
+  `WorkspaceContainerFactory` injects `ws://<host>:<port>/workspaces/daemon/<id>` as
+  `QITS_WORKSPACE_DAEMON_URL` and qits-workspace-daemon dials exactly that. Change both together.
+  That literal is also what must be allow-listed unauthenticated at the gateway (`PublicPaths`) —
+  the callers are daemons holding no user token. It fails *closed*: a stale allow-list rejects
+  daemons loudly rather than exposing anything.
+- `ServiceProxyRoute` — `ServiceProxyPath.PREFIX`, `/workspaces/service/`, which is also baked into
+  the dev server's `QITS_PUBLIC_BASE` at spawn, so the two cannot be changed apart.
+- `CaptureCorsRoute` — reads `quarkus.rest.path` instead of repeating it, because a preflight on a
+  different path from the POST it clears is worth nothing, and the client reads a 404 there as "hide
+  the button" rather than as an error. `RootPath` normalizes both that key and
+  `quarkus.http.root-path`; use it rather than doing the string arithmetic by hand.
+
+`/workspaces/q/*` (openapi, swagger-ui) sits outside `quarkus.rest.path` and moves only with
+`quarkus.http.non-application-root-path`. `quarkus.swagger-ui.path` is relative and follows on its
+own — do not pin it.
+
+**A workspace is not a sub-resource of a repository.** This context holds a repository id as a
+string, in another database, with no FK — so collections filter by `?repositoryId=` and an item is
+`{id}` alone. `/branches/{merge,cleanup}` take `?repositoryId=` too: a branch has no id of its own,
+so the repository narrows and the body names the branch. `history/{id}` carries no repository at
+all; it was decoration on the item routes and a real filter only on the collection.
+
+**Two host surfaces were deleted rather than moved**: `/workspaces/{id}/services…` and
+`/workspaces/{id}/bootstrap-commands…`. Both ran inside the container with the host forwarding, and
+the daemon's own `ServiceSupervisor`/`BootstrapRunner` do the work. Everything host-side behind them
+stays — `ServiceSupervisor`, `WorkspaceBootstrapRunner`, both driver ports, the
+`StartService`/`SignalService`/`RunBootstrap` events, `service_event` and its SSE feed,
+`workspace_bootstrap_run`, `BootstrapRunService`, `ServiceProxyRoute` — because the
+provision → bootstrap → services sequence is host-orchestrated and is not REST-driven. What went is
+the addressability, not the capability. Re-exposing it belongs on the daemon's `WorkspaceApi`, after
+`migration-plan.md` §9 item 16.
+
+One consequence, recorded so it is not rediscovered: **`workspace_bootstrap_run` now has no
+reader.** `WorkspaceBootstrapRunner` writes it and nothing queries it — `WorkspaceHistoryService`
+does not. The table stays (dropping it is a data migration), but durable history nobody can query is
+not history; the workspace history surface is the obvious home for a reader. `BootstrapRun`'s
+javadoc carries the full note.
 
 Still keyed on the label, deliberately: `service_event.workspace_id` — diagnostic history that
 outlives the row, see `V2`'s header.

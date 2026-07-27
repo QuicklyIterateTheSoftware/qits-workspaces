@@ -79,7 +79,7 @@ public class ServiceEventControllerTest {
             base));
 
     given()
-        .get("/api/service-events?repoId=" + repoId + "&workspaceId=work")
+        .get("/workspaces/api/service-events?repoId=" + repoId + "&workspaceId=work")
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(2))
@@ -90,21 +90,21 @@ public class ServiceEventControllerTest {
         .body("events[1].summary", equalTo("ready (pattern matched)"));
 
     given()
-        .get("/api/service-events?repoId=" + repoId + "&severity=ERROR")
+        .get("/workspaces/api/service-events?repoId=" + repoId + "&severity=ERROR")
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(1))
         .body("events[0].severity", equalTo("ERROR"));
 
     given()
-        .get("/api/service-events?repoId=" + repoId + "&source=logs/app.log")
+        .get("/workspaces/api/service-events?repoId=" + repoId + "&source=logs/app.log")
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(1));
 
     given()
         .get(
-            "/api/service-events?repoId="
+            "/workspaces/api/service-events?repoId="
                 + repoId
                 + "&since="
                 + base.minusSeconds(30)
@@ -115,7 +115,7 @@ public class ServiceEventControllerTest {
         .body("events[0].kind", equalTo("STATUS_CHANGED"));
 
     given()
-        .get("/api/service-events?repoId=" + repoId + "&pageSize=1&page=1")
+        .get("/workspaces/api/service-events?repoId=" + repoId + "&pageSize=1&page=1")
         .then()
         .statusCode(200)
         .body("events.size()", equalTo(1))

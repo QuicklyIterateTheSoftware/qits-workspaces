@@ -157,7 +157,7 @@ public class CaptureResourceTest {
             .header("Origin", "http://app.example:4200")
             .body(payload(repoId))
             .when()
-            .post("/api/capture")
+            .post("/workspaces/api/capture")
             .then()
             .statusCode(Response.Status.CREATED.getStatusCode())
             .body(
@@ -181,7 +181,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("entries.workspace.workspaceId", hasItem(workspaceId))
@@ -234,7 +234,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .body("entries.workspace.workspaceId", hasItems(first.workspaceId, second.workspaceId));
   }
@@ -249,7 +249,7 @@ public class CaptureResourceTest {
         .contentType(ContentType.JSON)
         .body(toJson(unknownRepo))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode())
         .body("message", containsString("Repository not found"));
@@ -258,14 +258,14 @@ public class CaptureResourceTest {
         .contentType(ContentType.JSON)
         .body("{}".getBytes(StandardCharsets.UTF_8))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode());
 
     // Nothing leaked: only the auto-created main workspace exists.
     given()
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .body("entries", hasSize(1));
   }
@@ -282,7 +282,7 @@ public class CaptureResourceTest {
         .contentType(ContentType.JSON)
         .body(toJson(big))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(413);
 
@@ -296,13 +296,13 @@ public class CaptureResourceTest {
         .header("Content-Encoding", "gzip")
         .body(gzip(toJson(bomb)))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(413);
 
     given()
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .body("entries", hasSize(1));
   }
@@ -315,7 +315,7 @@ public class CaptureResourceTest {
         .contentType(ContentType.JSON)
         .body(payload(repoId))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(Response.Status.CREATED.getStatusCode());
 
@@ -324,7 +324,7 @@ public class CaptureResourceTest {
         .header("Content-Encoding", "gzip")
         .body(gzip(payload(repoId)))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(Response.Status.CREATED.getStatusCode());
   }
@@ -338,7 +338,7 @@ public class CaptureResourceTest {
         .header("Origin", "http://foreign.example")
         .header("Access-Control-Request-Method", "POST")
         .when()
-        .options("/api/capture")
+        .options("/workspaces/api/capture")
         .then()
         .statusCode(204)
         .header("Access-Control-Allow-Origin", equalTo("*"))
@@ -353,7 +353,7 @@ public class CaptureResourceTest {
         .header("Origin", "http://foreign.example")
         .body(payload(repoId))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(Response.Status.CREATED.getStatusCode())
         .header("Access-Control-Allow-Origin", equalTo("*"));
@@ -365,7 +365,7 @@ public class CaptureResourceTest {
         .header("Origin", "http://foreign.example")
         .body(toJson(unknownRepo))
         .when()
-        .post("/api/capture")
+        .post("/workspaces/api/capture")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode())
         .header("Access-Control-Allow-Origin", equalTo("*"));
@@ -376,14 +376,14 @@ public class CaptureResourceTest {
         .contentType("application/x-protobuf")
         .body(new byte[0])
         .when()
-        .post("/api/otel/v1/traces")
+        .post("/workspaces/api/otel/v1/traces")
         .then()
         .header("Access-Control-Allow-Origin", nullValue());
     given()
         .header("Origin", "http://foreign.example")
         .header("Access-Control-Request-Method", "POST")
         .when()
-        .options("/api/otel/v1/traces")
+        .options("/workspaces/api/otel/v1/traces")
         .then()
         .header("Access-Control-Allow-Origin", nullValue());
   }
@@ -402,7 +402,7 @@ public class CaptureResourceTest {
             .contentType(ContentType.JSON)
             .body(toJson(root))
             .when()
-            .post("/api/capture")
+            .post("/workspaces/api/capture")
             .then()
             .statusCode(Response.Status.CREATED.getStatusCode())
             .extract()
@@ -410,7 +410,7 @@ public class CaptureResourceTest {
 
     given()
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .body(
             "entries.find { it.workspace.workspaceId == '" + workspaceId + "' }.workspace.preamble",

@@ -22,6 +22,22 @@ import java.time.Instant;
  * to happen). {@link #bootstrapCommandId} is a plain snapshot column, not a foreign key (the {@code
  * Command.actionId} precedent), so reconcile-time deletion of a command never breaks recorded
  * state.
+ *
+ * <p><strong>This table has no reader today.</strong> {@code WorkspaceBootstrapController} was its
+ * only one, and it was deleted with the rest of the host's {@code /bootstrap-commands} surface —
+ * bootstrap runs <em>inside</em> the container and the daemon's own {@code BootstrapRunner} does the
+ * work, so the host kept the record and gave up the route
+ * (migration-path-conventions.md §1a). {@code WorkspaceHistoryService} does not read it; nothing
+ * else does either. So {@link eu.wohlben.qits.workspaces.control.WorkspaceBootstrapRunner} writes
+ * here on every step and no caller can ask what it wrote.
+ *
+ * <p>That is recorded rather than fixed, because it is a decision and not an oversight: the table
+ * stays (dropping it is a data migration, and unlike the daemon's container-lifetime state these
+ * rows survive any number of container recreates), but "keep the host projection for durability" is
+ * hollow while nobody can query it — durable history nobody can read is not history. The obvious
+ * home for a reader is the workspace history surface ({@code WorkspaceHistoryController}), which is
+ * where somebody would look for "did this workspace bootstrap cleanly?". Either give it one or drop
+ * the table deliberately; do not leave it write-only by omission a second time.
  */
 @Entity
 @Table(

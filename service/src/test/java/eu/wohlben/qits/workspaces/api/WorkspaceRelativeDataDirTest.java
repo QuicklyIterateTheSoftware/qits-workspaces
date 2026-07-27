@@ -69,7 +69,7 @@ public class WorkspaceRelativeDataDirTest {
         .body(
             new WorkspaceController.CreateWorkspaceRequest(repoId, "rel-01", "master", "rel-branch", null))
         .when()
-        .post("/api/workspaces")
+        .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
@@ -78,7 +78,7 @@ public class WorkspaceRelativeDataDirTest {
     given()
         .contentType(ContentType.JSON)
         .when()
-        .get("/api/workspaces?repositoryId=" + repoId)
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body(
@@ -90,7 +90,7 @@ public class WorkspaceRelativeDataDirTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.MergeWorkspaceRequest("master"))
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "rel-01") + "/merge")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "rel-01") + "/merge")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("hasConflicts", equalTo(false));
@@ -99,7 +99,7 @@ public class WorkspaceRelativeDataDirTest {
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.DiscardWorkspaceRequest(null))
         .when()
-        .post("/api/workspaces/" + workspaceIds.of(repoId, "rel-01") + "/discard")
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "rel-01") + "/discard")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("success", equalTo(true));

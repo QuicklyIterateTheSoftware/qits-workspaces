@@ -47,10 +47,10 @@ class WorkspaceChangeHintBusTest {
   String dataDir;
 
   /** The collection root; a workspace's channel hangs off its id, which only exists at runtime. */
-  @TestHTTPResource("/api/workspaces/")
+  @TestHTTPResource("/workspaces/api/workspaces/")
   URL workspacesUrl;
 
-  @TestHTTPResource("/api/events")
+  @TestHTTPResource("/workspaces/api/events")
   URL globalSseUrl;
 
   @BeforeEach

@@ -116,7 +116,7 @@ class WorkspaceContainerFactoryTest {
     // — workspace-daemon runs in-container so it can't call QitsHostResolver; the URL is composed
     // here.
     assertSequence(
-        argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/api/workspace-daemon/id/1");
+        argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/workspaces/daemon/1");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=work");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");

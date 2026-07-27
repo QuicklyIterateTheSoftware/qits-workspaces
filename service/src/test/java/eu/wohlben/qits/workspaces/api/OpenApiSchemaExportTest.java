@@ -6,6 +6,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -24,9 +25,25 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class OpenApiSchemaExportTest {
 
+  /**
+   * Where the document is served from. Read rather than written literally: {@code /q/*} is outside
+   * {@code quarkus.rest.path} and moves only with this key, so a hard-coded {@code /q/openapi} would
+   * simply 404 the day the service's segment changed — and this test asserts nothing else, so the
+   * 404 is the only thing that would tell you.
+   */
+  @ConfigProperty(name = "quarkus.http.non-application-root-path", defaultValue = "/q")
+  String nonApplicationRootPath;
+
   @Test
   public void exportOpenApiSchema() throws Exception {
-    String schema = given().when().get("/q/openapi").then().statusCode(200).extract().asString();
+    String schema =
+        given()
+            .when()
+            .get(RootPath.prefix(nonApplicationRootPath) + "/openapi")
+            .then()
+            .statusCode(200)
+            .extract()
+            .asString();
 
     Path docsDir = Paths.get("../docs");
     if (!Files.exists(docsDir)) {

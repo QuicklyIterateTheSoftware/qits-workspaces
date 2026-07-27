@@ -11,37 +11,6 @@ components:
       - BUSY
       - WAITING
       - ENDED
-    BootstrapOutcome:
-      type: string
-      enum:
-      - SKIPPED
-      - SUCCEEDED
-      - FAILED
-    BootstrapRunDto:
-      type: object
-      properties:
-        bootstrapCommandId:
-          type: string
-        commandName:
-          type: string
-        outcome:
-          $ref: "#/components/schemas/BootstrapOutcome"
-        commandId:
-          type: string
-        exitCode:
-          type: integer
-          format: int32
-        ranAt:
-          $ref: "#/components/schemas/Instant"
-    BootstrapStepDto:
-      type: object
-      properties:
-        id:
-          type: string
-        name:
-          type: string
-        description:
-          type: string
     CleanupBranchRequest:
       type: object
       required:
@@ -80,84 +49,13 @@ components:
     Entry:
       type: object
       properties:
-        step:
-          $ref: "#/components/schemas/BootstrapStepDto"
-        lastRun:
-          $ref: "#/components/schemas/BootstrapRunDto"
+        workspace:
+          $ref: "#/components/schemas/WorkspaceDto"
     Entry1:
       type: object
       properties:
         workspace:
-          $ref: "#/components/schemas/WorkspaceDto"
-    Entry2:
-      type: object
-      properties:
-        workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDto"
-    Entry3:
-      type: object
-      properties:
-        instance:
-          $ref: "#/components/schemas/ServiceInstanceDto"
-    HealthCheckDto:
-      type: object
-      properties:
-        name:
-          type: string
-        kind:
-          $ref: "#/components/schemas/HealthCheckKind"
-        port:
-          type: integer
-          format: int32
-        path:
-          type: string
-        expectStatus:
-          type: string
-        command:
-          type: string
-        intervalMs:
-          type: integer
-          format: int64
-        timeoutMs:
-          type: integer
-          format: int64
-        healthyThreshold:
-          type: integer
-          format: int32
-        unhealthyThreshold:
-          type: integer
-          format: int32
-        initialDelayMs:
-          type: integer
-          format: int64
-    HealthCheckKind:
-      type: string
-      enum:
-      - HTTP
-      - TCP
-      - COMMAND
-    HealthCheckState:
-      type: string
-      enum:
-      - HEALTHY
-      - UNHEALTHY
-      - UNKNOWN
-    HealthCheckStatusDto:
-      type: object
-      properties:
-        name:
-          type: string
-        kind:
-          $ref: "#/components/schemas/HealthCheckKind"
-        state:
-          $ref: "#/components/schemas/HealthCheckState"
-        lastLatencyMs:
-          type: integer
-          format: int64
-        lastCheckedAt:
-          $ref: "#/components/schemas/Instant"
-        detail:
-          type: string
     Instant:
       type: string
       format: date-time
@@ -199,52 +97,20 @@ components:
     Response10:
       type: object
       properties:
-        success:
-          type: boolean
+        workspace:
+          $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
     Response11:
       type: object
       properties:
-        workspace:
-          $ref: "#/components/schemas/WorkspaceDto"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/Entry1"
     Response12:
       type: object
       properties:
-        technicalProcessId:
-          type: string
-    Response13:
-      type: object
-      properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
-    Response14:
-      type: object
-      properties:
-        entries:
-          type: array
-          items:
-            $ref: "#/components/schemas/Entry2"
-    Response15:
-      type: object
-      properties:
-        workspace:
-          $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
-    Response16:
-      type: object
-      properties:
-        instance:
-          $ref: "#/components/schemas/ServiceInstanceDto"
-    Response17:
-      type: object
-      properties:
-        instance:
-          $ref: "#/components/schemas/ServiceInstanceDto"
-    Response18:
-      type: object
-      properties:
-        entries:
-          type: array
-          items:
-            $ref: "#/components/schemas/Entry3"
     Response2:
       type: object
       properties:
@@ -255,18 +121,22 @@ components:
     Response3:
       type: object
       properties:
-        started:
-          type: boolean
+        workspace:
+          $ref: "#/components/schemas/WorkspaceDto"
+        technicalProcessId:
+          type: string
     Response4:
       type: object
       properties:
-        started:
+        commitHash:
+          type: string
+        hasConflicts:
           type: boolean
+        output:
+          type: string
     Response5:
       type: object
       properties:
-        chainRunning:
-          type: boolean
         entries:
           type: array
           items:
@@ -281,66 +151,18 @@ components:
     Response7:
       type: object
       properties:
-        commitHash:
-          type: string
-        hasConflicts:
+        success:
           type: boolean
-        output:
-          type: string
     Response8:
-      type: object
-      properties:
-        entries:
-          type: array
-          items:
-            $ref: "#/components/schemas/Entry1"
-    Response9:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
-        technicalProcessId:
-          type: string
-    RestartPolicy:
-      type: string
-      enum:
-      - NEVER
-      - ON_FAILURE
-      - ALWAYS
-    ServiceDefinitionDto:
+    Response9:
       type: object
       properties:
-        id:
+        technicalProcessId:
           type: string
-        name:
-          type: string
-        description:
-          type: string
-        startScript:
-          type: string
-        readyPattern:
-          type: string
-        stopSignal:
-          type: string
-        restartPolicy:
-          $ref: "#/components/schemas/RestartPolicy"
-        autoStart:
-          type: boolean
-        maxRestarts:
-          type: integer
-          format: int32
-        otel:
-          type: boolean
-        webView:
-          $ref: "#/components/schemas/WebViewDto"
-        environment:
-          type: object
-          additionalProperties:
-            type: string
-        healthChecks:
-          type: array
-          items:
-            $ref: "#/components/schemas/HealthCheckDto"
     ServiceEventDto:
       type: object
       properties:
@@ -389,24 +211,6 @@ components:
       - INFO
       - WARNING
       - ERROR
-    ServiceInstanceDto:
-      type: object
-      properties:
-        definition:
-          $ref: "#/components/schemas/ServiceDefinitionDto"
-        status:
-          $ref: "#/components/schemas/ServiceStatus"
-        restartCount:
-          type: integer
-          format: int32
-        commandId:
-          type: string
-        proxyPath:
-          type: string
-        health:
-          type: array
-          items:
-            $ref: "#/components/schemas/HealthCheckStatusDto"
     ServiceStatus:
       type: string
       enum:
@@ -421,16 +225,6 @@ components:
         preamble:
           type: string
         result:
-          type: string
-    WebViewDto:
-      type: object
-      properties:
-        port:
-          type: integer
-          format: int32
-        entryPath:
-          type: string
-        basePath:
           type: string
     WorkspaceCommandDto:
       type: object
@@ -575,72 +369,11 @@ components:
       - INTEGRATED
       - ABANDONED
 paths:
-  /api/history:
-    get:
+  /workspaces/api/branches/cleanup:
+    post:
       parameters:
       - name: repositoryId
         in: query
-        schema:
-          type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response14"
-      summary: List
-      tags:
-      - Workspace History Controller
-  /api/history/{id}:
-    patch:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UpdateHistoryRequest"
-        required: true
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response13"
-      summary: Update
-      tags:
-      - Workspace History Controller
-    get:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response15"
-      summary: Get
-      tags:
-      - Workspace History Controller
-  /api/repositories/{repoId}/branches/cleanup:
-    post:
-      parameters:
-      - name: repoId
-        in: path
-        required: true
         schema:
           type: string
       requestBody:
@@ -661,12 +394,11 @@ paths:
       summary: Cleanup Branch
       tags:
       - Branch Controller
-  /api/repositories/{repoId}/branches/merge:
+  /workspaces/api/branches/merge:
     post:
       parameters:
-      - name: repoId
-        in: path
-        required: true
+      - name: repositoryId
+        in: query
         schema:
           type: string
       requestBody:
@@ -687,7 +419,67 @@ paths:
       summary: Merge Branch
       tags:
       - Branch Controller
-  /api/service-events:
+  /workspaces/api/history:
+    get:
+      parameters:
+      - name: repositoryId
+        in: query
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response11"
+      summary: List
+      tags:
+      - Workspace History Controller
+  /workspaces/api/history/{id}:
+    patch:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateHistoryRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response10"
+      summary: Update
+      tags:
+      - Workspace History Controller
+    get:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response12"
+      summary: Get
+      tags:
+      - Workspace History Controller
+  /workspaces/api/service-events:
     get:
       parameters:
       - name: page
@@ -735,7 +527,7 @@ paths:
       summary: List
       tags:
       - Service Event Controller
-  /api/workspaces:
+  /workspaces/api/workspaces:
     get:
       parameters:
       - name: repositoryId
@@ -748,7 +540,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response8"
+                $ref: "#/components/schemas/Response5"
       summary: List
       tags:
       - Workspace Controller
@@ -765,13 +557,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response11"
+                $ref: "#/components/schemas/Response8"
         "400":
           description: Bad Request
       summary: Create
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/active-process:
+  /workspaces/api/workspaces/{id}/active-process:
     get:
       parameters:
       - name: id
@@ -786,73 +578,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response12"
+                $ref: "#/components/schemas/Response9"
       summary: Active Process
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/bootstrap-commands:
-    get:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response5"
-      summary: List
-      tags:
-      - Workspace Bootstrap Controller
-  /api/workspaces/{id}/bootstrap-commands/run:
-    post:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response4"
-      summary: Run Chain
-      tags:
-      - Workspace Bootstrap Controller
-  /api/workspaces/{id}/bootstrap-commands/{stepId}/run:
-    post:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      - name: stepId
-        in: path
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response3"
-      summary: Run Single
-      tags:
-      - Workspace Bootstrap Controller
-  /api/workspaces/{id}/delete-container:
+  /workspaces/api/workspaces/{id}/delete-container:
     post:
       parameters:
       - name: id
@@ -871,7 +601,7 @@ paths:
       summary: Delete Container
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/discard:
+  /workspaces/api/workspaces/{id}/discard:
     post:
       parameters:
       - name: id
@@ -892,13 +622,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response10"
+                $ref: "#/components/schemas/Response7"
         "400":
           description: Bad Request
       summary: Discard
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/ensure-container:
+  /workspaces/api/workspaces/{id}/ensure-container:
     post:
       parameters:
       - name: id
@@ -913,11 +643,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response9"
+                $ref: "#/components/schemas/Response6"
       summary: Ensure Container
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/merge:
+  /workspaces/api/workspaces/{id}/merge:
     post:
       parameters:
       - name: id
@@ -938,13 +668,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response7"
+                $ref: "#/components/schemas/Response4"
         "400":
           description: Bad Request
       summary: Merge
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/recreate-container:
+  /workspaces/api/workspaces/{id}/recreate-container:
     post:
       parameters:
       - name: id
@@ -959,78 +689,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response6"
+                $ref: "#/components/schemas/Response3"
       summary: Recreate Container
       tags:
       - Workspace Controller
-  /api/workspaces/{id}/services:
-    get:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response18"
-      summary: List
-      tags:
-      - Workspace Service Controller
-  /api/workspaces/{id}/services/{serviceId}/start:
-    post:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      - name: serviceId
-        in: path
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response17"
-      summary: Start
-      tags:
-      - Workspace Service Controller
-  /api/workspaces/{id}/services/{serviceId}/stop:
-    post:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      - name: serviceId
-        in: path
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response16"
-      summary: Stop
-      tags:
-      - Workspace Service Controller
-  /api/workspaces/{id}/stop-container:
+  /workspaces/api/workspaces/{id}/stop-container:
     post:
       parameters:
       - name: id

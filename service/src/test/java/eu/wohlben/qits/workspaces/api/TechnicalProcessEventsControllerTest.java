@@ -47,7 +47,7 @@ public class TechnicalProcessEventsControllerTest {
 
   @Inject TechnicalProcessRegistry registry;
 
-  @TestHTTPResource("/api/technical-processes")
+  @TestHTTPResource("/workspaces/api/technical-processes")
   URL baseUrl;
 
   private HttpResponse<InputStream> open(String processId) throws Exception {
@@ -158,7 +158,7 @@ public class TechnicalProcessEventsControllerTest {
   public void anUnknownProcessIdIsA404() {
     given()
         .when()
-        .get("/api/technical-processes/no-such-process/events")
+        .get("/workspaces/api/technical-processes/no-such-process/events")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode());
   }

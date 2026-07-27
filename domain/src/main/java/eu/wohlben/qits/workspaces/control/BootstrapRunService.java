@@ -22,6 +22,10 @@ import java.util.List;
  * executor) where a self-invoked {@code @Transactional} would not be intercepted; {@link
  * ActivateRequestContext} supplies the request context those threads lack (the {@code
  * CommandLifecycleService} precedent).
+ *
+ * <p>{@link #listForWorkspace} currently has no caller: the host {@code /bootstrap-commands} routes
+ * that read it were deleted, and nothing replaced them. See {@link BootstrapRun}'s javadoc for why
+ * the table is kept anyway and what would have to happen for it to be worth keeping.
  */
 @ApplicationScoped
 public class BootstrapRunService {

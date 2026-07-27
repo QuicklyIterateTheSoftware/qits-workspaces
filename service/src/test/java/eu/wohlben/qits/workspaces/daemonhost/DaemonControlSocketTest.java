@@ -80,7 +80,7 @@ class DaemonControlSocketTest {
 
   @Inject RecordingAgentSessionReporter agentSessions;
 
-  @TestHTTPResource("/api/workspace-daemon/id/" + WORKSPACE_ROW_ID)
+  @TestHTTPResource("/workspaces/daemon/" + WORKSPACE_ROW_ID)
   URI endpoint;
 
   /** The {@code configJson}/{@code warning} the fake peer answers a {@link DescribeConfig} with. */

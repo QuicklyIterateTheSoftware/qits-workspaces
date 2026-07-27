@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
  * reports {@link Provisioned} with the checked-out {@code HEAD}.
  *
  * <p>A single standalone Vert.x server plays both roles the daemon needs: the control socket (at
- * {@code /api/workspace-daemon/*}, where we collect the {@code Provisioned}) and a minimal
+ * {@code /workspaces/daemon/*}, where we collect the {@code Provisioned}) and a minimal
  * dumb-HTTP git host (at {@code /git/*}, serving a bare repo's files) — reached the same way
  * host-run qits is, via {@code host.docker.internal}. This isolates the self-clone; the
  * name-addressed submodule-closure walk over the real {@code GitHostRoutes} is exercised by the
@@ -104,7 +104,7 @@ public class DaemonSelfCloneIT {
             .actualPort();
 
     try {
-      String url = "ws://host.docker.internal:" + port + "/api/workspace-daemon/it-ws";
+      String url = "ws://host.docker.internal:" + port + "/workspaces/daemon/it-ws";
       run(
           RUNTIME,
           "run",

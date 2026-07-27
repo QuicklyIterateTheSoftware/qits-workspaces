@@ -228,7 +228,7 @@ public class ServiceProxyRouteTest {
   public void forwardsVerbatimRedirectsBareKeyAndRefusesAfterStop() throws Exception {
     Setup setup = setUpReadyService(null);
     try {
-      String base = "/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId();
+      String base = "/workspaces/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId();
 
       // Verbatim passthrough: the origin sees the unstripped path and query.
       given()
@@ -272,7 +272,7 @@ public class ServiceProxyRouteTest {
     // Stopped: the instance still resolves, but the proxy answers 502 instead of forwarding.
     int hitsBefore = echoHits.get();
     given()
-        .get("/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/")
+        .get("/workspaces/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/")
         .then()
         .statusCode(502)
         .body(containsString("not running"));
@@ -288,7 +288,7 @@ public class ServiceProxyRouteTest {
     Setup setup = setUpReadyService(null);
     try {
       given()
-          .get("/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/index.html")
+          .get("/workspaces/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/index.html")
           .then()
           .statusCode(200)
           .body(containsString("echo:"));
@@ -307,7 +307,7 @@ public class ServiceProxyRouteTest {
     // passthrough; the extra sub-path is part of the verbatim-forwarded path, never stripped.
     Setup setup = setUpReadyService("app");
     try {
-      String servedBase = "/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/app";
+      String servedBase = "/workspaces/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/app";
       given()
           .get(servedBase + "/main.js")
           .then()
@@ -321,9 +321,9 @@ public class ServiceProxyRouteTest {
   @Test
   public void unknownKeysAnswer404WithoutTouchingAnyOrigin() {
     int hitsBefore = echoHits.get();
-    given().get("/service/no-such-workspace/no-such-daemon/index.html").then().statusCode(404);
-    given().get("/service/onlyonesegment").then().statusCode(404);
-    given().get("/service/").then().statusCode(404);
+    given().get("/workspaces/service/no-such-workspace/no-such-daemon/index.html").then().statusCode(404);
+    given().get("/workspaces/service/onlyonesegment").then().statusCode(404);
+    given().get("/workspaces/service/").then().statusCode(404);
     assertEquals(hitsBefore, echoHits.get(), "unknown keys must never reach an origin");
   }
 
@@ -334,7 +334,7 @@ public class ServiceProxyRouteTest {
     try {
       String body =
           given()
-              .get("/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/")
+              .get("/workspaces/service/" + workspaceIds.of(setup.repoId(), "work") + "/" + setup.serviceId() + "/")
               .then()
               .statusCode(200)
               .extract()
