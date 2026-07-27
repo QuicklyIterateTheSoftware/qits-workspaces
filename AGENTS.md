@@ -118,6 +118,27 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
+- **App-level config lives in `service/src/main/resources/application.properties`, and the tests
+  inherit it.** That file is on the test classpath and Quarkus merges it, so
+  `service/src/test/resources/application.properties` holds test-only *overrides* (in-memory H2,
+  `flyway…clean-at-start`, `qits.repositories.data-dir` under `target/`) and nothing else. Never
+  re-declare a shipped setting such as `quarkus.rest.path` there: the copy is free to drift from
+  what ships, and then a green suite proves nothing.
+- `OpenApiSchemaExportTest` writes `docs/openapi.yml`
+  (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). It runs as a `@QuarkusTest` and indexes
+  the test classpath, so a `@Path` resource under `src/test` lands in the committed document unless
+  it is `@Operation(hidden = true)` — hence the annotation on `IdentityEchoResource`. The raw Vert.x
+  routes and the daemon control socket are in no document; they are not JAX-RS.
+- **`mvn verify` passing does not mean the app starts.** Augmentation runs per `@QuarkusTest`
+  regardless of packaging, and `FakeRepositoryLookup` is on the *test* classpath — so the suite
+  cannot see either a missing `quarkus-maven-plugin` execution or a missing production
+  `RepositoryLookup`. Both were invisible here until the jar was actually run.
+- `FakeRepositoryLookup` still wins over `wiring/UnconfiguredRepositoryLookup` with no change on
+  your part: the latter is `@DefaultBean`, which yields to any other bean of the type. If you ever
+  see the "no RepositoryLookup implementation" warning in a test, a fake is missing rather than
+  broken.
+- A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
+  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
   returns a repo id; pair it with `FakeRepositoryLookup.register`.
 - The `Fake*` doubles are duplicated between `domain/src/test` and `service/src/test`. That is

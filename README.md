@@ -20,10 +20,17 @@ the boundary. Everything that runs *inside* the container belongs to
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
 
-Both are library jars, in the shape of the monorepo's `artifacts`/`ci` modules: a consuming Quarkus
-application pulls them in and gets the routes. `domain` owns its **own datasource, persistence unit
-and Flyway lineage** (`db/workspaces/migration`, a separate H2), which is what makes this a
-standalone deployable rather than a checkout of the monorepo.
+`domain/` is a library jar. **`service/` is the application** — augmented by the
+`quarkus-maven-plugin` into a process. `domain` owns its **own datasource, persistence unit and
+Flyway lineage** (`db/workspaces/migration`, a separate H2), which is what makes this a standalone
+deployable rather than a checkout of the monorepo.
+
+    ./mvnw verify
+    java -jar service/target/quarkus-app/quarkus-run.jar
+
+**That second command deliberately fails today**, and the message tells you why: this service has no
+`RepositoryLookup`. See "Deploying it" below — it is the one thing between here and a running
+process, and it is code rather than configuration.
 
 ## The boundary
 
@@ -54,9 +61,27 @@ transaction.
 
 ## Deploying it
 
-A standalone deployable must allow-list `/api/workspace-daemon/` for unauthenticated access — that
+**It does not run yet, and that is on purpose.** `RepositoryLookup` is a mandatory `@Inject` — a
+workspace is a branch of a repository, and this context holds no foreign key into the repositories
+tables. Nothing implements it. `wiring/UnconfiguredRepositoryLookup` exists only so the module can be
+*augmented*: Quarkus resolves injection at build time, so three unsatisfied injection points used to
+fail the build outright. That bean satisfies the build and then throws on startup in a production
+launch, which is the behaviour the port's javadoc always specified — an unwired deployment dies
+immediately instead of 404ing every workspace. In dev and test the check downgrades to a warning, so
+`quarkus:dev` and the suite stay runnable.
+
+The fix is an implementation backed by qits-projects over HTTP, at which point that class is deleted
+rather than configured.
+
+`service/src/main/resources/application.properties` carries what this repo can decide —
+`quarkus.rest.path=/api`, the 64M body limit, the OpenAPI/swagger-ui settings. Read it before adding
+anything; it explains why each line is load-bearing.
+
+Beyond that, a deployment must allow-list `/api/workspace-daemon/` for unauthenticated access — that
 is the daemon's dial-home control socket, and it authenticates by workspace id, not by session. In
-the monorepo this lives in `auth/core`'s `PublicPaths`.
+the monorepo this lives in `auth/core`'s `PublicPaths`; under the gateway it is `PublicPaths` there.
+And `qits.repositories.data-dir` is a shared on-disk contract: qits-projects clones into the same
+tree and qits-artifacts serves it over git smart-HTTP, so all three must resolve it to one volume.
 
 Note also that `WorkspaceController` declares `@Path("/repositories/{repoId}/workspaces")` and
 `GlobalEventsController` declares `@Path("/events")`. The monorepo still has its own copies of both;
