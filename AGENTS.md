@@ -60,6 +60,19 @@ artifactId. Any change to it must be mirrored in
 [qits-workspace-daemon](https://github.com/QuicklyIterateTheSoftware/qits-workspace-daemon) and bump
 `DaemonProtocol.CAPABILITY_VERSION`. `DaemonCodecTest` runs on both sides and is what catches drift.
 
+## Authentication
+
+Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
+(`X-Qits-User`, read by `workspaces/security/ForwardAuthMechanism`) and authenticates nothing.
+
+**`identity.isAnonymous()` is not a security state** — it means "no name for the audit row". A check
+of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
+nothing, because reaching this service at all already implies you are inside the trusted network.
+
+There is no auth variant to select and no authorization policy here, and roles are deliberately not
+resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's. See
+`migration-auth-plan.md`.
+
 ## Tests
 
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
