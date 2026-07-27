@@ -75,10 +75,12 @@ resolved — the single role check the system has (`qits.auth.required-role`) is
 
 ## Tests
 
-- `service/src/test/resources/application.properties` is **no longer the only copy** of
-  `quarkus.rest.path` — `src/main/resources/application.properties` carries it for the packaged
-  process. Change one and you must change both; a suite green because the *test* copy is right
-  proves nothing about what ships.
+- **App-level config lives in `service/src/main/resources/application.properties`, and the tests
+  inherit it.** That file is on the test classpath and Quarkus merges it, so
+  `service/src/test/resources/application.properties` holds test-only *overrides* (in-memory H2,
+  `flyway…clean-at-start`, `qits.repositories.data-dir` under `target/`) and nothing else. Never
+  re-declare a shipped setting such as `quarkus.rest.path` there: the copy is free to drift from
+  what ships, and then a green suite proves nothing.
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`
   (`./mvnw -pl service test -Dtest=OpenApiSchemaExportTest`). It runs as a `@QuarkusTest` and indexes
   the test classpath, so a `@Path` resource under `src/test` lands in the committed document unless
