@@ -42,6 +42,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
 import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
+import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
 import io.quarkus.websockets.next.WebSocketConnection;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -282,6 +283,7 @@ public class WorkspaceDaemonRegistry
       case ServiceTransition event -> routeServiceState(workspaceId, client, event);
       case GitStatus status -> onGitStatus(workspaceId, client, status);
       case AgentActivity activity -> onAgentActivity(workspaceId, client, activity);
+      case WorkspaceChanged changed -> onWorkspaceChanged(workspaceId, client, changed);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
       case RunCommand ignored -> {}
@@ -292,6 +294,31 @@ public class WorkspaceDaemonRegistry
       case SignalService ignored -> {}
       case PullBranch ignored -> {}
     }
+  }
+
+  /**
+   * Relay a daemon-side change nudge onto the workspace's SSE stream.
+   *
+   * <p>The daemon owns state the host no longer holds — the commands it ran, the transcripts it
+   * imported — so it is the only thing that knows when a view went stale. This is how it says so
+   * (capability 3); before it existed the browser refetched on its own cadence.
+   *
+   * <p>An unrecognised topic is dropped rather than treated as an error: the frame carries a name
+   * rather than an enum precisely so a newer daemon can nudge about something this backend has no
+   * view for, and that should cost nothing.
+   */
+  private void onWorkspaceChanged(
+      String workspaceId, DaemonConnection client, WorkspaceChanged changed) {
+    WorkspaceChangeHint.Topic topic;
+    try {
+      topic = WorkspaceChangeHint.Topic.valueOf(changed.topic());
+    } catch (IllegalArgumentException | NullPointerException unknown) {
+      LOG.debugf(
+          "Ignoring a workspace-daemon change nudge for unknown topic '%s' (workspace %s)",
+          changed.topic(), workspaceId);
+      return;
+    }
+    changePublisher.fire(client != null ? client.repoId : null, workspaceId, topic);
   }
 
   /**
