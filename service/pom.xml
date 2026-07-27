@@ -15,10 +15,19 @@
          broadcast channels, and the workspace-daemon control socket + registry — everything that
          needs a web stack and therefore cannot live in `domain`.
 
-         A library JAR, not a deployable app (the monorepo's `artifacts`/`ci` REST boundaries are
-         packaged the same way): a consuming Quarkus application pulls it in and gets the routes.
-         Packaging it as an app would need an auth variant, a webui and a main class, none of which
-         belong to this bounded context. -->
+         A DEPLOYABLE APP, not a library JAR. It was extracted as a library — "a consuming Quarkus
+         application pulls it in and gets the routes" — because packaging it would have needed an
+         auth variant, a webui and a main class. All three reasons have lapsed: authentication
+         terminates at qits-gateway and this module reads a header (see security/), the webui stays
+         in the monorepo, and Quarkus supplies the main class.
+
+         This was the last of the six extracted services to be packaged, because it is the only one
+         with a MANDATORY port: three @Inject RepositoryLookup sites took augmentation down until
+         wiring/UnconfiguredRepositoryLookup gave them a @DefaultBean to resolve against. That bean
+         then refuses to start a production build, which is the behaviour the port's javadoc
+         specifies. Building and running are not the same gate.
+
+         See migration-deployables-plan.md in the superproject. -->
     <artifactId>qits-workspaces-service</artifactId>
     <name>qits-workspaces :: service</name>
 
@@ -89,6 +98,24 @@
 
     <build>
         <plugins>
+            <plugin>
+                <!-- This module is the DEPLOYABLE, not a library jar. Augmentation is what produces
+                     target/quarkus-app/quarkus-run.jar; without this execution `mvn verify` proves
+                     the tests pass and proves nothing about whether the thing starts. Version comes
+                     from the root pom's pluginManagement. -->
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build</goal>
+                            <goal>generate-code</goal>
+                            <goal>generate-code-tests</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
             </plugin>
