@@ -239,13 +239,17 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   `CaptureResource`'s payloads present in its `@RegisterForReflection(targets)`, and
   `CaptureCorsRoute` reading an application-owned config key. None of them proves a binary works —
   they prevent the silent re-introduction of what booting one already caught.
-- `FakeRepositoryLookup` still wins over `wiring/UnconfiguredRepositoryLookup` with no change on
-  your part: the latter is `@DefaultBean`, which yields to any other bean of the type. If you ever
-  see the "no RepositoryLookup implementation" warning in a test, a fake is missing rather than
-  broken. Note this is about **injection only** — the `@DefaultBean` losing the contest keeps its
-  `@Observes StartupEvent`, so the startup check still runs (it just downgrades to a warning outside
-  `LaunchMode.NORMAL`). Supplying a `RepositoryLookup` is therefore *not* enough to boot a
-  production build; that is the point of the check.
+- `FakeRepositoryLookup` still wins over `wiring/HttpRepositoryLookup` with no change on your part:
+  the latter is `@DefaultBean`, which yields to any other bean of the type. **Keep that annotation.**
+  Drop it and the two are an ambiguous dependency — the build fails at `ArcProcessor#validate`, not
+  at runtime, and it fails for every test at once. If you ever see the "qits.projects.url is unset"
+  warning in a test, a fake is missing rather than broken. Note this is about **injection only**:
+  the `@DefaultBean` losing the contest keeps its `@Observes StartupEvent`, so the startup check
+  still runs (downgraded to a warning outside `LaunchMode.NORMAL`).
+- Deleting a bean is not enough on an incremental build. Removing `UnconfiguredRepositoryLookup`
+  left its `.class` in `target/`, and the next `-Dnative` run failed with an ambiguous
+  `RepositoryLookup` naming a class no longer in `src/`. `mvn clean` — the symptom names a file you
+  cannot find, which is the confusing part.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first,
   or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.

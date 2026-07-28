@@ -77,17 +77,31 @@ transaction.
 
 ## Deploying it
 
-**It does not run yet, and that is on purpose.** `RepositoryLookup` is a mandatory `@Inject` — a
+**It needs to be told where qits-projects is.** `RepositoryLookup` is a mandatory `@Inject` — a
 workspace is a branch of a repository, and this context holds no foreign key into the repositories
-tables. Nothing implements it. `wiring/UnconfiguredRepositoryLookup` exists only so the module can be
-*augmented*: Quarkus resolves injection at build time, so three unsatisfied injection points used to
-fail the build outright. That bean satisfies the build and then throws on startup in a production
-launch, which is the behaviour the port's javadoc always specified — an unwired deployment dies
-immediately instead of 404ing every workspace. In dev and test the check downgrades to a warning, so
-`quarkus:dev` and the suite stay runnable.
+tables, so the two facts it needs (does this repository exist, what is its main branch) come over
+HTTP from the service that owns them. `wiring/HttpRepositoryLookup` is that implementation. It reads
+one key, `qits.projects.url` — scheme, host and port, no path — and **refuses to start without it**
+in a production launch, because a service that comes up answering 404 to every repository-scoped
+route is a misconfiguration wearing the costume of an empty system. Dev and test downgrade that to a
+warning so `quarkus:dev` and the suite stay runnable.
 
-The fix is an implementation backed by qits-projects over HTTP, at which point that class is deleted
-rather than configured.
+    # both processes on one host
+    ./mvnw package -Dnative
+    QITS_PROJECTS_URL=http://localhost:8090 ./service/target/qits-workspaces -Dquarkus.http.port=8091
+
+    # containers on qits-net
+    QITS_PROJECTS_URL=http://qits-projects:8080
+
+The url carries no path because qits-projects serves its own `/projects/api` segment, so the same
+base address works whether the call goes direct or through the gateway. Both services must also
+resolve `qits.repositories.data-dir` to the same tree — running them under one `$HOME` does that for
+free; containers need the same volume.
+
+One behaviour worth knowing before you debug it: **a missing repository and an unreachable
+qits-projects are different answers.** Only a 404 becomes "no such repository" (and then a 404 from
+here). A connection failure or a 5xx throws, so an outage surfaces as a 500 naming the address
+rather than as a plausible-looking empty registry.
 
 `service/src/main/resources/application.properties` carries what this repo can decide — the segment
 prefix (below), the 64M body limit, the OpenAPI/swagger-ui settings. Read it before adding anything;
