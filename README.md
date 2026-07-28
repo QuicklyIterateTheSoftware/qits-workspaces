@@ -139,8 +139,9 @@ service serves the prefixed path itself and there is no unprefixed form, on the 
 | `/workspaces/q/…` | `openapi`, `swagger-ui` — what the framework serves, not application code | `quarkus.http.non-application-root-path` |
 | `/workspaces/daemon/{id}` | the daemon's dial-home control socket | `DaemonControlSocket`, literal |
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
+| `/workspaces/container/{id}/*` | the workspace-daemon reverse proxy | `ContainerProxyPath.PREFIX`, literal |
 
-The last two are second-level segments beside `api` because neither is a JSON API, and both are
+The last three are second-level segments beside `api` because none is a JSON API, and all are
 literals for the same reason: **raw Vert.x routes and `@WebSocket` paths do not follow
 `quarkus.rest.path`.** So is `CaptureCorsRoute`'s preflight, which derives its path from the prefix
 rather than repeating it — a preflight on a different path from the POST it clears is worth nothing.
@@ -157,6 +158,23 @@ unreachable `/capture`. `application.properties` spells the value once, as `qits
 it creates, and qits-workspace-daemon dials exactly that. `LegacyDaemonControlSocket` still answers
 the pre-segment label path for containers provisioned before the move; its own javadoc says why it
 keeps no `/workspaces` segment.
+
+`/workspaces/container/{id}/*` is **the only way anything reaches a workspace-daemon.** Its HTTP API
+— the file browser, commands, coding agents, services, bootstrap and the two interactive websockets
+— had no address at all before it: no gateway route, and no `QITS_WORKSPACE_DAEMON_API_TOKEN`
+injected, so the daemon's server did not even bind. This service injects that token and proxies to
+`13338` on the container's own DNS name, resolved from the workspace row and from nothing in the
+request. The daemon is deliberately **not** a gateway route — one process per container, living for
+one container lifetime, has no stable address to configure — and `container` rather than `daemon`
+because the control socket already owns that segment and its literal is baked into running
+containers. `ContainerProxyPath` carries the argument; `DaemonProxyTargets` does the lookup.
+
+Two things it does not do, both on purpose. It does not authorize the caller — qits is single-user
+and a workspace has no owner; the check is that the id names an ACTIVE row, and an unknown id, a
+non-numeric one and a soft-deleted row all answer the same 404 before anything connects. And it does
+not gate on control-socket liveness: the daemon's HTTP server and its socket are independent
+listeners, so refusing while a socket is in reconnect backoff would take file browsing and every
+open terminal down for the length of a blip.
 
 The workspace routes take **no repository segment**: this context does not own repositories, so
 collections filter by `?repositoryId=` and a workspace is `{id}` alone. `AGENTS.md` has the rest.

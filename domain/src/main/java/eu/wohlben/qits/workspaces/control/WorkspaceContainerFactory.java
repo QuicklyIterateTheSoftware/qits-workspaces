@@ -181,6 +181,13 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "qits.workspace.qits-port", defaultValue = "8080")
   String qitsPort;
 
+  /**
+   * The bearer every container's {@code WorkspaceApi} requires — injected as the fifteenth {@code
+   * QITS_WORKSPACE_DAEMON_*} var. Read the config key's comment before treating it as a secret.
+   */
+  @ConfigProperty(name = "qits.workspace.daemon-api-token", defaultValue = "qits-workspace-daemon")
+  String daemonApiToken;
+
   static final String MAVEN_MOUNT = "/caches/m2";
   static final String PNPM_MOUNT = "/caches/pnpm";
 
@@ -339,6 +346,15 @@ public class WorkspaceContainerFactory {
         String.valueOf(serviceBackoffMaxMs));
     container.env(
         "QITS_WORKSPACE_DAEMON_SERVICE_STOP_GRACE_MS", String.valueOf(serviceStopGraceMs));
+    // The bearer the daemon's HTTP API requires. Without it WorkspaceApi does not bind at all —
+    // fail-closed, because an omitted env is indistinguishable from a misconfiguration and serving
+    // an untrusted checkout anonymously across the docker network would be silent. That is why this
+    // is injected rather than the daemon's precondition being relaxed: the isolation already exists
+    // and removing it to serve a host-side convenience would be the wrong repo for the decision.
+    //
+    // One shared value with a default, so a deployment needs no configuration. See the config key's
+    // own comment for what it is NOT: it is a handshake constant, not a boundary.
+    container.env("QITS_WORKSPACE_DAEMON_API_TOKEN", daemonApiToken);
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);

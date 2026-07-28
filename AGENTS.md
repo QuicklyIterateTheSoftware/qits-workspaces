@@ -129,7 +129,7 @@ anything left at the root is unreachable. `README.md` has the table.
 
 The one thing to know before you add a route: **`quarkus.rest.path` moves the JAX-RS routes and
 nothing else.** A raw Vert.x route or a `@WebSocket` path registers straight onto the router with a
-literal and must carry `/workspaces` itself. Three do, each for its own reason:
+literal and must carry `/workspaces` itself. Four do, each for its own reason:
 
 - `DaemonControlSocket` — `/workspaces/daemon/{id}`, and a **cross-repo contract**:
   `WorkspaceContainerFactory` injects `ws://<host>:<port>/workspaces/daemon/<id>` as
@@ -139,6 +139,12 @@ literal and must carry `/workspaces` itself. Three do, each for its own reason:
   daemons loudly rather than exposing anything.
 - `ServiceProxyRoute` — `ServiceProxyPath.PREFIX`, `/workspaces/service/`, which is also baked into
   the dev server's `QITS_PUBLIC_BASE` at spawn, so the two cannot be changed apart.
+- `ContainerProxyRoute` — `ContainerProxyPath.PREFIX`, `/workspaces/container/`, **the only path by
+  which anything reaches a workspace-daemon's HTTP API.** `container` and not `daemon` because the
+  control socket already owns that segment, and that literal is the one hardest to change (it is
+  baked into every running container). Not a gateway route, and there must never be a `DAEMON`
+  constant in the gateway's `QitsService`: a daemon is one process per container with no stable
+  address to configure, and this service owns the row and the lifecycle.
 - `CaptureCorsRoute` — derives its path from the REST prefix instead of repeating it, because a
   preflight on a different path from the POST it clears is worth nothing, and the client reads a 404
   there as "hide the button" rather than as an error. It reads **`qits.rest.path`**, not
@@ -166,8 +172,10 @@ stays — `ServiceSupervisor`, `WorkspaceBootstrapRunner`, both driver ports, th
 `StartService`/`SignalService`/`RunBootstrap` events, `service_event` and its SSE feed,
 `workspace_bootstrap_run`, `BootstrapRunService`, `ServiceProxyRoute` — because the
 provision → bootstrap → services sequence is host-orchestrated and is not REST-driven. What went is
-the addressability, not the capability. Re-exposing it belongs on the daemon's `WorkspaceApi`, after
-`migration-plan.md` §9 item 16.
+the addressability, not the capability. **Both are now re-exposed on the daemon's own `WorkspaceApi`**
+(`GET /services`, `POST /services/{name}/{start,signal}`, `GET /bootstrap-commands`, `POST
+/bootstrap-commands/[{name}/]run`) and reachable through `ContainerProxyRoute` — do not add host
+routes back — that is `migration-plan.md` §9 item 16, now closed.
 
 One consequence, recorded so it is not rediscovered: **`workspace_bootstrap_run` now has no
 reader.** `WorkspaceBootstrapRunner` writes it and nothing queries it — `WorkspaceHistoryService`
