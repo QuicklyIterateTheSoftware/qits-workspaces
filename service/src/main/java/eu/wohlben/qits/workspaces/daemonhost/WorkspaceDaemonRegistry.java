@@ -35,6 +35,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
+import eu.wohlben.qits.workspacedaemon.protocol.OpenStream;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
@@ -299,6 +300,7 @@ public class WorkspaceDaemonRegistry
       case StartService ignored -> {}
       case SignalService ignored -> {}
       case PullBranch ignored -> {}
+      case OpenStream ignored -> {}
     }
   }
 
