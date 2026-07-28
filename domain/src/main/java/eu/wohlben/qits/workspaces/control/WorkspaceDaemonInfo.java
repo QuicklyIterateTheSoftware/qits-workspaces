@@ -44,6 +44,14 @@ public interface WorkspaceDaemonInfo {
    *     null} if an older daemon image announced none
    * @param buildTime when the daemon binary was built, or {@code null} if unknown (older image, or
    *     a dev jar built without build-identity filtering)
+   * @param capabilityVersion the wire-contract version the daemon announced, or {@code 0} before a
+   *     {@code Hello} has arrived. Unlike the two above this one is <b>branched on</b>, not merely
+   *     displayed: from {@code DaemonProtocol.TUNNEL_CAPABILITY_VERSION} the daemon's HTTP API binds
+   *     loopback and is reachable only through the reverse tunnel, and below it the daemon binds
+   *     qits-net and cannot serve a tunnel at all. The two are strictly complementary, so this
+   *     single number decides which way to reach a workspace — and {@code 0} counts as "not
+   *     capable", which is the safe direction: a container old enough to predate the tunnel is also
+   *     old enough to still be listening.
    */
-  record Info(Instant connectedAt, String version, Instant buildTime) {}
+  record Info(Instant connectedAt, String version, Instant buildTime, int capabilityVersion) {}
 }

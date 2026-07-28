@@ -117,6 +117,13 @@ public class WorkspaceDaemonRegistry
   @Inject Instance<AgentSessionReporter> agentSessions;
 
   /**
+   * The reverse tunnel's host end. An {@code Instance<>} to break the cycle — {@link
+   * WorkspaceTunnels} asks this registry which daemons can serve a stream, and this registry tells
+   * it when one goes away.
+   */
+  @Inject Instance<WorkspaceTunnels> tunnels;
+
+  /**
    * Last working-tree cleanliness each live daemon reported ({@link GitStatus}). In-memory only —
    * known while the daemon is connected (container RUNNING), cleared on {@link #unregister}, and
    * re-reported by the daemon on reconnect. Surfaced through {@link WorkspaceGitStatus#isClean}.
@@ -209,9 +216,40 @@ public class WorkspaceDaemonRegistry
     gitHead.remove(workspaceId);
     // Likewise drop every tracked agent activity for this workspace (re-reported on reconnect).
     agentActivity.values().removeIf(entry -> entry.workspaceId().equals(workspaceId));
+    // Pending tunnel nonces are waiting on a daemon that is no longer there; live tunnels are NOT
+    // torn down, deliberately — each stream is its own TCP connection, so an open terminal survives
+    // a control-socket reconnect, which is the whole reason these calls do not ride that socket.
+    if (tunnels.isResolvable()) {
+      tunnels.get().onDaemonGone(workspaceId);
+    }
     LOG.debugf(
         "workspace-daemon disconnected for workspace %s (connection %s)",
         workspaceId, connection.id());
+  }
+
+  /**
+   * Ask a daemon to dial back and serve one stream — the reverse tunnel's only outbound message.
+   *
+   * <p>Sent <b>without awaiting</b>, unlike every other send here: this is called from a {@code
+   * NetServer} connect handler, which runs on an event loop, and {@code sendTextAndAwait} would be
+   * rejected by Mutiny's blocking guard there. A failure is logged and nothing else — the parked
+   * socket's own TTL closes it, so a lost {@code OpenStream} degrades to a request that fails
+   * rather than one that hangs.
+   */
+  void requestStream(Long workspaceId, String nonce, String path) {
+    DaemonConnection client = clients.get(workspaceId);
+    if (client == null || !client.connection.isOpen()) {
+      LOG.debugf("requestStream: no workspace-daemon live for %s", workspaceId);
+      return;
+    }
+    client
+        .connection
+        .sendText(codec.encode(new OpenStream(nonce, path)))
+        .subscribe()
+        .with(
+            ignored -> {},
+            failure ->
+                LOG.debugf("could not ask workspace %s for a stream: %s", workspaceId, failure));
   }
 
   @Override
@@ -244,6 +282,7 @@ public class WorkspaceDaemonRegistry
           client.label = hello.workspaceId();
           client.daemonVersion = hello.daemonVersion();
           client.daemonBuildTime = parseInstant(hello.daemonBuildTime());
+          client.capabilityVersion = hello.capabilityVersion();
         }
         connection.sendTextAndAwait(codec.encode(new Ack()));
       }
@@ -463,7 +502,10 @@ public class WorkspaceDaemonRegistry
     }
     return Optional.of(
         new WorkspaceDaemonInfo.Info(
-            client.connectedAt, client.daemonVersion, client.daemonBuildTime));
+            client.connectedAt,
+            client.daemonVersion,
+            client.daemonBuildTime,
+            client.capabilityVersion));
   }
 
   @Override
@@ -474,7 +516,10 @@ public class WorkspaceDaemonRegistry
         .map(
             client ->
                 new WorkspaceDaemonInfo.Info(
-                    client.connectedAt, client.daemonVersion, client.daemonBuildTime))
+                    client.connectedAt,
+                    client.daemonVersion,
+                    client.daemonBuildTime,
+                    client.capabilityVersion))
         .toList();
   }
 
@@ -891,6 +936,13 @@ public class WorkspaceDaemonRegistry
     private volatile String daemonVersion;
 
     private volatile Instant daemonBuildTime;
+
+    /**
+     * The wire-contract version announced in {@link Hello}; 0 until one arrives. The registry used
+     * to only log this — it is recorded now because the reverse tunnel has to branch on it, and
+     * "not yet said" has to read as "not capable".
+     */
+    private volatile int capabilityVersion;
 
     private final ConcurrentHashMap<String, PendingCommand> pendingCommands =
         new ConcurrentHashMap<>();

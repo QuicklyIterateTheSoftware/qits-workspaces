@@ -3,6 +3,7 @@ package eu.wohlben.qits.workspaces.api;
 import eu.wohlben.qits.workspaces.control.ContainerProxyPath;
 import eu.wohlben.qits.workspaces.control.DaemonProxyTargets;
 import eu.wohlben.qits.workspaces.control.ProxyOrigin;
+import eu.wohlben.qits.workspaces.daemonhost.WorkspaceTunnels;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -56,9 +57,19 @@ public class ContainerProxyRoute {
 
   @Inject DaemonProxyTargets targets;
 
+  @Inject WorkspaceTunnels tunnels;
+
   /** The bearer the daemon requires; the same value {@code WorkspaceContainerFactory} injects. */
   @ConfigProperty(name = "qits.workspace.daemon-api-token", defaultValue = "qits-workspace-daemon")
   String daemonApiToken;
+
+  /**
+   * The daemon's own port — not where the proxy connects, but the authority it presents. Pinning it
+   * to a constant is what keeps the daemon's view of who called it identical whether the request
+   * arrived at the container's address or through the reverse tunnel's ephemeral loopback port.
+   */
+  @ConfigProperty(name = "qits.workspace.daemon-api-port", defaultValue = "13338")
+  int daemonApiPort;
 
   /** See {@link ServiceProxyRoute}'s field of the same name for why this key may be read here. */
   @ConfigProperty(name = "quarkus.http.root-path", defaultValue = "/")
@@ -92,13 +103,49 @@ public class ContainerProxyRoute {
       return;
     }
 
-    // The request stays untouched while the lookup runs off the event loop — it reads a row, so it
-    // needs a worker thread and a transaction; the proxy resumes it when forwarding.
+    // The request stays untouched while the lookup runs off the event loop — it reads a row and may
+    // bind a listener, so it needs a worker thread and a transaction; the proxy resumes it when
+    // forwarding.
     rc.request().pause();
     rc.vertx()
-        .executeBlocking(() -> targets.resolve(workspaceId))
+        .executeBlocking(() -> resolve(workspaceId))
         .onFailure(e -> respond(rc, 502, "Workspace lookup failed."))
-        .onSuccess(target -> route(rc, target));
+        .onSuccess(resolved -> route(rc, resolved));
+  }
+
+  /**
+   * How to reach this workspace's daemon: through the reverse tunnel when its daemon can serve one,
+   * and at the container's own address otherwise.
+   *
+   * <p>The two are strictly complementary and keyed by the daemon's announced capability version: a
+   * daemon that serves streams has stopped listening on {@code qits-net}, and one that still listens
+   * knows nothing about {@code OpenStream}. So there is no ambiguous middle to design around, and a
+   * daemon that has not said hello yet counts as "not capable" — which is the safe direction, since
+   * an image old enough to predate the tunnel is also old enough to still be listening.
+   *
+   * <p>The tunnel branch does not consult the workspace row or docker at all. A live control socket
+   * is stronger evidence that the container is up than {@code docker inspect} is, and it costs one
+   * round-trip less per request. It does mean the ACTIVE-row scoping only runs on the direct branch;
+   * that is fine, because {@code WorkspaceTunnels} is keyed on the same row id and a soft-deleted
+   * workspace's daemon is not connected.
+   */
+  private Resolved resolve(Long workspaceId) {
+    return tunnels
+        .originFor(workspaceId)
+        .map(Resolved::tunnelled)
+        .orElseGet(() -> Resolved.direct(targets.resolve(workspaceId)));
+  }
+
+  /** Either a tunnel entrance, or a direct target that still has to be interpreted. */
+  private record Resolved(
+      WorkspaceTunnels.TunnelOrigin tunnel, DaemonProxyTargets.DaemonTarget direct) {
+    static Resolved tunnelled(WorkspaceTunnels.TunnelOrigin origin) {
+      return new Resolved(origin, null);
+    }
+
+    static Resolved direct(DaemonProxyTargets.DaemonTarget target) {
+      return new Resolved(null, target);
+    }
   }
 
   /**
@@ -107,7 +154,20 @@ public class ContainerProxyRoute {
    * indistinguishable 502, and then every daemon problem looks like the same problem —
    * {@link ServiceProxyRoute} already distinguishes its states for that reason.
    */
-  private void route(RoutingContext rc, DaemonProxyTargets.DaemonTarget target) {
+  private void route(RoutingContext rc, Resolved resolved) {
+    if (resolved.tunnel() != null) {
+      // Only the origin moved. Same two interceptors as the direct branch, and the authority they
+      // pin is the daemon's own port either way — so the daemon cannot tell which route the request
+      // took, and must not be able to. The client is the tunnel's, never the shared one; see
+      // WorkspaceTunnels for what sharing it would cost.
+      HttpProxy.reverseProxy(resolved.tunnel().client())
+          .origin(resolved.tunnel().port(), "127.0.0.1")
+          .addInterceptor(bearer(daemonApiToken))
+          .addInterceptor(hostRewrite(daemonApiPort))
+          .handle(rc.request());
+      return;
+    }
+    DaemonProxyTargets.DaemonTarget target = resolved.direct();
     switch (target.reachability()) {
       case NO_WORKSPACE -> respond(rc, 404, "No workspace here.");
       case NO_CONTAINER ->
@@ -128,7 +188,7 @@ public class ContainerProxyRoute {
         HttpProxy.reverseProxy(proxyClient)
             .origin(origin.port(), origin.host())
             .addInterceptor(bearer(daemonApiToken))
-            .addInterceptor(hostRewrite(origin.port()))
+            .addInterceptor(hostRewrite(daemonApiPort))
             .handle(rc.request());
       }
     }

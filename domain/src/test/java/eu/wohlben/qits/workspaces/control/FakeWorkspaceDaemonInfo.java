@@ -20,6 +20,14 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeWorkspaceDaemonInfo implements WorkspaceDaemonInfo {
 
+  /**
+   * A capability version at or above the reverse tunnel's, spelled as a literal because {@code
+   * domain} does not depend on the protocol module — it is framework-free and the wire contract is
+   * the {@code service} module's. {@code DaemonProtocol.TUNNEL_CAPABILITY_VERSION} is the real
+   * name; if that ever moves past this, the tunnel branch stops being exercised by the fake.
+   */
+  private static final int TUNNEL_CAPABLE = 4;
+
   private final ConcurrentHashMap<Long, Info> infos = new ConcurrentHashMap<>();
 
   /**
@@ -27,7 +35,16 @@ public class FakeWorkspaceDaemonInfo implements WorkspaceDaemonInfo {
    * buildTime} mimics an older image that reported none — never orderable, so never "the latest".
    */
   public void report(Long workspaceId, String version, Instant buildTime) {
-    infos.put(workspaceId, new Info(Instant.EPOCH, version, buildTime));
+    report(workspaceId, version, buildTime, TUNNEL_CAPABLE);
+  }
+
+  /**
+   * The same, naming the capability version the daemon announced. Overloaded rather than added to
+   * the call above because only the reverse-tunnel branch cares about it, and every existing caller
+   * is about build identity — the tunnel-capable value is the right default for them.
+   */
+  public void report(Long workspaceId, String version, Instant buildTime, int capabilityVersion) {
+    infos.put(workspaceId, new Info(Instant.EPOCH, version, buildTime, capabilityVersion));
   }
 
   public void forget(Long workspaceId) {
