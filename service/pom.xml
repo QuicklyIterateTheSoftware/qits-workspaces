@@ -132,7 +132,15 @@
             </plugin>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
+                <!-- preferIPv4Stack is for the daemon ITs, and it has to be an argLine because the
+                     JVM reads it when networking initialises, before any test runs. Those tests
+                     stand a server up in this JVM for a container to dial through
+                     host.docker.internal, and Docker Desktop's gateway forwards only IPv4
+                     listeners; left alone a JVM binds a dual-stack IPv6 socket for 0.0.0.0, which
+                     the container cannot see. Harmless for everything else here — the Quarkus test
+                     server is reached over loopback. -->
                 <configuration>
+                    <argLine>-Djava.net.preferIPv4Stack=true</argLine>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>

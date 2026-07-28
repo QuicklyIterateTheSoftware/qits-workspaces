@@ -72,10 +72,30 @@ public class DaemonApiGateIT {
 
   private static final HttpClient CLIENT = HttpClient.newHttpClient();
 
+  /**
+   * Fail early and say why, rather than time out on a control socket that was never reachable.
+   *
+   * <p>The container reaches this JVM's stand-in backend through {@code host.docker.internal}, and
+   * Docker Desktop's gateway forwards only IPv4 listeners. A JVM left to itself binds a dual-stack
+   * IPv6 socket for {@code 0.0.0.0} — {@code ss} shows {@code *:port} rather than {@code
+   * 0.0.0.0:port} — which is invisible from the container, and the daemon's connect failure is a
+   * DEBUG line in another process. The symptom is a 90-second timeout with an empty control socket
+   * and nothing anywhere to explain it, which is worth one assertion to prevent.
+   *
+   * <p>{@code --network host} would remove the hop entirely and does not work here: Docker Desktop
+   * runs containers in a VM, so "host" is that VM and not this machine.
+   */
+  private static void requireIpv4Sockets() {
+    assertTrue(
+        Boolean.getBoolean("java.net.preferIPv4Stack"),
+        "run with -Djava.net.preferIPv4Stack=true (the pom sets it; see this test's javadoc)");
+  }
+
   @Test
   public void aBrowserEquivalentClientDrivesTheDaemonOverItsHttpApi() throws Exception {
     assumeTrue(
         dockerAndImageAvailable(), "docker + " + IMAGE + " (built with workspace-daemon) required");
+    requireIpv4Sockets();
 
     Path work = Files.createTempDirectory("qits-apigate-it");
     Path bare = prepareServedBareRepo(work);
@@ -84,11 +104,16 @@ public class DaemonApiGateIT {
     String container = "qits-apigate-it-" + UUID.randomUUID().toString().substring(0, 8);
     CompletableFuture<Provisioned> provisioned = new CompletableFuture<>();
     CompletableFuture<ProvisionFailed> failed = new CompletableFuture<>();
+    java.util.List<String> heard = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     HttpServer server = vertx.createHttpServer();
     server.requestHandler(
         req -> {
-          String prefix = "/git/" + REPO_ID + "/";
+          // /artifacts/git and not /git: with no QITS_WORKSPACE_DAEMON_GIT_BASE_URL injected the
+          // daemon derives its git host from the control-socket authority and appends the
+          // qits-artifacts segment, saying so in a WARN as it goes. Serving the pre-segment path
+          // fails the clone with a 404 and the only symptom is ProvisionFailed.
+          String prefix = "/artifacts/git/" + REPO_ID + "/";
           if (req.path().startsWith(prefix)) {
             serveBareFile(bare, req.path().substring(prefix.length()), req);
           } else {
@@ -101,10 +126,24 @@ public class DaemonApiGateIT {
         ws ->
             ws.textMessageHandler(
                 text -> {
-                  switch (DaemonCodec.decode(new JsonObject(text).getMap())) {
+                  DaemonMessage message = DaemonCodec.decode(new JsonObject(text).getMap());
+                  // Everything, in order: when this gate fails it is nearly always because the
+                  // daemon said something other than what was expected, and a bare timeout throws
+                  // that away.
+                  heard.add(
+                      switch (message) {
+                        case eu.wohlben.qits.workspacedaemon.protocol.DaemonLog log ->
+                            "DaemonLog[" + log.level() + "] " + log.message();
+                        // git's own words. Without them a failed self-clone is just the word
+                        // ProvisionFailed, and the reason is in another process's stdout.
+                        case eu.wohlben.qits.workspacedaemon.protocol.CommandChunk chunk ->
+                            "chunk: " + chunk.text().strip();
+                        case ProvisionFailed f -> "ProvisionFailed: " + f.message();
+                        default -> message.getClass().getSimpleName();
+                      });
+                  switch (message) {
                     case Provisioned p -> provisioned.complete(p);
                     case ProvisionFailed f -> failed.complete(f);
-                    case Hello ignored -> {}
                     default -> {}
                   }
                 }));
@@ -116,6 +155,7 @@ public class DaemonApiGateIT {
             .get(5, TimeUnit.SECONDS)
             .actualPort();
 
+    String host = hostGatewayIpv4();
     try {
       run(
           RUNTIME,
@@ -127,11 +167,24 @@ public class DaemonApiGateIT {
           "--user",
           hostUid(),
           "--add-host=host.docker.internal:host-gateway",
+          // The daemon logs its dial-home failures at DEBUG. Without this the container log says
+          // nothing at all about why it never connected, which is the single most likely way this
+          // gate fails and the hardest to guess at from outside.
+          "-e",
+          "QUARKUS_LOG_CATEGORY__EU_WOHLBEN__LEVEL=DEBUG",
           // The host-run equivalent of reaching the container by DNS name on qits-net.
           "-p",
           "127.0.0.1::13338",
           "-e",
-          "QITS_WORKSPACE_DAEMON_URL=ws://host.docker.internal:" + port + "/workspaces/daemon/it-ws",
+          "QITS_WORKSPACE_DAEMON_URL=ws://" + host + ":" + port + "/workspaces/daemon/it-ws",
+          // Injected rather than derived, and as an IPv4 literal. Derived, the daemon composes it
+          // from the control-socket authority — fine in production, useless here: git is libcurl and
+          // prefers the AAAA record docker publishes for host.docker.internal, while the daemon's
+          // own Netty client takes the A record, so with one name the two halves of this test reach
+          // different addresses and only one of them finds the listener. A literal has no such
+          // opinion. It also silences the WARN the daemon rightly emits when it has to guess.
+          "-e",
+          "QITS_WORKSPACE_DAEMON_GIT_BASE_URL=http://" + host + ":" + port + "/artifacts/git",
           "-e",
           "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=it-ws",
           "-e",
@@ -142,10 +195,29 @@ public class DaemonApiGateIT {
           // WorkspaceApi refuses to bind and every assertion below would be a connection error.
           "-e",
           "QITS_WORKSPACE_DAEMON_API_TOKEN=" + TOKEN,
+          // Stage 2 binds the API to 127.0.0.1, and a docker-published port forwards to the
+          // container's own address rather than its loopback — so the shipped default is
+          // deliberately unreachable this way, and a published port would EOF. Overridden here
+          // because this test is about the API's behaviour, not its address; the address is
+          // aPeerContainerCannotReachTheApi's subject, and it runs with the default.
+          "-e",
+          "QITS_WORKSPACE_DAEMON_API_BIND_ADDRESS=0.0.0.0",
           IMAGE);
 
       assertFalse(failed.isDone(), () -> "unexpected ProvisionFailed: " + failed.getNow(null));
-      provisioned.get(90, TimeUnit.SECONDS);
+      try {
+        provisioned.get(90, TimeUnit.SECONDS);
+      } catch (Exception neverProvisioned) {
+        // Without this the failure is a bare TimeoutException and the only witness — the daemon's
+        // own log, in another process that is about to be removed — is gone. Everything this gate
+        // is about happens over there.
+        throw new AssertionError(
+            "the daemon never reported Provisioned.\nHeard on the control socket: "
+                + heard
+                + "\nContainer log:\n"
+                + logs(container),
+            neverProvisioned);
+      }
       String api = "http://127.0.0.1:" + publishedPort(container);
 
       // --- the token is the precondition, not decoration ----------------------------------------
@@ -171,6 +243,19 @@ public class DaemonApiGateIT {
       assertTrue(bootstrap.body().contains("\"steps\""), bootstrap.body());
 
       // --- one command launched, watched, and terminated ----------------------------------------
+      // Through the daemon's own view of the checkout's actions, so a config the daemon read
+      // differently from how the test wrote it says so here rather than as a 400 on the launch.
+      HttpResponse<String> actions = get(api + "/commands/actions", bearer());
+      assertEquals(200, actions.statusCode(), actions.body());
+      assertTrue(
+          actions.body().contains("\"hold\""),
+          "the daemon did not read the checkout's declared actions: "
+              + actions.body()
+              + "\n/services said: "
+              + get(api + "/services", bearer()).body()
+              + "\n.qits-config.yml in the checkout: "
+              + get(api + "/files/content?path=.qits-config.yml", bearer()).body());
+
       HttpResponse<String> launched =
           post(api + "/commands", "{\"actionId\":\"hold\"}", bearer());
       assertEquals(200, launched.statusCode(), launched.body());
@@ -220,6 +305,69 @@ public class DaemonApiGateIT {
     }
   }
 
+  /**
+   * §10's acceptance criterion for stage 2, stated as a test: a peer container on the same network
+   * is refused by the network stack rather than by a token check.
+   *
+   * <p>This is the whole point of the change and the one thing no unit test can show. Two containers
+   * on one user-defined network — the qits-net shape — and the second cannot open a TCP connection
+   * to the first's {@code 13338} at all, because nothing is listening on an address it can route to.
+   * Before stage 2 this connection succeeded and only the bearer stood between one workspace's coding
+   * agent and every other workspace's working tree.
+   */
+  @Test
+  public void aPeerContainerCannotReachTheApi() throws Exception {
+    assumeTrue(
+        dockerAndImageAvailable(), "docker + " + IMAGE + " (built with workspace-daemon) required");
+
+    String network = "qits-apigate-net-" + UUID.randomUUID().toString().substring(0, 8);
+    String daemon = "qits-apigate-daemon-" + UUID.randomUUID().toString().substring(0, 8);
+    run(RUNTIME, "network", "create", network);
+    try {
+      run(
+          RUNTIME,
+          "run",
+          "-d",
+          "--init",
+          "--name",
+          daemon,
+          "--network",
+          network,
+          "--user",
+          hostUid(),
+          // No API bind override: the shipped default, which is the subject here.
+          "-e",
+          "QITS_WORKSPACE_DAEMON_API_TOKEN=" + TOKEN,
+          "-e",
+          "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=peer-target",
+          IMAGE);
+
+      // The peer is the same image with a shell instead of the daemon — a stand-in for the coding
+      // agent that any workspace container runs, with the network access it really has.
+      String probe =
+          exec(
+              new ProcessBuilder(
+                  RUNTIME,
+                  "run",
+                  "--rm",
+                  "--network",
+                  network,
+                  "--entrypoint",
+                  "/bin/bash",
+                  IMAGE,
+                  "-c",
+                  "(exec 3<>/dev/tcp/" + daemon + "/13338 && echo REACHABLE) 2>/dev/null"
+                      + " || echo REFUSED"));
+
+      assertTrue(
+          probe.contains("REFUSED"),
+          "a peer workspace must not be able to open the daemon's API port; got: " + probe);
+    } finally {
+      run(RUNTIME, "rm", "-f", daemon);
+      run(RUNTIME, "network", "rm", network);
+    }
+  }
+
   // --- the served repository ---------------------------------------------------------------------
 
   /**
@@ -237,6 +385,10 @@ public class DaemonApiGateIT {
     Files.writeString(
         src.resolve(".qits-config.yml"),
         """
+        # `version: 1` is mandatory — ConfigParser refuses a document without it, and the refusal
+        # surfaces only as an empty config plus a warning on ConfigView, which nothing here reads.
+        # Omitting it looks exactly like a checkout that declares nothing.
+        version: 1
         actions:
           - name: hold
             description: an interactive shell that stays up until terminated
@@ -342,6 +494,43 @@ public class DaemonApiGateIT {
   }
 
   // --- docker -------------------------------------------------------------------------------------
+
+  /**
+   * The address a container reaches this host on, as an IPv4 literal.
+   *
+   * <p>Asked of docker rather than assumed, because it is Docker Desktop's gateway on one machine
+   * and the bridge gateway on another. Resolved through a throwaway container so the answer is the
+   * container's, which is the only view that matters.
+   */
+  private static String hostGatewayIpv4() throws Exception {
+    String out =
+        exec(
+            new ProcessBuilder(
+                RUNTIME,
+                "run",
+                "--rm",
+                "--add-host=host.docker.internal:host-gateway",
+                "--entrypoint",
+                "/usr/bin/getent",
+                IMAGE,
+                "ahostsv4",
+                "host.docker.internal"));
+    return out.lines()
+        .map(String::trim)
+        .filter(line -> !line.isEmpty())
+        .map(line -> line.split("\\s+")[0])
+        .findFirst()
+        .orElseThrow(() -> new IllegalStateException("no IPv4 for host.docker.internal: " + out));
+  }
+
+  /** The container's own log — the only account of what happened in the other process. */
+  private static String logs(String container) {
+    try {
+      return exec(new ProcessBuilder(RUNTIME, "logs", container));
+    } catch (Exception e) {
+      return "(could not read " + RUNTIME + " logs: " + e + ")";
+    }
+  }
 
   /** The host port docker published the daemon's API on. */
   private static String publishedPort(String container) throws Exception {

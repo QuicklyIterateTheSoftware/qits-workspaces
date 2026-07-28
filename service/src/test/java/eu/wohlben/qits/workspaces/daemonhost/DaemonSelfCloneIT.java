@@ -71,7 +71,9 @@ public class DaemonSelfCloneIT {
     server.requestHandler(
         req -> {
           String path = req.path();
-          String prefix = "/git/" + REPO_ID + "/";
+          // /artifacts/git and not /git: the daemon appends the qits-artifacts segment when it
+          // derives its git host, so the pre-segment path 404s every clone.
+          String prefix = "/artifacts/git/" + REPO_ID + "/";
           if (path.startsWith(prefix)) {
             serveBareFile(bare, path.substring(prefix.length()), req);
           } else {
@@ -104,7 +106,8 @@ public class DaemonSelfCloneIT {
             .actualPort();
 
     try {
-      String url = "ws://host.docker.internal:" + port + "/workspaces/daemon/it-ws";
+      String host = hostGatewayIpv4();
+      String url = "ws://" + host + ":" + port + "/workspaces/daemon/it-ws";
       run(
           RUNTIME,
           "run",
@@ -117,6 +120,8 @@ public class DaemonSelfCloneIT {
           "--add-host=host.docker.internal:host-gateway",
           "-e",
           "QITS_WORKSPACE_DAEMON_URL=" + url,
+          "-e",
+          "QITS_WORKSPACE_DAEMON_GIT_BASE_URL=http://" + host + ":" + port + "/artifacts/git",
           "-e",
           "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=it-ws",
           "-e",
@@ -225,6 +230,37 @@ public class DaemonSelfCloneIT {
    * name every daemon IT then failed on a 30-second timeout instead of skipping — a build
    * environment problem wearing the costume of a product bug.
    */
+  /**
+   * The address a container reaches this host on, as an IPv4 literal — asked of docker rather than
+   * assumed, since it is Docker Desktop's gateway on one machine and the bridge gateway on another.
+   *
+   * <p>A literal and not {@code host.docker.internal}, because the two halves of this test resolve
+   * that name differently: git is libcurl and prefers the AAAA record docker publishes, while the
+   * daemon's own Netty client takes the A record. With one name they reach different addresses and
+   * only one of them finds the listener — which presents as a clone that cannot connect while the
+   * control socket is plainly up.
+   */
+  private static String hostGatewayIpv4() throws Exception {
+    String out =
+        exec(
+            new ProcessBuilder(
+                RUNTIME,
+                "run",
+                "--rm",
+                "--add-host=host.docker.internal:host-gateway",
+                "--entrypoint",
+                "/usr/bin/getent",
+                IMAGE,
+                "ahostsv4",
+                "host.docker.internal"));
+    return out.lines()
+        .map(String::trim)
+        .filter(line -> !line.isEmpty())
+        .map(line -> line.split("\\s+")[0])
+        .findFirst()
+        .orElseThrow(() -> new IllegalStateException("no IPv4 for host.docker.internal: " + out));
+  }
+
   private boolean dockerAndImageAvailable() {
     try {
       Process process =
