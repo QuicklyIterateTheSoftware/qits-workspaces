@@ -61,6 +61,20 @@
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- The OUTBOUND half: wiring/ProjectsRepositories, the one call this service makes to
+                 another — asking qits-projects about a repository, because this context holds no
+                 foreign key into the repositories tables and there is no join to make across two
+                 physical databases.
+
+                 The declarative client rather than a hand-rolled java.net.http one, for a reason
+                 that is about the topology and not about taste: `quarkus.rest-client.*.url` accepts
+                 `stork://qits-projects`, so moving from a fixed address to real service discovery
+                 (Consul, Kubernetes, a static list) is a config change instead of a rewrite. It
+                 also puts the timeouts in config and the 404-vs-error split in one place. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-client-jackson</artifactId>
+        </dependency>
+        <dependency>
             <!-- The daemon control socket (@WebSocket .../{workspaceId}). -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-websockets-next</artifactId>

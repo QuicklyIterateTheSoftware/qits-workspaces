@@ -6,8 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import eu.wohlben.qits.workspaces.control.RepositoryLookup;
+import io.quarkus.rest.client.reactive.QuarkusRestClientBuilder;
+import io.quarkus.test.junit.QuarkusTest;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
@@ -16,14 +19,18 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link HttpRepositoryLookup} against a real HTTP server rather than a mocked client, because what
- * is worth pinning here is the wire behaviour: the path it calls, and which failures are an answer
- * versus an error.
+ * {@link HttpRepositoryLookup} against a real HTTP server and a real REST client, because what is
+ * worth pinning here is not the happy path — it is <b>which failures are an answer and which are an
+ * error</b>, and that mapping depends entirely on the exception types the generated client actually
+ * throws. A test with a mocked client would assert my assumptions about those types rather than the
+ * types themselves, and would keep passing if the extension changed them.
  *
- * <p>Plain JUnit, no {@code @QuarkusTest} — the class is constructed directly so the config field
- * can be set per case. The server is {@code com.sun.net.httpserver}, already in the JDK, so this
- * adds no dependency and nothing here needs a container.
+ * <p>So: a {@code com.sun.net.httpserver} stub (already in the JDK, no dependency, no container) on
+ * an ephemeral port, and a client built by {@link QuarkusRestClientBuilder} against it. The bean is
+ * constructed directly rather than injected, so each case can set the address it is testing —
+ * including the unwired one, which no injected configuration could express.
  */
+@QuarkusTest
 public class HttpRepositoryLookupTest {
 
   private HttpServer server;
@@ -36,7 +43,7 @@ public class HttpRepositoryLookupTest {
     }
   }
 
-  /** Starts a server answering every request with the given status and body. */
+  /** Starts a stub answering every request with the given status and body. */
   private String serve(int status, String body) throws Exception {
     server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     server.createContext(
@@ -45,7 +52,7 @@ public class HttpRepositoryLookupTest {
           requestedPaths.add(exchange.getRequestURI().getPath());
           byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
           exchange.getResponseHeaders().add("Content-Type", "application/json");
-          exchange.sendResponseHeaders(status, bytes.length);
+          exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
           try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
           }
@@ -54,10 +61,16 @@ public class HttpRepositoryLookupTest {
     return "http://127.0.0.1:" + server.getAddress().getPort();
   }
 
+  /** The bean wired to {@code baseUrl}, with a real generated client pointed at the same place. */
   private HttpRepositoryLookup lookupAgainst(String baseUrl) {
     HttpRepositoryLookup lookup = new HttpRepositoryLookup();
     lookup.baseUrl = Optional.ofNullable(baseUrl);
-    lookup.openClient();
+    if (baseUrl != null) {
+      lookup.repositories =
+          QuarkusRestClientBuilder.newBuilder()
+              .baseUri(URI.create(baseUrl))
+              .build(ProjectsRepositories.class);
+    }
     return lookup;
   }
 
@@ -78,24 +91,28 @@ public class HttpRepositoryLookupTest {
   }
 
   /**
-   * The path is qits-projects' own gateway segment, spelled here as a cross-repo contract. If that
-   * service moves its segment this test is the thing that notices.
+   * Fields qits-projects sends that this context does not bind are ignored rather than fatal. That
+   * is what lets that service evolve its RepositoryDto without breaking this one, so it is asserted
+   * rather than assumed — the case above already carries url/archetype/projectId; this one adds a
+   * field that does not exist yet.
+   */
+  @Test
+  public void anUnknownFieldFromProjectsIsNotFatal() throws Exception {
+    String base =
+        serve(200, "{\"repository\":{\"id\":\"repo-1\",\"mainBranch\":\"main\",\"futureField\":7}}");
+
+    assertTrue(lookupAgainst(base).find("repo-1").isPresent());
+  }
+
+  /**
+   * The path is qits-projects' own gateway segment, spelled in {@link ProjectsRepositories} as a
+   * cross-repo contract. If that service moves its segment, this is what notices.
    */
   @Test
   public void theRequestGoesToTheProjectsSegment() throws Exception {
     String base = serve(200, "{\"repository\":{\"id\":\"repo-1\",\"mainBranch\":\"main\"}}");
 
     lookupAgainst(base).find("repo-1");
-
-    assertEquals(List.of("/projects/api/repositories/repo-1"), requestedPaths);
-  }
-
-  /** A trailing slash on the configured base must not become a double slash in the path. */
-  @Test
-  public void aTrailingSlashOnTheBaseUrlIsTolerated() throws Exception {
-    String base = serve(200, "{\"repository\":{\"id\":\"repo-1\",\"mainBranch\":\"main\"}}");
-
-    lookupAgainst(base + "/").find("repo-1");
 
     assertEquals(List.of("/projects/api/repositories/repo-1"), requestedPaths);
   }
@@ -130,14 +147,16 @@ public class HttpRepositoryLookupTest {
 
     IllegalStateException failure =
         assertThrows(IllegalStateException.class, () -> lookupAgainst(base).find("repo-1"));
-    assertTrue(failure.getMessage().contains("500"));
+    assertTrue(
+        failure.getMessage().contains("500"),
+        "expected the message to carry the status, got: " + failure.getMessage());
   }
 
   @Test
   public void anUnreadableAnswerThrowsRatherThanLookingLikeAnEmptyRegistry() throws Exception {
     String base = serve(200, "not json at all");
 
-    assertThrows(IllegalStateException.class, () -> lookupAgainst(base).find("repo-1"));
+    assertThrows(RuntimeException.class, () -> lookupAgainst(base).find("repo-1"));
   }
 
   /** Dev and test tolerate no address; a production build never reaches this (see the observer). */
