@@ -140,8 +140,9 @@ service serves the prefixed path itself and there is no unprefixed form, on the 
 | `/workspaces/daemon/{id}` | the daemon's dial-home control socket | `DaemonControlSocket`, literal |
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
 | `/workspaces/container/{id}/*` | the workspace-daemon reverse proxy | `ContainerProxyPath.PREFIX`, literal |
+| `/workspaces/daemon/stream/{nonce}` | where a daemon's tunnel dial-back lands | `WorkspaceTunnels.STREAM_PATH_PREFIX`, literal |
 
-The last three are second-level segments beside `api` because none is a JSON API, and all are
+These are second-level segments beside `api` because none is a JSON API, and all are
 literals for the same reason: **raw Vert.x routes and `@WebSocket` paths do not follow
 `quarkus.rest.path`.** So is `CaptureCorsRoute`'s preflight, which derives its path from the prefix
 rather than repeating it — a preflight on a different path from the POST it clears is worth nothing.
@@ -168,6 +169,18 @@ request. The daemon is deliberately **not** a gateway route — one process per 
 one container lifetime, has no stable address to configure — and `container` rather than `daemon`
 because the control socket already owns that segment and its literal is baked into running
 containers. `ContainerProxyPath` carries the argument; `DaemonProxyTargets` does the lookup.
+
+**A daemon at `DaemonProtocol.TUNNEL_CAPABILITY_VERSION` or above is not reached at `13338` at all.**
+It binds `127.0.0.1` and has no address on `qits-net`, so the proxy's origin is instead a loopback
+listener this service opens per workspace (`WorkspaceTunnels`); each accepted connection mints a
+single-use nonce, asks that workspace's daemon over the control socket to come and get it, and the
+daemon dials back to `/workspaces/daemon/stream/{nonce}` and pipes it to its own API. The tunnel
+carries bytes, so an HTTP request and a WebSocket upgrade traverse it identically.
+
+The two ways are keyed by that one version and are strictly complementary — a daemon that serves
+streams has stopped listening, one that still listens knows nothing about `OpenStream` — so there is
+no ambiguous middle, and a daemon that has not said hello yet counts as not capable. That is the
+safe direction: an image old enough to predate the tunnel is old enough to still be listening.
 
 Two things it does not do, both on purpose. It does not authorize the caller — qits is single-user
 and a workspace has no owner; the check is that the id names an ACTIVE row, and an unknown id, a

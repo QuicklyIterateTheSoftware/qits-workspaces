@@ -129,7 +129,7 @@ anything left at the root is unreachable. `README.md` has the table.
 
 The one thing to know before you add a route: **`quarkus.rest.path` moves the JAX-RS routes and
 nothing else.** A raw Vert.x route or a `@WebSocket` path registers straight onto the router with a
-literal and must carry `/workspaces` itself. Four do, each for its own reason:
+literal and must carry `/workspaces` itself. Five do, each for its own reason:
 
 - `DaemonControlSocket` — `/workspaces/daemon/{id}`, and a **cross-repo contract**:
   `WorkspaceContainerFactory` injects `ws://<host>:<port>/workspaces/daemon/<id>` as
@@ -145,6 +145,12 @@ literal and must carry `/workspaces` itself. Four do, each for its own reason:
   baked into every running container). Not a gateway route, and there must never be a `DAEMON`
   constant in the gateway's `QitsService`: a daemon is one process per container with no stable
   address to configure, and this service owns the row and the lifecycle.
+- `DaemonStreamRoute` — `WorkspaceTunnels.STREAM_PATH_PREFIX`, `/workspaces/daemon/stream/`, where a
+  daemon's reverse-tunnel dial-back lands. It shares a prefix with `DaemonControlSocket` and does not
+  collide (`{id}` matches one segment, so no daemon can be named `stream`), and it is a **raw** route
+  rather than websockets-next for a hard reason: `io.quarkus.websockets.next.Connection` exposes
+  `sendBinary` and no `writeQueueFull`/`drainHandler`, and a byte tunnel with no backpressure signal
+  is an unbounded heap buffer. `request.toWebSocket()` gives a real `WriteStream`.
 - `CaptureCorsRoute` — derives its path from the REST prefix instead of repeating it, because a
   preflight on a different path from the POST it clears is worth nothing, and the client reads a 404
   there as "hide the button" rather than as an error. It reads **`qits.rest.path`**, not
