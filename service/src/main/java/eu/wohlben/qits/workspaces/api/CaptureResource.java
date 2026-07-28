@@ -8,6 +8,7 @@ import eu.wohlben.qits.workspaces.control.CaptureService;
 import eu.wohlben.qits.workspaces.dto.CaptureContent;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.entity.Workspace;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -36,7 +37,28 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  *
  * <p>Hidden from the OpenAPI document: this is a wire endpoint for the capture library, not part of
  * the JSON API the generated Angular client consumes.
+ *
+ * <p>Both payload shapes are registered for reflection because <strong>neither appears on a method
+ * signature Quarkus can index</strong>: the request arrives as {@code byte[]} (it is gzipped, and
+ * inflated under a cap before parsing) and is turned into a {@link CaptureRequest} by an injected
+ * {@code ObjectMapper}, while the reply goes back inside a {@code jakarta.ws.rs.core.Response} that
+ * hides {@link CaptureResponse}. Native-image therefore keeps no members of either, and the binary
+ * answered every capture with 400 "Malformed capture payload" — the parse failing on reflection,
+ * caught as an {@code IOException} and reported as a client error. The JVM suite could not see it;
+ * only a request against the binary did. Nested records need naming individually.
  */
+@RegisterForReflection(
+    targets = {
+      CaptureResource.CaptureRequest.class,
+      CaptureResource.CaptureRequest.Identity.class,
+      CaptureResource.CaptureRequest.Page.class,
+      CaptureResource.CaptureRequest.Environment.class,
+      CaptureResource.CaptureRequest.Viewport.class,
+      CaptureResource.CaptureRequest.Dom.class,
+      CaptureResource.CaptureRequest.Selection.class,
+      CaptureResource.CaptureResponse.class,
+      CaptureResource.CaptureResponse.WorkspaceRef.class
+    })
 @Path("capture")
 public class CaptureResource {
 

@@ -20,17 +20,33 @@ the boundary. Everything that runs *inside* the container belongs to
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
 
-`domain/` is a library jar. **`service/` is the application** — augmented by the
-`quarkus-maven-plugin` into a process. `domain` owns its **own datasource, persistence unit and
-Flyway lineage** (`db/workspaces/migration`, a separate H2), which is what makes this a standalone
-deployable rather than a checkout of the monorepo.
+`domain/` is a library jar. **`service/` is the application** — it carries
+`<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary.
+`domain` owns its **own datasource, persistence unit and Flyway lineage**
+(`db/workspaces/migration`, a separate H2), which is what makes this a standalone deployable rather
+than a checkout of the monorepo.
 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar
 
-**That second command deliberately fails today**, and the message tells you why: this service has no
-`RepositoryLookup`. See "Deploying it" below — it is the one thing between here and a running
-process, and it is code rather than configuration.
+    ./mvnw package -Dnative
+    ./service/target/qits-workspaces
+
+**Both of those run commands deliberately fail today**, identically, and the message tells you why:
+this service has no `RepositoryLookup`. See "Deploying it" below — it is the one thing between here
+and a running process, and it is code rather than configuration.
+
+**Native is the shipping form.** `.sdkmanrc` names a GraalVM (`25.0.2-graalce`) so `sdk env` alone
+is enough toolchain — the build wants a `native-image` on `GRAALVM_HOME`, `JAVA_HOME` or `PATH`, and
+if it finds none it does not fail, it quietly falls back to pulling a 1.8 GB Mandrel image and
+compiling under docker. That fallback still works and is what a GraalVM-less CI gets; it is just not
+the intended path, and it is worth recognising by name when a build that normally takes a minute
+starts downloading a container image.
+
+Because this service cannot boot unwired, "does the binary work" is answered by comparing it against
+the fast-jar rather than by a smoke request: both reach the same `RepositoryLookup` failure, through
+the same Flyway migration and the same startup event, and any *other* difference between the two is
+a native-image defect. Three were found that way and are recorded in `AGENTS.md`.
 
 ## The boundary
 
@@ -92,16 +108,22 @@ service serves the prefixed path itself and there is no unprefixed form, on the 
 
 | Prefix | What | Set by |
 |---|---|---|
-| `/workspaces/api/…` | the JSON API — `workspaces`, `branches`, `history`, `events`, `service-events`, `technical-processes`, `capture` | `quarkus.rest.path` |
+| `/workspaces/api/…` | the JSON API — `workspaces`, `branches`, `history`, `events`, `service-events`, `technical-processes`, `capture` | `qits.rest.path`, which `quarkus.rest.path` is derived from |
 | `/workspaces/q/…` | `openapi`, `swagger-ui` — what the framework serves, not application code | `quarkus.http.non-application-root-path` |
 | `/workspaces/daemon/{id}` | the daemon's dial-home control socket | `DaemonControlSocket`, literal |
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
 
 The last two are second-level segments beside `api` because neither is a JSON API, and both are
 literals for the same reason: **raw Vert.x routes and `@WebSocket` paths do not follow
-`quarkus.rest.path`.** So is `CaptureCorsRoute`'s preflight, which reads that key rather than
-repeating it — a preflight on a different path from the POST it clears is worth nothing. `RootPath`
-is where that arithmetic lives.
+`quarkus.rest.path`.** So is `CaptureCorsRoute`'s preflight, which derives its path from the prefix
+rather than repeating it — a preflight on a different path from the POST it clears is worth nothing.
+`RootPath` is where that arithmetic lives.
+
+That derivation reads `qits.rest.path` and not `quarkus.rest.path`, and the difference is not
+cosmetic: `quarkus.rest.path` is fixed at build time and is therefore absent from a native image's
+runtime config, so the lookup took its default in the binary and put the preflight on an
+unreachable `/capture`. `application.properties` spells the value once, as `qits.rest.path`, and
+`quarkus.rest.path` is `${qits.rest.path}` — one value, readable in both runtimes.
 
 `/workspaces/daemon/{id}` is a **cross-repo contract**: `WorkspaceContainerFactory` injects
 `ws://<qits-host>:<port>/workspaces/daemon/<id>` as `QITS_WORKSPACE_DAEMON_URL` into every container

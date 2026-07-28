@@ -3,15 +3,46 @@
 Read `README.md` first: it defines the boundary (host side vs. workspace-daemon) and lists the
 ports. This file is the working conventions on top of it.
 
-## The one rule that shapes everything
+## The two rules that shape everything
 
-This repo must build and test green from a **clone of itself alone** — no monorepo, no docker, no
-prior `mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break
-that is not a tradeoff to weigh, it is the thing this repo exists to avoid.
+**A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
+`mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break that is
+not a tradeoff to weigh, it is the thing this repo exists to avoid.
 
 That is why: the poms duplicate versions instead of inheriting them, the daemon protocol is
 vendored, tests build their own git origins (`TestOrigin`) instead of using fixtures, and the
 container runtime is faked in tests rather than shelling docker.
+
+**`service/` compiles to a GraalVM native image**, the rule qits-workspace-daemon and qits-gateway
+already carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` is the whole toolchain and
+`./mvnw package -Dnative` produces `service/target/qits-workspaces` in about a minute with no
+container involved.
+
+Two consequences, and this repo learned both the expensive way — every one of them shipped green
+through `mvn verify` and was only found by running the binary:
+
+- **A missing GraalVM does not fail the build.** Quarkus logs `Cannot find the native-image ...
+  Attempting to fall back to container build` and shells docker with a 1.8 GB Mandrel image. Green
+  either way, so the fallback is easy to be in without noticing — recognise it by the image pull,
+  and grep the log for that line rather than trusting the exit code.
+- **The suite cannot see a native-image defect, by construction.** Native-image resolves everything
+  at build time, so reflection, dynamic proxies, `ServiceLoader` and resources loaded by computed
+  name have to be registered — and on the JVM none of that is needed, so the tests pass regardless.
+  Three real ones landed here at once: a datasource url the suite overrides (`AUTO_SERVER`, see
+  `domain`'s mp-config), two Jackson payloads reached only through a bare `ObjectMapper`
+  (`WorkspaceMetadata`, `CaptureResource`'s records), and a raw Vert.x route reading a build-time
+  config key that does not exist at runtime in a binary (`CaptureCorsRoute`, below).
+  `NativeImageContractTest` in each module pins what a JVM run can still hold; the rest is only
+  provable by booting the artifact.
+
+**Build-time config keys are not readable at runtime in a native image.** Any `quarkus.*` key that
+Quarkus fixes at augmentation is absent from the binary's runtime config, so
+`@ConfigProperty(name = "quarkus.something")` silently takes its `defaultValue` there and works fine
+on the JVM fast-jar, where `application.properties` is just another runtime config source. If
+application code needs such a value, spell it as an application-owned key and derive the Quarkus one
+from it — `qits.rest.path` / `quarkus.rest.path=${qits.rest.path}` is the worked example. A system
+property still reaches a binary's runtime config, which is the only reason `ServiceProxyRoute` may
+keep reading `quarkus.http.root-path`.
 
 ## Package and module conventions
 
@@ -108,9 +139,14 @@ literal and must carry `/workspaces` itself. Three do, each for its own reason:
   daemons loudly rather than exposing anything.
 - `ServiceProxyRoute` — `ServiceProxyPath.PREFIX`, `/workspaces/service/`, which is also baked into
   the dev server's `QITS_PUBLIC_BASE` at spawn, so the two cannot be changed apart.
-- `CaptureCorsRoute` — reads `quarkus.rest.path` instead of repeating it, because a preflight on a
-  different path from the POST it clears is worth nothing, and the client reads a 404 there as "hide
-  the button" rather than as an error. `RootPath` normalizes both that key and
+- `CaptureCorsRoute` — derives its path from the REST prefix instead of repeating it, because a
+  preflight on a different path from the POST it clears is worth nothing, and the client reads a 404
+  there as "hide the button" rather than as an error. It reads **`qits.rest.path`**, not
+  `quarkus.rest.path`: the Quarkus key is build-time and resolves to the `@ConfigProperty`
+  `defaultValue` in a native image, which put the preflight on `/capture` and left the real endpoint
+  answering browsers with RESTEasy's bare 200 and no CORS headers — green suite, dead button.
+  `application.properties` spells `qits.rest.path` once and derives `quarkus.rest.path` from it, so
+  there is still no second value to drift. `RootPath` normalizes both that key and
   `quarkus.http.root-path`; use it rather than doing the string arithmetic by hand.
 
 `/workspaces/q/*` (openapi, swagger-ui) sits outside `quarkus.rest.path` and moves only with
@@ -195,13 +231,24 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
 - **`mvn verify` passing does not mean the app starts.** Augmentation runs per `@QuarkusTest`
   regardless of packaging, and `FakeRepositoryLookup` is on the *test* classpath — so the suite
   cannot see either a missing `quarkus-maven-plugin` execution or a missing production
-  `RepositoryLookup`. Both were invisible here until the jar was actually run.
+  `RepositoryLookup`. Both were invisible here until the jar was actually run. `<packaging>quarkus</packaging>`
+  closed the first of those; nothing closes the second, and the native build widened the gap —
+  see "the two rules" above for what else only the artifact can tell you.
+- `NativeImageContractTest` (one per module) holds the native-image invariants a JVM run *can*
+  hold: no `AUTO_SERVER` in the shipped datasource url, every nested record of `QitsConfig` and of
+  `CaptureResource`'s payloads present in its `@RegisterForReflection(targets)`, and
+  `CaptureCorsRoute` reading an application-owned config key. None of them proves a binary works —
+  they prevent the silent re-introduction of what booting one already caught.
 - `FakeRepositoryLookup` still wins over `wiring/UnconfiguredRepositoryLookup` with no change on
   your part: the latter is `@DefaultBean`, which yields to any other bean of the type. If you ever
   see the "no RepositoryLookup implementation" warning in a test, a fake is missing rather than
-  broken.
+  broken. Note this is about **injection only** — the `@DefaultBean` losing the contest keeps its
+  `@Observes StartupEvent`, so the startup check still runs (it just downgrades to a warning outside
+  `LaunchMode.NORMAL`). Supplying a `RepositoryLookup` is therefore *not* enough to boot a
+  production build; that is the point of the check.
 - A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
-  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first.
+  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first,
+  or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
   returns a repo id; pair it with `FakeRepositoryLookup.register`.
 - The `Fake*` doubles are duplicated between `domain/src/test` and `service/src/test`. That is

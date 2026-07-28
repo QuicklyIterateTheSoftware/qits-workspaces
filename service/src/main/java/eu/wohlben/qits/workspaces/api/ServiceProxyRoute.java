@@ -55,6 +55,14 @@ public class ServiceProxyRoute {
    * it matches relative to the prefix — but {@code rc.request().path()} returns the FULL path, so
    * the segment parse must strip the prefix first. {@code "/"} (the normal deployment) strips
    * nothing.
+   *
+   * <p>This one may keep reading the {@code quarkus.*} key, unlike {@link CaptureCorsRoute}, and the
+   * difference is worth stating because the two look identical. Build-time config items are absent
+   * from a native image's runtime config, so such a lookup silently takes its {@code defaultValue}
+   * there — harmless only when the default is also the deployed value. It is: every normal
+   * deployment runs at root path {@code /}, and the one shape that does not bridges
+   * {@code -Dquarkus.http.root-path} as a <em>system property</em>, which does reach the runtime
+   * config of a binary. {@code quarkus.rest.path} had neither property, which is why it moved.
    */
   @ConfigProperty(name = "quarkus.http.root-path", defaultValue = "/")
   String rootPath;

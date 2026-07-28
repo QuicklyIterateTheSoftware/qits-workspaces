@@ -15,7 +15,26 @@ import java.util.Map;
  * <p>Every declared entry carries an explicit, deterministic string {@code id:} (defaulting to its
  * {@code name} when absent) that identifies it across the wire; a duplicate id is a user error,
  * allowed to collide.
+ *
+ * <p>The {@code targets} list registers this record <em>and every nested one</em> for reflection,
+ * because {@code WorkspaceDaemonRegistry} deserializes it with an injected {@code ObjectMapper} and
+ * nothing on a JAX-RS signature ever mentions it — so native-image has no reason to keep the
+ * members, and the daemon's first {@code configView} frame would come back as {@link #EMPTY} with a
+ * "doesn't map to a QitsConfig" warning that looks like a daemon bug. {@code @RegisterForReflection}
+ * does not descend into nested types, so a record added below has to be added here too. See {@link
+ * WorkspaceMetadata} for the same defect caught the harder way.
  */
+@io.quarkus.runtime.annotations.RegisterForReflection(
+    targets = {
+      QitsConfig.class,
+      QitsConfig.RepositorySection.class,
+      QitsConfig.FrameworkDecl.class,
+      QitsConfig.ActionDecl.class,
+      QitsConfig.ServiceDecl.class,
+      QitsConfig.BootstrapDecl.class,
+      QitsConfig.WebViewDecl.class,
+      QitsConfig.HealthCheckDecl.class
+    })
 public record QitsConfig(
     RepositorySection repository,
     List<FrameworkDecl> frameworks,

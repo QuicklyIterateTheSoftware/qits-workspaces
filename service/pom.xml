@@ -30,6 +30,7 @@
          See migration-deployables-plan.md in the superproject. -->
     <artifactId>qits-workspaces-service</artifactId>
     <name>qits-workspaces :: service</name>
+    <packaging>quarkus</packaging>
 
     <dependencies>
         <dependency>
@@ -99,22 +100,18 @@
     <build>
         <plugins>
             <plugin>
-                <!-- This module is the DEPLOYABLE, not a library jar. Augmentation is what produces
-                     target/quarkus-app/quarkus-run.jar; without this execution `mvn verify` proves
-                     the tests pass and proves nothing about whether the thing starts. Version comes
-                     from the root pom's pluginManagement. -->
+                <!-- This module is the DEPLOYABLE, not a library jar, and <packaging>quarkus</packaging>
+                     above is what says so: it binds generate-code, generate-code-tests and build into
+                     the lifecycle, so augmentation is not an execution someone can misplace. It was
+                     one here until this commit — and a sibling repo (qits-projects) has already had
+                     exactly that execution silently not apply, because its <build> put <testResources>
+                     ahead of <plugins>; `mvn verify` stayed green while nothing was augmented, since
+                     @QuarkusTest augments on its own regardless of packaging. A packaging type cannot
+                     fail that way: drop this <extensions>true</extensions> and the build stops at
+                     "Unknown packaging: quarkus". Version comes from the root pom's pluginManagement. -->
                 <groupId>${quarkus.platform.group-id}</groupId>
                 <artifactId>quarkus-maven-plugin</artifactId>
                 <extensions>true</extensions>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>build</goal>
-                            <goal>generate-code</goal>
-                            <goal>generate-code-tests</goal>
-                        </goals>
-                    </execution>
-                </executions>
             </plugin>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -135,6 +132,21 @@
                             <goal>integration-test</goal>
                             <goal>verify</goal>
                         </goals>
+                        <configuration>
+                            <systemPropertyVariables>
+                                <!-- Where a @QuarkusIntegrationTest would find the compiled binary.
+                                     Spelled with quarkus.package.output-name from
+                                     application.properties, NOT ${project.build.finalName}-runner:
+                                     with an output-name set that path does not exist, so the two
+                                     drifting apart means a native IT launches nothing and passes.
+                                     Inert today — this repo's *IT.java are the docker-backed
+                                     `extended` suite, and there is no artifact-level IT to write
+                                     until a real RepositoryLookup exists (see the `native` profile
+                                     below). Set now so it cannot be got wrong later. -->
+                                <native.image.path>${project.build.directory}/qits-workspaces</native.image.path>
+                                <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                            </systemPropertyVariables>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
@@ -144,4 +156,34 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- GraalVM native build, the same profile qits-workspace-daemon and qits-gateway carry:
+             `-Dnative` disables the fast-jar and compiles a binary instead. It lives in THIS module
+             and not the root pom because only this module is an application — `domain` and
+             `workspace-daemon-protocol` are library jars with nothing to native-compile.
+
+             It deliberately does NOT flip skipITs, which is where this repo differs from its
+             siblings. There the native profile turns ITs on so a `-Dnative` build exercises the
+             binary it just produced; here the four *IT.java are the docker-backed `extended` suite
+             (real containers, the qits/workspace image, the daemon binary) and have nothing to say
+             about the artifact — turning them on would make a native build shell docker, which is
+             precisely what the clone-alone rule forbids. And the artifact-level IT that would
+             belong here cannot be written yet: the binary refuses to start without a
+             RepositoryLookup, so a @QuarkusIntegrationTest would fail on the documented
+             behaviour rather than on a defect. Flip it with the class that replaces
+             wiring/UnconfiguredRepositoryLookup, not before. -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+            </properties>
+        </profile>
+    </profiles>
 </project>

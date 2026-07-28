@@ -28,9 +28,17 @@ public class CaptureCorsRoute {
    * The JAX-RS prefix, read rather than repeated. This is a raw router route, so it does <b>not</b>
    * move with {@code quarkus.rest.path} the way {@link CaptureResource}'s {@code POST} does — and a
    * preflight on a different path from the request it clears is worth nothing. Deriving it from the
-   * same key is what keeps the two from drifting apart.
+   * same value is what keeps the two from drifting apart.
+   *
+   * <p>It reads {@code qits.rest.path} and <strong>not</strong> {@code quarkus.rest.path}, which is
+   * derived from it in {@code application.properties}. The Quarkus key is a build-time config item,
+   * and build-time items are absent from a native image's runtime config: this injection took its
+   * {@code defaultValue} in the binary, registered the route on {@code /capture}, and left the real
+   * endpoint answering preflights with RESTEasy's default 200 and no CORS headers — a browser-side
+   * outage invisible to a JVM suite, where {@code application.properties} is just another runtime
+   * config source and the lookup happens to work. An application-owned key is runtime-phase in both.
    */
-  @ConfigProperty(name = "quarkus.rest.path", defaultValue = "/")
+  @ConfigProperty(name = "qits.rest.path", defaultValue = "/")
   String restPath;
 
   void init(@Observes Router router) {
