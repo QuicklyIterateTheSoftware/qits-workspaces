@@ -18,3 +18,9 @@ target-ide/
 .cache/
 .m2/
 .local/
+
+# Local per-machine Quarkus config overrides — the address of a locally-run qits-projects, and a
+# port that does not collide with its siblings. Quarkus reads .env from the process's working
+# directory at ordinal 295, above the packaged application.properties (250). Never committed; the
+# tracked .env.example beside it is the template. Same convention as qits-projects.
+.env

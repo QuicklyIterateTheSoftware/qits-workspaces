@@ -86,12 +86,25 @@ in a production launch, because a service that comes up answering 404 to every r
 route is a misconfiguration wearing the costume of an empty system. Dev and test downgrade that to a
 warning so `quarkus:dev` and the suite stay runnable.
 
-    # both processes on one host
-    ./mvnw package -Dnative
-    QITS_PROJECTS_URL=http://localhost:8090 ./service/target/qits-workspaces -Dquarkus.http.port=8091
-
     # containers on qits-net
     QITS_PROJECTS_URL=http://qits-projects:8080
+
+For a local run, put it in a file instead of remembering a flag:
+
+    cp .env.example .env
+    ./mvnw package -Dnative
+    ./service/target/qits-workspaces          # no flags: :8091, registry on :8090
+
+`.env` is gitignored; the `.env.example` beside it is tracked and is the template — the same
+convention qits-projects already uses. Quarkus reads `.env` from the process's **working
+directory** at config ordinal 295 — above the packaged `application.properties` (250), below real
+environment variables (300) and `-D` (400) — so it overrides the shipped config without a rebuild
+and without touching a tracked file, and it works for the native binary exactly as for the
+fast-jar. Run from the repo root and it is found. Keys are environment-variable names
+(`QITS_PROJECTS_URL`, `QUARKUS_HTTP_PORT`), which is the one cost over a properties file and also
+the payoff: the same spellings work unchanged as real env vars in a container. qits-projects
+carries a matching example putting it on :8090, so the pair starts side by side with no arguments
+at all.
 
 The url carries no path because qits-projects serves its own `/projects/api` segment, so the same
 base address works whether the call goes direct or through the gateway. Both services must also
