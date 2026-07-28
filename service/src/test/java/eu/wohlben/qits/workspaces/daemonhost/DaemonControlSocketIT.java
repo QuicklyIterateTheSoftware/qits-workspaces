@@ -130,9 +130,26 @@ public class DaemonControlSocketIT {
     return new JsonObject(DaemonCodec.encode(message)).encode();
   }
 
+  /**
+   * Whether docker is here <em>and</em> {@link #IMAGE} is a workspace image built with the
+   * workspace-daemon stage.
+   *
+   * <p>The entrypoint is the predicate because it is the contract: {@code
+   * WorkspaceContainerFactory} appends no command, so a workspace container runs whatever the image
+   * entrypoints to, and an image entrypointing to anything else cannot serve this test. Checking
+   * only that the image exists is what this used to do, and against a pre-daemon image of the same
+   * name every daemon IT then failed on a 30-second timeout instead of skipping — a build
+   * environment problem wearing the costume of a product bug.
+   */
   private boolean dockerAndImageAvailable() {
     try {
-      return new ProcessBuilder(RUNTIME, "image", "inspect", IMAGE).start().waitFor() == 0;
+      Process process =
+          new ProcessBuilder(
+                  RUNTIME, "image", "inspect", "--format", "{{.Config.Entrypoint}}", IMAGE)
+              .redirectErrorStream(true)
+              .start();
+      String entrypoint = new String(process.getInputStream().readAllBytes());
+      return process.waitFor() == 0 && entrypoint.contains("qits-workspace-daemon");
     } catch (Exception e) {
       return false;
     }
