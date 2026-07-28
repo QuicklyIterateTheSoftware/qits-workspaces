@@ -117,6 +117,10 @@ class WorkspaceContainerFactoryTest {
     // here.
     assertSequence(
         argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/workspaces/daemon/1");
+    // Where ContainerProxyRoute addresses this container. Asserted as a literal rather than through
+    // ContainerProxyPath.base: the daemon in the other repo matches this string, so a test that
+    // computed it the same way the production code does would rename itself along with the bug.
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_API_BASE_PATH=/workspaces/container/1/");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=work");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");

@@ -305,6 +305,12 @@ public class WorkspaceContainerFactory {
             + qitsPort
             + "/workspaces/daemon/"
             + rowId);
+    // The path ContainerProxyRoute addresses this container at. The proxy forwards a caller's path
+    // untouched, so the daemon has to be told which leading part of it is its own address rather
+    // than a route it serves — the same arrangement a spawned dev server has with QITS_PUBLIC_BASE,
+    // and the reason neither hop has to rewrite anything. Injected from ContainerProxyPath so the
+    // literal is spelled once: the route and the container's idea of the route cannot drift.
+    container.env("QITS_WORKSPACE_DAEMON_API_BASE_PATH", ContainerProxyPath.base(rowId));
     container.env("QITS_WORKSPACE_DAEMON_WORKSPACE_ID", workspaceId);
     container.env("QITS_WORKSPACE_DAEMON_REPOSITORY_ID", repoId);
     container.env("QITS_WORKSPACE_DAEMON_BRANCH", branch == null ? "" : branch);

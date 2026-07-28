@@ -126,6 +126,19 @@ public class ContainerProxyRouteTest {
                   lastHost.set(req.getHeader("Host"));
                   req.response().end("daemon:" + req.uri());
                 })
+            // The real daemon authenticates the HANDSHAKE with the same bearer it checks on every
+            // request, so this stub must too. It used to accept any upgrade, and that is precisely
+            // what hid a live bug: vertx-http-proxy skips its interceptor chain on an upgrade, so
+            // the bearer never reached the daemon and both interactive sockets were answered 401
+            // in production while this test stayed green.
+            .webSocketHandshakeHandler(
+                handshake -> {
+                  if (("Bearer " + TOKEN).equals(handshake.headers().get("Authorization"))) {
+                    handshake.accept();
+                  } else {
+                    handshake.reject(401);
+                  }
+                })
             .webSocketHandler(
                 ws ->
                     ws.textMessageHandler(
@@ -165,7 +178,12 @@ public class ContainerProxyRouteTest {
         .then()
         .statusCode(200)
         // The daemon carries no {repoId}/{workspaceId} prefix and the proxy strips none of its own:
-        // everything after the workspace id is the daemon's path, untouched, query included. (The
+        // The WHOLE path reaches the daemon, prefix included — this route rewrites nothing, and the
+        // daemon is configured with that prefix as its base (QITS_WORKSPACE_DAEMON_API_BASE_PATH,
+        // injected by WorkspaceContainerFactory). If this assertion ever looks wrong, the fix is on
+        // the daemon's side of the contract, not a substring here; ContainerProxyRoute's javadoc
+        // says why. Everything after the workspace id is the daemon's path, untouched, query
+        // included. (The
         // query value is slash-free on purpose — RestAssured percent-encodes a slash inside one, and
         // the resulting mismatch would be the client's encoding, not the proxy's forwarding.)
         .body(containsString("daemon:" + base + "/files/content?path=README"));

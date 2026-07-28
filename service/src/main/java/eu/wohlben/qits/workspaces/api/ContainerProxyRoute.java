@@ -7,6 +7,8 @@ import eu.wohlben.qits.workspaces.daemonhost.WorkspaceTunnels;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpHeaders;
+import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.net.HostAndPort;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
@@ -34,11 +36,26 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * process per container with no stable address to configure. {@link ContainerProxyPath} carries the
  * full argument.
  *
+ * <p><b>Verbatim means verbatim: this route rewrites no path.</b> The daemon receives
+ * {@code /workspaces/container/{workspaceId}/files}, not {@code /files}, and is <em>configured</em>
+ * to know that leading part is its own address —
+ * {@code WorkspaceContainerFactory} injects {@link ContainerProxyPath#base} as
+ * {@code QITS_WORKSPACE_DAEMON_API_BASE_PATH} at container creation. That is the same arrangement
+ * {@link ServiceProxyRoute} has with a dev server's {@code QITS_PUBLIC_BASE}, and it is a
+ * deliberate rule rather than an inherited shape: a hop that rewrites a path leaves the two ends
+ * disagreeing about the destination's own address, and the disagreement shows up in redirects,
+ * generated links and logs, a long way from the rewrite. Stripping here would also have to be done
+ * twice — {@code vertx-http-proxy} skips its interceptor chain on a WebSocket upgrade and takes the
+ * URI straight off the inbound request — so the rewrite that looks like one line is two, one of
+ * them reaching into internals.
+ *
  * <p>WebSocket upgrades ride along — {@code vertx-http-proxy} forwards them by default — which is
  * what carries {@code WS /terminal/commands/{id}} and {@code WS /chat/commands/{id}} without either
  * end knowing it is proxied. Note the browser's socket now traverses gateway → qits-workspaces →
  * daemon; the daemon authenticates the handshake with the same bearer it checks on every request,
- * and neither hop uses websockets-next, so no framework origin check is involved on either.
+ * and neither hop uses websockets-next, so no framework origin check is involved on either. Getting
+ * that bearer onto an upgrade takes its own mechanism — see {@link #presentBearerOnUpgrade}, which
+ * is not an optimisation but the difference between a working terminal and a 401.
  *
  * <p><b>Two interceptors, and the reason each is there.</b> The bearer is added here rather than
  * being anything the caller supplies — it is peer authentication between qits and the container, so
@@ -86,7 +103,9 @@ public class ContainerProxyRoute {
 
   private void handle(RoutingContext rc) {
     String path = rc.request().path();
-    // Limit 2: everything after the workspace id is the daemon's own path, untouched.
+    // Limit 2: the id, then the rest. The rest is only ever LOOKED AT here — it is not removed, and
+    // the request that goes on the wire still carries the whole path. The daemon knows this prefix
+    // is its address because it was told so at container creation; see the class javadoc.
     String[] segments =
         path.substring(rootPrefix.length() + ContainerProxyPath.PREFIX.length()).split("/", 2);
     if (segments.length < 1 || segments[0].isEmpty()) {
@@ -155,6 +174,7 @@ public class ContainerProxyRoute {
    * {@link ServiceProxyRoute} already distinguishes its states for that reason.
    */
   private void route(RoutingContext rc, Resolved resolved) {
+    presentBearerOnUpgrade(rc.request());
     if (resolved.tunnel() != null) {
       // Only the origin moved. Same two interceptors as the direct branch, and the authority they
       // pin is the daemon's own port either way — so the daemon cannot tell which route the request
@@ -191,6 +211,35 @@ public class ContainerProxyRoute {
             .addInterceptor(hostRewrite(daemonApiPort))
             .handle(rc.request());
       }
+    }
+  }
+
+  /**
+   * Present the bearer on a WebSocket upgrade, where {@link #bearer} cannot.
+   *
+   * <p><b>{@code vertx-http-proxy} skips its whole interceptor chain on an upgrade.</b> Verified in
+   * 4.5.26: {@code ReverseProxy.handle} branches to {@code handleWebSocketUpgrade} and returns
+   * before the interceptor iterator is installed, and that path then copies the headers straight
+   * off the inbound {@code HttpServerRequest}. So the interceptor below runs for every ordinary
+   * request and for none of the two interactive sockets — and the daemon authenticates its
+   * handshake with the same bearer it checks on every request, so {@code WS /terminal/commands/{id}}
+   * and {@code WS /chat/commands/{id}} were answered 401 and the interactive surface was
+   * unreachable. Nothing in the suite could see it: the stub origin in {@code
+   * ContainerProxyRouteTest} accepts any handshake, and only a real daemon rejects one.
+   *
+   * <p>Setting it on the inbound request is what reaches that path, and it works for the same
+   * reason the gateway's {@code EdgeHeaders.applyToUpgrade} does: {@code headers()} hands back the
+   * live, mutable Netty-backed map the upgrade will copy. Restricted to upgrades on purpose —
+   * ordinary requests keep going through the interceptor, so there is exactly one mechanism per
+   * path rather than two doing the same job.
+   *
+   * <p>The {@code Host} pinning in {@link #hostRewrite} has no equivalent here and does not need
+   * one: the upgrade path does not copy {@code Host} at all, so the daemon sees the origin's own
+   * authority. Nothing in {@code WorkspaceApi} reads it.
+   */
+  private void presentBearerOnUpgrade(HttpServerRequest request) {
+    if (request.headers().contains(HttpHeaders.UPGRADE, "websocket", true)) {
+      request.headers().set("Authorization", "Bearer " + daemonApiToken);
     }
   }
 

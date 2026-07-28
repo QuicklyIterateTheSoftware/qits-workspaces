@@ -145,6 +145,16 @@ literal and must carry `/workspaces` itself. Five do, each for its own reason:
   baked into every running container). Not a gateway route, and there must never be a `DAEMON`
   constant in the gateway's `QitsService`: a daemon is one process per container with no stable
   address to configure, and this service owns the row and the lifecycle.
+  **It rewrites no path**: the daemon receives `/workspaces/container/{id}/files`, not `/files`, and
+  is told that prefix is its own address via `QITS_WORKSPACE_DAEMON_API_BASE_PATH`
+  (`ContainerProxyPath.base`, injected by `WorkspaceContainerFactory`) — the same arrangement
+  `ServiceProxyRoute` has with a dev server's `QITS_PUBLIC_BASE`. A hop that rewrites a path leaves
+  the two ends disagreeing about the destination's address; do not add a `substring` here.
+  Note also that **`vertx-http-proxy` skips its interceptor chain on a WebSocket upgrade**, so the
+  bearer has to be set on the inbound request for the two interactive sockets
+  (`presentBearerOnUpgrade`). Both interceptors are dead on that path — the same defect the gateway
+  works around in `EdgeHeaders.applyToUpgrade`, and a stub origin that accepts any handshake will
+  not show it.
 - `DaemonStreamRoute` — `WorkspaceTunnels.STREAM_PATH_PREFIX`, `/workspaces/daemon/stream/`, where a
   daemon's reverse-tunnel dial-back lands. It shares a prefix with `DaemonControlSocket` and does not
   collide (`{id}` matches one segment, so no daemon can be named `stream`), and it is a **raw** route
