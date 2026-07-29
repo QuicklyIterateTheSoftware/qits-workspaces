@@ -59,7 +59,24 @@ public class WorkspaceTunnels {
   /** The dial-back path, and a cross-repo contract with the daemon's {@code DaemonStreamTunnel}. */
   static final String STREAM_PATH_PREFIX = "/workspaces/daemon/stream/";
 
-  private static final SecureRandom RANDOM = new SecureRandom();
+  /**
+   * An INSTANCE field, and it must stay one. A {@code static final SecureRandom} is initialized by
+   * the class initializer, which native-image runs during the build — so the seeded instance lands
+   * in the image heap and the build aborts outright:
+   *
+   * <pre>
+   *   Detected an instance of Random/SplittableRandom class in the image heap.
+   *   Object was reached by scanning root java.security.SecureRandom@…: NativePRNG embedded in
+   *     eu.wohlben.qits.workspaces.daemonhost.WorkspaceTunnels.mintNonce(...)
+   * </pre>
+   *
+   * A CDI bean is constructed at runtime, so as a field of the bean it is created when the
+   * application starts and never reaches the heap the builder writes. That is also why {@link
+   * #mintNonce} is not static. GraalVM refuses this case rather than silently baking the seed in,
+   * which is the one mercy here — a nonce generator with a build-time seed would be a credential
+   * that is identical in every deployment of the same image.
+   */
+  private final SecureRandom random = new SecureRandom();
 
   @Inject Vertx vertx;
 
@@ -276,10 +293,12 @@ public class WorkspaceTunnels {
    * 32 bytes of {@link SecureRandom}, base64url. Not a {@code UUID}: this is a bearer credential,
    * and this codebase spells correlation ids as UUIDs — using one here would make the wrong thing
    * look right to the next reader.
+   *
+   * <p>Not static, and not by accident — see {@link #random}.
    */
-  private static String mintNonce() {
+  private String mintNonce() {
     byte[] bytes = new byte[32];
-    RANDOM.nextBytes(bytes);
+    random.nextBytes(bytes);
     return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
   }
 

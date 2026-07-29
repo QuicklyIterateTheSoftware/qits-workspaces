@@ -25,6 +25,42 @@ import org.junit.jupiter.api.Test;
 public class NativeImageContractTest {
 
   /**
+   * No {@code static} field anywhere in {@code daemonhost} may hold a {@link java.util.Random} — a
+   * class initializer runs during the image build, so a {@code static final SecureRandom} is
+   * constructed by the builder, lands in the image heap, and native-image aborts the whole build
+   * with "Detected an instance of Random/SplittableRandom class in the image heap".
+   *
+   * <p>{@code WorkspaceTunnels} shipped exactly that: the nonce generator for the reverse tunnel.
+   * The suite was green, a fast-jar ran the full browser-to-daemon chain, and the service simply
+   * could not be compiled — which nothing here would have said, because the only symptom is a build
+   * that never ran. Making the field an instance field of a CDI bean moves its construction to
+   * application startup.
+   *
+   * <p>This one is worth pinning rather than trusting to memory because the failure is loud but
+   * <em>late</em>: it costs a native build to discover, and the obvious "tidy this up" edit —
+   * hoisting a helper's dependency into a constant — reintroduces it.
+   */
+  @Test
+  public void noStaticRandomInTheDaemonHostPackage() {
+    for (Class<?> type :
+        List.of(
+            eu.wohlben.qits.workspaces.daemonhost.WorkspaceTunnels.class,
+            eu.wohlben.qits.workspaces.daemonhost.WorkspaceDaemonRegistry.class,
+            eu.wohlben.qits.workspaces.daemonhost.DaemonStreamRoute.class)) {
+      for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+        boolean isStatic = java.lang.reflect.Modifier.isStatic(field.getModifiers());
+        assertTrue(
+            !isStatic || !java.util.Random.class.isAssignableFrom(field.getType()),
+            type.getSimpleName()
+                + "."
+                + field.getName()
+                + " is a static Random — it will be constructed into the image heap and the native"
+                + " build will fail. Make it an instance field of the bean.");
+      }
+    }
+  }
+
+  /**
    * {@code quarkus.rest.path} is a build-time config item and is therefore absent from a native
    * image's <em>runtime</em> config. {@link CaptureCorsRoute} is a raw Vert.x route that has to
    * build its own path, so reading the Quarkus key gave it the {@code defaultValue} in the binary:
