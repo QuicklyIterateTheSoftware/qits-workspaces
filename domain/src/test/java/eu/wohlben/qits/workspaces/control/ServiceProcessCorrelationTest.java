@@ -98,7 +98,6 @@ public class ServiceProcessCorrelationTest {
                     null,
                     "echo hello-from-service; sleep 300",
                     null,
-                    null,
                     true,
                     RestartPolicy.NEVER,
                     0,

@@ -71,7 +71,6 @@ public class ServiceSettleKillSwitchTest {
                     null,
                     "sleep 300",
                     null,
-                    null,
                     false,
                     RestartPolicy.ON_FAILURE,
                     3,

@@ -92,7 +92,6 @@ public class ServiceSupervisorProjectionTest {
                     script,
                     null,
                     null,
-                    null,
                     RestartPolicy.ON_FAILURE,
                     3,
                     "TERM",

@@ -20,7 +20,6 @@ public record ServiceDefinitionDto(
     RestartPolicy restartPolicy,
     boolean autoStart,
     int maxRestarts,
-    boolean otel,
     WebViewDto webView,
     Map<String, String> environment,
     List<HealthCheckDto> healthChecks) {}

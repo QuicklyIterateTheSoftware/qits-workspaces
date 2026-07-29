@@ -155,7 +155,6 @@ public class WorkspaceBootstrapRunnerTest {
                     null,
                     "sleep 300",
                     null,
-                    null,
                     true,
                     RestartPolicy.NEVER,
                     0,

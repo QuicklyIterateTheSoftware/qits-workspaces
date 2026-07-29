@@ -168,7 +168,6 @@ public class ServiceProxyRouteTest {
                     null,
                     "sleep 300",
                     null,
-                    null, // otel
                     Boolean.FALSE, // autoStart off: the test starts manually
                     RestartPolicy.NEVER,
                     0,

@@ -92,7 +92,6 @@ public class ServiceAutoStarterTest {
             null,
             "sleep 300",
             null,
-            null,
             autoStart,
             RestartPolicy.NEVER,
             0,

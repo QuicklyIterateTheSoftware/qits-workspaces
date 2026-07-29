@@ -87,8 +87,7 @@ public class ServiceLifecycleCouplerSettleTest {
             null,
             List.of(
                 new QitsConfig.ServiceDecl(
-                    name, name, null, command, null, null, false, policy, 3, "TERM", null, null,
-                    null)),
+                    name, name, null, command, null, false, policy, 3, "TERM", null, null, null)),
             null));
     return name;
   }

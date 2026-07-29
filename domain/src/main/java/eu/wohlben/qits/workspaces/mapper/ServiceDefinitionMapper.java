@@ -32,7 +32,6 @@ public class ServiceDefinitionMapper {
         decl.restartPolicy() != null ? decl.restartPolicy() : RestartPolicy.ON_FAILURE,
         decl.autoStart() == null || decl.autoStart(),
         decl.maxRestarts() != null ? decl.maxRestarts() : 3,
-        decl.otel() != null && decl.otel(),
         toWebViewDto(decl.webView()),
         decl.environment() != null ? Map.copyOf(decl.environment()) : Map.of(),
         decl.healthChecks() != null

@@ -73,7 +73,6 @@ public class ServiceAutoStartKillSwitchTest {
                     null,
                     "sleep 300",
                     null,
-                    null,
                     true, // autoStart, but the
                     // kill switch overrides it
                     RestartPolicy.NEVER,

@@ -105,7 +105,6 @@ public record QitsConfig(
       String description,
       String start,
       String readyPattern,
-      Boolean otel,
       Boolean autoStart,
       RestartPolicy restartPolicy,
       Integer maxRestarts,
