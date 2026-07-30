@@ -113,6 +113,24 @@
             <artifactId>quarkus-smallrye-openapi</artifactId>
         </dependency>
         <dependency>
+            <!-- The SPA at /workspaces. Quinoa runs the Angular build in src/main/webui (a submodule,
+                 qits-spa-workspaces) during augmentation and serves the output from inside the
+                 artifact, so the segment this service already owns carries the UI as well as the API
+                 and there is no second process to deploy.
+
+                 Note what must NOT join it: quarkus-undertow breaks Quinoa's production static
+                 serving (qits-artifacts' service/pom.xml records the same rule, and the monorepo's
+                 docs/issues/2026-07-15_packaged-spa-not-served.md is the incident). Nothing here
+                 pulls it in today — the reverse proxies are vertx-http-proxy and the raw routes are
+                 Vert.x — and nothing may start to; a servlet container arriving transitively would
+                 show up as a blank page from the packaged artifact with a green suite behind it,
+                 because Quinoa is disabled by default in tests and the suite never serves the SPA at
+                 all. Version from the root pom: quarkiverse, not quarkus-bom. -->
+            <groupId>io.quarkiverse.quinoa</groupId>
+            <artifactId>quarkus-quinoa</artifactId>
+            <version>${quinoa.version}</version>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
             <scope>test</scope>

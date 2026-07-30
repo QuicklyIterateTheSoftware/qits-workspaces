@@ -19,6 +19,16 @@ the boundary. Everything that runs *inside* the container belongs to
 | `domain/` | `eu.wohlben.qits.workspaces.*` — entity, persistence, dto, mapper, control, and the framework-free SPIs the daemon implements. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
+| `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/workspaces`. |
+
+So a checkout needs one command a plain clone does not give you:
+
+    git submodule update --init
+
+Skip it and the build stops at `No package.json found in Web UI directory` — `git clone` materialises
+a gitlink as an empty directory, and an empty `webui` is the one state Quinoa treats as a
+misconfiguration rather than as "no UI here". (A checkout with the directory *absent* builds fine,
+with a warning.)
 
 `domain/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary.
@@ -141,6 +151,7 @@ service serves the prefixed path itself and there is no unprefixed form, on the 
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
 | `/workspaces/container/{id}/*` | the workspace-daemon reverse proxy | `ContainerProxyPath.PREFIX`, literal |
 | `/workspaces/daemon/stream/{nonce}` | where a daemon's tunnel dial-back lands | `WorkspaceTunnels.STREAM_PATH_PREFIX`, literal |
+| `/workspaces/` | the SPA, and every client-side route under it | `quarkus.quinoa.ui-root-path` + `enable-spa-routing` |
 
 These are second-level segments beside `api` because none is a JSON API, and all are
 literals for the same reason: **raw Vert.x routes and `@WebSocket` paths do not follow
