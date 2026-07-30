@@ -13,6 +13,12 @@ That is why: the poms duplicate versions instead of inheriting them, the daemon 
 vendored, tests build their own git origins (`TestOrigin`) instead of using fixtures, and the
 container runtime is faked in tests rather than shelling docker.
 
+The one thing beyond `.sdkmanrc`'s GraalVM a build wants is **node on `PATH`** — Quinoa shells out
+to npm for the Angular client. `mvn verify` does not need it (Quinoa is disabled by default in
+tests), `./mvnw package` does, and it is deliberately the machine's OWN node: nothing in
+`application.properties` asks Quinoa to install one, so no build silently downloads a toolchain.
+Only `docker/Dockerfile`'s Mandrel stage, which has no node at all, passes the install flags.
+
 **`service/` compiles to a GraalVM native image**, the rule qits-workspace-daemon and qits-gateway
 already carry. `.sdkmanrc` names `25.0.2-graalce`, so `sdk env` is the whole toolchain and
 `./mvnw package -Dnative` produces `service/target/qits-workspaces` in about a minute with no
@@ -174,6 +180,21 @@ literal and must carry `/workspaces` itself. Five do, each for its own reason:
 `/workspaces/q/*` (openapi, swagger-ui) sits outside `quarkus.rest.path` and moves only with
 `quarkus.http.non-application-root-path`. `quarkus.swagger-ui.path` is relative and follows on its
 own — do not pin it.
+
+**Every one of those literals has to be repeated in `quarkus.quinoa.ignored-path-prefixes`, and
+that is the one place a new route here is easy to forget.** Quinoa's SPA fallback is registered last
+and rewrites anything under `/workspaces` it is not told to skip; the skip list it *derives* holds
+only `quarkus.rest.path` and `quarkus.http.non-application-root-path`, so the raw routes above are
+outside it. Measured on the packaged fast-jar before the key was set, `GET /workspaces/daemon`,
+`/workspaces/daemon/` and `/workspaces/daemon/{id}` — a plain GET, since websockets-next claims only
+the upgrade — each answered **200 `text/html`** with the SPA's `index.html`. A machine client parses
+a web page as data; the correct answer is a 404. Setting the key **replaces** the derivation instead
+of extending it, which is why the list spells `/api` and `/q` out again, and the values are
+**relative** to `ui-root-path` (`/api`, never `/workspaces/api` — an absolute value matches nothing
+and looks exactly like an unset key). `application.properties` carries the reasoning; add a literal
+route there and here in the same commit. Sibling services that have no literals outside the
+derivation — qits-ci is the reference — leave the key unset on purpose, and this service would too
+if these four routes did not exist.
 
 **A workspace is not a sub-resource of a repository.** This context holds a repository id as a
 string, in another database, with no FK — so collections filter by `?repositoryId=` and an item is

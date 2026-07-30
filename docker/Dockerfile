@@ -134,8 +134,23 @@ COPY . .
 # here proves the same thing more slowly. Note this repo's `native` profile deliberately does NOT
 # flip `skipITs` — its *IT.java are the docker-backed `extended` suite — so there is nothing at
 # `verify` that `package` misses here.
+#
+# The two `package-manager-install` flags are how the Angular client gets built HERE. Quinoa shells
+# out to npm, and a Mandrel builder image has no node — so without them this stage fails the moment
+# the webui submodule is present, and the flags are on the command line rather than in
+# application.properties precisely because a developer machine already has node and should keep using
+# its own. The version is pinned so the image build is reproducible, not "whatever nodejs.org calls
+# current".
+#
+# A build context whose webui submodule is NOT initialised fails this stage with `No package.json
+# found in Web UI directory: 'src/main/webui'` — git leaves the gitlink as an empty directory, and an
+# empty directory is the one case Quinoa treats as a misconfiguration rather than as "no client".
+# Loud is the right failure here, but it is a failure: README.md says so, and .config/qits/
+# ci-post-receive.yml initialises the submodule before this build for exactly that reason.
 RUN ./mvnw -B -ntp -pl service -am package -Dnative -DskipTests \
-      -Dquarkus.native.native-image-xmx=4g
+      -Dquarkus.native.native-image-xmx=4g \
+      -Dquarkus.quinoa.package-manager-install=true \
+      -Dquarkus.quinoa.package-manager-install.node-version=22.22.0
 
 # --- runtime --------------------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6

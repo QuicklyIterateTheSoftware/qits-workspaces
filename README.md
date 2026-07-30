@@ -30,6 +30,12 @@ a gitlink as an empty directory, and an empty `webui` is the one state Quinoa tr
 misconfiguration rather than as "no UI here". (A checkout with the directory *absent* builds fine,
 with a warning.)
 
+Quinoa shells out to `npm`, so a build here also wants **node on `PATH`** — the machine's own, which
+is the point: nothing in `application.properties` asks Quinoa to download one, so `./mvnw package`
+never fetches a node tarball behind your back. The one environment with no node is the Mandrel
+builder stage in `docker/Dockerfile`, and that is where the two
+`-Dquarkus.quinoa.package-manager-install…` flags live, on the command line and pinned to a version.
+
 `domain/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary.
 `domain` owns its **own datasource, persistence unit and Flyway lineage**
@@ -152,6 +158,14 @@ service serves the prefixed path itself and there is no unprefixed form, on the 
 | `/workspaces/container/{id}/*` | the workspace-daemon reverse proxy | `ContainerProxyPath.PREFIX`, literal |
 | `/workspaces/daemon/stream/{nonce}` | where a daemon's tunnel dial-back lands | `WorkspaceTunnels.STREAM_PATH_PREFIX`, literal |
 | `/workspaces/` | the SPA, and every client-side route under it | `quarkus.quinoa.ui-root-path` + `enable-spa-routing` |
+
+The last row is a **fallback**, and the six above it are what it must not swallow. Quinoa derives its
+skip list from `quarkus.rest.path` and `quarkus.http.non-application-root-path` only, so the four
+literal routes are outside it and are named again in `quarkus.quinoa.ignored-path-prefixes`
+(`/api,/q,/daemon,/service,/container` — relative to the UI root, and repeating `/api` and `/q`
+because setting the key replaces the derivation rather than extending it). Without it a mistyped
+`/workspaces/daemon…` answers `200 text/html` with `index.html`, which a machine client parses as
+data; with it, it answers 404. Add a literal route, add its prefix.
 
 These are second-level segments beside `api` because none is a JSON API, and all are
 literals for the same reason: **raw Vert.x routes and `@WebSocket` paths do not follow
