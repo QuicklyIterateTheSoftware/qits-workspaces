@@ -192,9 +192,11 @@ a web page as data; the correct answer is a 404. Setting the key **replaces** th
 of extending it, which is why the list spells `/api` and `/q` out again, and the values are
 **relative** to `ui-root-path` (`/api`, never `/workspaces/api` — an absolute value matches nothing
 and looks exactly like an unset key). `application.properties` carries the reasoning; add a literal
-route there and here in the same commit. Sibling services that have no literals outside the
-derivation — qits-ci is the reference — leave the key unset on purpose, and this service would too
-if these four routes did not exist.
+route there and here in the same commit. A sibling service whose whole machine surface is
+`quarkus.rest.path` plus the non-application root would leave the key unset and let the derivation
+track the paths — none of the five qualifies today (each carries an MCP root, a git host or a daemon
+socket outside the derivation, and qits-ci's own `/ci/daemon` was measured falling through to the
+SPA the same way), but the rule stands for the next one.
 
 **A workspace is not a sub-resource of a repository.** This context holds a repository id as a
 string, in another database, with no FK — so collections filter by `?repositoryId=` and an item is
