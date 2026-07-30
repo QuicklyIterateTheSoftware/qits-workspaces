@@ -78,8 +78,14 @@ public class ServiceProxyRoute {
 
   private void handle(RoutingContext rc) {
     String path = rc.request().path();
-    String[] segments =
-        path.substring(rootPrefix.length() + ServiceProxyPath.PREFIX.length()).split("/", 3);
+    // `route(PREFIX + "*")` also matches the bare prefix with no trailing slash, one character
+    // short of `start` — where the substring below would overflow. No segments, no service.
+    int start = rootPrefix.length() + ServiceProxyPath.PREFIX.length();
+    if (path.length() < start) {
+      respond(rc, 404, "No service here.");
+      return;
+    }
+    String[] segments = path.substring(start).split("/", 3);
     if (segments.length < 2 || segments[0].isEmpty() || segments[1].isEmpty()) {
       respond(rc, 404, "No service here.");
       return;

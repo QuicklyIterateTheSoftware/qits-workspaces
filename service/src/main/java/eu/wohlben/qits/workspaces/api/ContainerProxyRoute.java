@@ -103,11 +103,17 @@ public class ContainerProxyRoute {
 
   private void handle(RoutingContext rc) {
     String path = rc.request().path();
+    // `route(PREFIX + "*")` also matches the bare prefix with no trailing slash, one character
+    // short of `start` — where the substring below would overflow. No segments, no workspace.
+    int start = rootPrefix.length() + ContainerProxyPath.PREFIX.length();
+    if (path.length() < start) {
+      respond(rc, 404, "No workspace here.");
+      return;
+    }
     // Limit 2: the id, then the rest. The rest is only ever LOOKED AT here — it is not removed, and
     // the request that goes on the wire still carries the whole path. The daemon knows this prefix
     // is its address because it was told so at container creation; see the class javadoc.
-    String[] segments =
-        path.substring(rootPrefix.length() + ContainerProxyPath.PREFIX.length()).split("/", 2);
+    String[] segments = path.substring(start).split("/", 2);
     if (segments.length < 1 || segments[0].isEmpty()) {
       respond(rc, 404, "No workspace here.");
       return;

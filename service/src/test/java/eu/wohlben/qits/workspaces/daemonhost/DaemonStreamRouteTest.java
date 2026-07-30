@@ -283,6 +283,19 @@ public class DaemonStreamRouteTest {
   }
 
   @Test
+  public void theBarePrefixWithoutATrailingSlashIsA404NotAnError() {
+    // `route(PREFIX + "*")` matches the prefix with no trailing slash too, one character short of
+    // the prefix itself, and the nonce substring used to overflow into a 500 there. A plain GET,
+    // not an upgrade: the guard sits before the upgrade attempt.
+    given()
+        .get(
+            WorkspaceTunnels.STREAM_PATH_PREFIX.substring(
+                0, WorkspaceTunnels.STREAM_PATH_PREFIX.length() - 1))
+        .then()
+        .statusCode(404);
+  }
+
+  @Test
   public void aDaemonThatNeverDialsBackExpiresTheStreamRatherThanHanging() throws Exception {
     Long id = workspace();
     connectFakeDaemon(id, DaemonProtocol.TUNNEL_CAPABILITY_VERSION);

@@ -57,8 +57,15 @@ public class DaemonStreamRoute {
   }
 
   private void handle(RoutingContext rc) {
-    String nonce =
-        rc.request().path().substring(WorkspaceTunnels.STREAM_PATH_PREFIX.length());
+    // `route(PREFIX + "*")` also matches the bare prefix with no trailing slash, one character
+    // short of the prefix itself — where the substring below would overflow. No segment means no
+    // nonce, and it gets the same bare 404 an unknown nonce does.
+    String path = rc.request().path();
+    if (path.length() < WorkspaceTunnels.STREAM_PATH_PREFIX.length()) {
+      rc.response().setStatusCode(404).end();
+      return;
+    }
+    String nonce = path.substring(WorkspaceTunnels.STREAM_PATH_PREFIX.length());
     WorkspaceTunnels.Parked parked = tunnels.claim(nonce).orElse(null);
     if (parked == null) {
       rc.response().setStatusCode(404).end();

@@ -323,6 +323,9 @@ public class ServiceProxyRouteTest {
     given().get("/workspaces/service/no-such-workspace/no-such-daemon/index.html").then().statusCode(404);
     given().get("/workspaces/service/onlyonesegment").then().statusCode(404);
     given().get("/workspaces/service/").then().statusCode(404);
+    // The bare prefix: `route(PREFIX + "*")` matches it too, one character short of the prefix, and
+    // the segment parse used to overflow into a 500 there.
+    given().get("/workspaces/service").then().statusCode(404);
     assertEquals(hitsBefore, echoHits.get(), "unknown keys must never reach an origin");
   }
 

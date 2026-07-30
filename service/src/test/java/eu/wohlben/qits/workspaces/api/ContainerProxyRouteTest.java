@@ -259,6 +259,9 @@ public class ContainerProxyRouteTest {
     given().get("/workspaces/container/not-a-number/files").then().statusCode(404);
     // No id.
     given().get("/workspaces/container/").then().statusCode(404);
+    // The bare prefix: `route(PREFIX + "*")` matches it too, one character short of the prefix, and
+    // the segment parse used to overflow into a 500 there.
+    given().get("/workspaces/container").then().statusCode(404);
 
     // Soft-deleted: the row lingers, and it must answer exactly as an unknown one does.
     Long id = workspaceWithContainer();
