@@ -70,26 +70,24 @@ public class BranchControllerTest {
         originPath.toFile(), "git", "for-each-ref", "--format=%(refname:short)", "refs/heads");
   }
 
+  /**
+   * A blank target still resolves to the repository's configured main branch — and that is now
+   * exactly why it is refused. The default branch is written by integrate alone, and the refusal
+   * names the endpoint that does it, because a refusal a caller cannot act on is a worse bug than
+   * the merge would have been.
+   */
   @Test
-  public void testIntegrateBranchDefaultsToMainBranch() {
+  public void testIntegrateBranchIntoTheDefaultBranchIsRefusedAndNamesIntegrate() {
     String repoId = createProjectAndRepository();
 
-    // No target given → integrate "feature" into the repo's configured main branch (master).
-    // feature only adds feature.txt relative to the merge base, so this is a clean merge.
     given()
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", null, null))
         .when()
         .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("commitHash", not(emptyOrNullString()))
-        .body("hasConflicts", equalTo(false));
-  }
-
-  @Test
-  public void testIntegrateBranchIntoExplicitTarget() {
-    String repoId = createProjectAndRepository();
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("message", containsString("/integrate"));
 
     given()
         .contentType(ContentType.JSON)
@@ -97,8 +95,25 @@ public class BranchControllerTest {
         .when()
         .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("message", containsString("/integrate"));
+  }
+
+  /** Every other target is untouched: merging into a parent branch is what stacking is. */
+  @Test
+  public void testIntegrateBranchIntoANonDefaultTargetStillMerges() {
+    String repoId = createProjectAndRepository();
+    createWorkspace(repoId, "host-wt", "master", "host-b");
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(new BranchController.MergeBranchRequest("feature", "host-b", null))
+        .when()
+        .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
+        .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("commitHash", not(emptyOrNullString()));
+        .body("commitHash", not(emptyOrNullString()))
+        .body("hasConflicts", equalTo(false));
   }
 
   @Test
@@ -154,12 +169,15 @@ public class BranchControllerTest {
   @Test
   public void testIntegrateAutoCleansUpEligibleWorkspace() {
     String repoId = createProjectAndRepository();
-    createWorkspace(repoId, "auto-wt", "master", "auto-b");
+    // Stacked one level down, so the target is a parent branch rather than the default branch —
+    // which is the shape the merge endpoints keep serving.
+    createWorkspace(repoId, "base-wt", "master", "base-b");
+    createWorkspace(repoId, "auto-wt", "base-b", "auto-b");
 
     // Integrating a clean, dependent-free workspace into its parent removes it afterwards.
     given()
         .contentType(ContentType.JSON)
-        .body(new BranchController.MergeBranchRequest("auto-b", "master", null))
+        .body(new BranchController.MergeBranchRequest("auto-b", "base-b", null))
         .when()
         .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
@@ -179,13 +197,14 @@ public class BranchControllerTest {
   @Test
   public void testIntegrateKeepsWorkspaceWithChildren() {
     String repoId = createProjectAndRepository();
-    createWorkspace(repoId, "pwt", "master", "pb");
+    createWorkspace(repoId, "gwt", "master", "gb");
+    createWorkspace(repoId, "pwt", "gb", "pb");
     createWorkspace(repoId, "cwt", "pb", "cb");
 
     // pb still has a dependent workspace (cwt), so it must not be cleaned up after integration.
     given()
         .contentType(ContentType.JSON)
-        .body(new BranchController.MergeBranchRequest("pb", "master", null))
+        .body(new BranchController.MergeBranchRequest("pb", "gb", null))
         .when()
         .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
@@ -201,27 +220,36 @@ public class BranchControllerTest {
         .body("entries.workspace.workspaceId", hasItem("pwt"));
   }
 
+  /**
+   * <b>What moved, recorded rather than deleted.</b> This used to assert that integrating a
+   * <em>plain</em> branch (one with no workspace) into the default branch left it fully merged and
+   * therefore deleted it — the same auto-cleanup a workspace branch gets.
+   *
+   * <p>That path is gone, and not by omission. A plain branch's cleanup parent is the repository's
+   * main branch by definition ({@code canCleanupBranch}), so it is only ever eligible once it is
+   * merged <em>into</em> that branch — and the default branch is integrate's alone now, while
+   * integrate is workspace-keyed. So: the merge is refused, and the branch survives untouched.
+   * Workspace branches still resolve and are still deleted; that happens inside integrate.
+   */
   @Test
-  public void testIntegratePlainBranchAutoCleansUp() throws Exception {
+  public void testIntegratePlainBranchIntoTheDefaultBranchIsRefusedAndLeavesItAlone()
+      throws Exception {
     String repoId = createProjectAndRepository();
 
-    // "feature" is a plain branch (no workspace). Integrating it into master leaves it fully merged
-    // with no dependents, so it is deleted afterwards — the same behaviour as a workspace branch.
     given()
         .contentType(ContentType.JSON)
         .body(new BranchController.MergeBranchRequest("feature", "master", null))
         .when()
         .post("/workspaces/api/branches/merge?repositoryId=" + repoId)
         .then()
-        .statusCode(Response.Status.OK.getStatusCode())
-        .body("hasConflicts", equalTo(false))
-        .body("cleanedUp", equalTo(true));
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("message", containsString("/integrate"));
 
-    // The monorepo asserted this through GET /branches, which is a repositories-context route and
-    // not in this jar; the origin's ref namespace is the same fact one layer down.
-    org.junit.jupiter.api.Assertions.assertFalse(
+    // The monorepo asserted branch existence through GET /branches, which is a repositories-context
+    // route and not in this jar; the origin's ref namespace is the same fact one layer down.
+    org.junit.jupiter.api.Assertions.assertTrue(
         originBranches(repoId).lines().anyMatch(b -> b.equals("feature")),
-        "feature should be deleted from the origin after a clean integration");
+        "a refused merge deletes nothing");
   }
 
   @Test

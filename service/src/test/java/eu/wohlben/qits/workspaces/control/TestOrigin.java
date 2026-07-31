@@ -53,6 +53,13 @@ public final class TestOrigin {
     Path work = Files.createTempDirectory("qits-test-origin-");
     try {
       run(origin.getParent().toFile(), "git", "init", "--bare", "-b", "master", origin.toString());
+      // Advertise push options, which the production git host does (JGit's
+      // ReceivePack.setAllowPushOptions, on both the advertisement and the receive) and a local
+      // `git receive-pack` does NOT by default. The integrate flow's push carries
+      // `--push-option=qits.release` — the sanctioned door through the protected ref — and a client
+      // only sends one if the server offered the capability: without this line the fixture would
+      // refuse the exact argv that ships, with "the receiving end does not support push options".
+      run(origin.toFile(), "git", "config", "receive.advertisePushOptions", "true");
 
       run(work.toFile(), "git", "init", "-b", "master");
       run(work.toFile(), "git", "remote", "add", "origin", origin.toString());
@@ -70,6 +77,28 @@ public final class TestOrigin {
       commit(work, "master.txt", "master side\n", "second master commit");
       run(work.toFile(), "git", "push", "-q", "origin", "master");
       return repoId;
+    } finally {
+      deleteRecursively(work);
+    }
+  }
+
+  /**
+   * Commit a file onto an existing branch of an already-created origin, through a throwaway clone.
+   *
+   * <p>A clone rather than a worktree inside the bare, deliberately: the integrate flow adds and
+   * removes its own worktrees there, and a fixture that left one registered would hand the next
+   * integrate exactly the stale-worktree bug that flow exists to fix.
+   */
+  public static void commitOnBranch(
+      String dataDir, String repoId, String branch, String file, String content, String message)
+      throws Exception {
+    Path origin = Path.of(dataDir, repoId, "origin").toAbsolutePath();
+    Path work = Files.createTempDirectory("qits-test-commit-");
+    try {
+      run(work.getParent().toFile(), "git", "clone", "-q", origin.toString(), work.toString());
+      run(work.toFile(), "git", "switch", "-q", branch);
+      commit(work, file, content, message);
+      run(work.toFile(), "git", "push", "-q", "origin", branch);
     } finally {
       deleteRecursively(work);
     }

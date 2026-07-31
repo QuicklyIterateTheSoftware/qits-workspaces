@@ -68,6 +68,10 @@ public class IntegrateSyncsSourceContainerTest {
   @Test
   public void integrationRefusesADirtySourceWorkingTree() throws Exception {
     String repoId = clonedRepo();
+    // master is an ordinary branch here, not this repository's default one: the default branch
+    // is written by integrate alone now, and its 409 would stand in front of what this test is
+    // about. Repointing main is one line and leaves the merge under test byte-for-byte the same.
+    repositories.setMainBranch(repoId, "feature");
     workspaceService.createWorkspace(repoId, "dirty-ws", "master", "dirty-b", null);
     workspaceService.ensureContainer(workspaceIds.of(repoId, "dirty-ws"));
     String container = containers.containerName("dirty-ws", repoId);

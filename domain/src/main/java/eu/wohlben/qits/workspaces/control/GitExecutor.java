@@ -4,9 +4,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -82,6 +85,45 @@ public class GitExecutor {
   public ExecResult execAllowNonZero(
       java.io.File cwd, Map<String, String> env, Consumer<String> onLine, String... command)
       throws Exception {
+    return run(cwd, env, onLine, null, command);
+  }
+
+  /**
+   * {@link #execAllowNonZero(java.io.File, Map, Consumer, String...)} with a wall-clock <b>bound</b>
+   * — the overload the integrate flow's push uses, and the only one that has one.
+   *
+   * <p>Every other call here runs {@code p.waitFor()} with no timeout at all, which is survivable
+   * for a local filesystem operation (git either finishes or the disk is gone) and is <b>not</b>
+   * survivable for a network push: a wedged git host would pin a request thread forever, and this
+   * service answers integrate synchronously. So the push gets a deadline and nothing else changes;
+   * widening the bound to the local calls would turn a slow clone into a spurious failure for no
+   * gain.
+   *
+   * <p>The bound covers the <b>whole</b> invocation rather than only the exit status. A transport
+   * that accepts the connection and then says nothing blocks in {@code readLine()}, never in {@code
+   * waitFor()}, so the output is drained on its own thread and the deadline is enforced against the
+   * process — {@code destroyForcibly} closes the pipe, which is what unblocks the drain.
+   *
+   * @throws java.util.concurrent.TimeoutException when the deadline passes; the process is killed
+   *     first, so nothing is left running behind the failure
+   */
+  public ExecResult execAllowNonZero(
+      java.io.File cwd,
+      Duration timeout,
+      Map<String, String> env,
+      Consumer<String> onLine,
+      String... command)
+      throws Exception {
+    return run(cwd, env, onLine, timeout, command);
+  }
+
+  private ExecResult run(
+      java.io.File cwd,
+      Map<String, String> env,
+      Consumer<String> onLine,
+      Duration timeout,
+      String... command)
+      throws Exception {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd);
@@ -100,32 +142,62 @@ public class GitExecutor {
     env.forEach(pb.environment()::put);
     pb.redirectErrorStream(true);
     Process p = pb.start();
-    String output;
+    if (timeout == null) {
+      String output = drain(p, onLine);
+      return new ExecResult(p.waitFor(), output);
+    }
+    // Bounded: the drain has to run somewhere other than the thread holding the deadline, or a
+    // silent-but-open transport parks in readLine() and the deadline is never consulted.
+    StringBuilder collected = new StringBuilder();
+    Thread drain =
+        new Thread(
+            () -> {
+              try {
+                collected.append(drain(p, onLine));
+              } catch (Exception ignored) {
+                // the pipe closing under a destroyForcibly is the expected end of this thread
+              }
+            },
+            "git-exec-drain");
+    drain.setDaemon(true);
+    drain.start();
+    boolean finished = p.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    if (!finished) {
+      p.destroyForcibly();
+      drain.join(DRAIN_JOIN.toMillis());
+      throw new TimeoutException(
+          "git timed out after " + timeout + ": " + String.join(" ", command));
+    }
+    drain.join(DRAIN_JOIN.toMillis());
+    return new ExecResult(p.exitValue(), collected.toString());
+  }
+
+  /** How long to wait for the drain thread to finish after the process has settled. */
+  private static final Duration DRAIN_JOIN = Duration.ofSeconds(5);
+
+  private static String drain(Process p, Consumer<String> onLine) throws Exception {
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
       if (onLine == null) {
-        output = reader.lines().collect(Collectors.joining("\n"));
-      } else {
-        // Read line by line so the tap sees each line as it arrives (readLine also splits on a bare
-        // `\r`, so git's in-place progress updates stream through too, and it yields the final
-        // unterminated line so nothing is dropped). Still accumulate the full joined output.
-        StringBuilder collected = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-          if (collected.length() > 0) {
-            collected.append('\n');
-          }
-          collected.append(line);
-          try {
-            onLine.accept(line);
-          } catch (RuntimeException ignored) {
-            // the tap is observational only — a failing sink must not abort the git command
-          }
-        }
-        output = collected.toString();
+        return reader.lines().collect(Collectors.joining("\n"));
       }
+      // Read line by line so the tap sees each line as it arrives (readLine also splits on a bare
+      // `\r`, so git's in-place progress updates stream through too, and it yields the final
+      // unterminated line so nothing is dropped). Still accumulate the full joined output.
+      StringBuilder collected = new StringBuilder();
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (collected.length() > 0) {
+          collected.append('\n');
+        }
+        collected.append(line);
+        try {
+          onLine.accept(line);
+        } catch (RuntimeException ignored) {
+          // the tap is observational only — a failing sink must not abort the git command
+        }
+      }
+      return collected.toString();
     }
-    int exitCode = p.waitFor();
-    return new ExecResult(exitCode, output);
   }
 
   /**

@@ -158,7 +158,29 @@ public class WorkspaceService {
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
+  /** How long an integrate waits for a busy repository before refusing — see {@link #acquireIntegrateLease}. */
+  @ConfigProperty(name = "qits.workspace.integrate.lease-wait-ms", defaultValue = "60000")
+  long integrateLeaseWaitMs;
+
   @Inject GitIdentity gitIdentity;
+
+  /** The git half of {@link #integrateWorkspace}: worktree, merge, stamp, bump, commit, push. */
+  @Inject ReleaseIntegrator integrator;
+
+  /**
+   * The repository-scoped mutex integrate serializes on. The concrete registry rather than the
+   * {@link WorkspaceProcessTracker} port, because what integrate wants is the port's
+   * <em>lightweight</em> half — a reservation, not a streamed process with an SSE channel nobody
+   * subscribes to. It is a bean of this module, so it is always present.
+   */
+  @Inject TechnicalProcessRegistry processRegistry;
+
+  /**
+   * The {@code SoftwareRelease} seam — see {@link ReleaseAnnouncer}. Nothing implements it yet, and
+   * that is the intended state: this feature keeps the publish point clean and the event feature
+   * fills it. {@code Instance<>} so absent stays a supported configuration afterwards too.
+   */
+  @Inject Instance<ReleaseAnnouncer> releaseAnnouncer;
 
   /**
    * Creates {@code branch} from {@code parentBranch} host-side in the bare origin.
@@ -1332,6 +1354,8 @@ public class WorkspaceService {
       resolvedTarget = targetWorkspace.branch;
     }
 
+    refuseMainAsMergeTarget(repo, resolvedTarget, workspace.id);
+
     String currentBranch = workspace.branch;
     // Same pre-integration guard as branch integration: refuse a dirty working tree and push the
     // container's unpushed commits so the origin ref this merge reads is complete (a swallowed push
@@ -1346,6 +1370,180 @@ public class WorkspaceService {
       notifyIncomingMerge(repoId, resolvedTarget);
     }
     return result;
+  }
+
+  /**
+   * The one door into the repository's default branch: merge this workspace's branch into it,
+   * stamped with a fresh version, as a single commit that is then <b>pushed</b> through the ordinary
+   * git host.
+   *
+   * <p><b>The target is not a parameter.</b> It is always the repository's default branch, by
+   * construction — that is the feature, and it is why this is its own verb rather than a widening of
+   * {@link #mergeWorkspace}: a different response (a version, a sha), different failure modes, and
+   * different semantics. Merge moves a ref; integrate performs a release.
+   *
+   * <p><b>Synchronous.</b> The whole flow is a local merge, a few file edits and one push to a
+   * container on the same network. The caller needs the version and the sha to say anything useful,
+   * and a conflict is a user-facing error that wants an immediate answer; the push's bounded timeout
+   * is what keeps "seconds" honest. {@code INTEGRATED} still rides the existing SSE stream, so a UI
+   * that would rather not hold the request open already has a channel.
+   *
+   * <p><b>Not idempotent, by design.</b> Each call stamps a new version from the clock, because two
+   * integrates are two releases. Retry safety comes from the flow's shape instead: a failed
+   * integrate moved no ref (the detached worktree), so retrying is clean, and a succeeded one whose
+   * response was lost is refused on the retry with {@code ALREADY_INTEGRATED} rather than producing
+   * an empty second release. The {@code INTEGRATED} row is the durable record either way.
+   *
+   * @throws eu.wohlben.qits.workspaces.error.IntegrateConflictException for every refusal the caller
+   *     can act on
+   */
+  public IntegrateResult integrateWorkspace(Long id, String summary) {
+    // Deliberately NOT one @Transactional. Between the guards and the row work sit two waits a
+    // transaction has no business holding open: the repository lease (up to a minute) and the push
+    // (up to two). Narayana's default transaction timeout is shorter than their sum, so a busy
+    // repository would fail as a transaction timeout rather than as anything a caller could read.
+    // The class already answers this the same way everywhere else — read in one short transaction,
+    // do the slow thing outside, write in another (see beginEnsureContainer and its siblings).
+    Workspace workspace = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
+    String repoId = workspace.repositoryId;
+    var repo = repositories.require(repoId);
+    String target = defaultMainBranch(repo);
+    String source = workspace.branch;
+
+    if (summary == null || summary.isBlank()) {
+      throw new BadRequestException("An integrate needs a summary for its release commit");
+    }
+    if (source == null || source.isBlank() || source.startsWith("-")) {
+      throw new BadRequestException(
+          "Workspace '" + workspace.workspaceId + "' has no branch to integrate");
+    }
+    if (source.equals(target)) {
+      throw new BadRequestException(
+          "Workspace '"
+              + workspace.workspaceId
+              + "' is on '"
+              + target
+              + "', which is already the branch integrate releases to");
+    }
+    // The source's container may hold uncommitted work the origin-side merge would silently leave
+    // behind. Same guard the merge endpoints open with, for the same reason.
+    requireSyncedSourceForIntegration(repoId, workspace);
+
+    String leaseToken = acquireIntegrateLease(repoId);
+
+    ReleaseIntegrator.PublishedRelease release;
+    try {
+      release = integrator.integrate(repoId, source, target, summary, workspace.id);
+    } finally {
+      processRegistry.releaseRepository(repoId, leaseToken);
+    }
+
+    // The seam, and the whole of it: one call, immediately after the push, with everything the
+    // future SoftwareRelease publisher needs. Deliberately before the row work below — the push has
+    // already happened and cannot be taken back, so an announcement conditional on the resolution
+    // committing would be silent about a release that really did occur.
+    announceRelease(repoId, release);
+
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              // The push advanced the target's origin ref; if a live workspace owns it, pull it in.
+              notifyIncomingMerge(repoId, target);
+              // The work is in the default branch, so the workspace resolves: container and volume
+              // gone, branch deleted, row INTEGRATED, WorkspaceEventType.INTEGRATED recorded — the
+              // same mechanics branch cleanup has always used, now carrying the release's own
+              // target and sha. Re-read inside this transaction: the row above is detached, and
+              // WorkspaceResolved observers join here.
+              doDiscard(
+                  repoId,
+                  requireActive(id),
+                  WorkspaceStatus.INTEGRATED,
+                  "release(" + release.version() + "): " + summary,
+                  target,
+                  release.commitSha());
+            });
+    return new IntegrateResult(release.version(), release.commitSha(), source);
+  }
+
+  /**
+   * The repository lease integrate serializes on.
+   *
+   * <p><b>Not a correctness requirement.</b> The push is a compare-and-swap and git settles a
+   * genuine race by rejecting the loser, so two integrates are already safe without this. What the
+   * lease buys is that the common case — two workspaces of one repository integrated seconds apart —
+   * is <b>one waits</b> rather than <b>one fails</b>, and that two flows never build worktrees in one
+   * bare origin at the same time.
+   *
+   * <p>The registry's reservation is fail-fast by design (its other users, a pull and an interactive
+   * sign-in, want an immediate answer), so the waiting is here: a short poll under a hard cap. The
+   * cap is what keeps this from being the unbounded wait the push timeout exists to forbid — past it
+   * the caller is told the repository is busy, which is a sentence a person can act on.
+   */
+  private String acquireIntegrateLease(String repoId) {
+    long deadline = System.currentTimeMillis() + integrateLeaseWaitMs;
+    String lastKind = null;
+    while (true) {
+      RepoReservation lease = processRegistry.reserveRepository(repoId, "integrate");
+      if (lease instanceof RepoReservation.Acquired acquired) {
+        return acquired.token();
+      }
+      lastKind = ((RepoReservation.Conflict) lease).runningKind();
+      if (System.currentTimeMillis() >= deadline) {
+        throw new ConflictException(
+            "Repository is busy with '" + lastKind + "'; nothing was released — try again.");
+      }
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new ConflictException("Interrupted while waiting for the repository to be free");
+      }
+    }
+  }
+
+  /** The {@link ReleaseAnnouncer} seam's single call site. */
+  private void announceRelease(String repoId, ReleaseIntegrator.PublishedRelease release) {
+    if (releaseAnnouncer.isUnsatisfied()) {
+      return;
+    }
+    releaseAnnouncer
+        .get()
+        .onReleasePublished(
+            repoId,
+            release.branch(),
+            release.version(),
+            release.commitSha(),
+            release.publishedAt());
+  }
+
+  /**
+   * The rule that makes "integrate is the only flow into the default branch" true in the API and not
+   * only at the git host.
+   *
+   * <p>{@code merge} keeps working for every other target — merging into a <em>parent</em> branch is
+   * what stacked workspaces do all day — but a merge whose target resolves to the default branch is
+   * refused here, naming the endpoint that does it properly. Without this the claim would be false
+   * in the API even while true at the git host, and the git host would then refuse the write anyway:
+   * a worse error, later, instead of a clear one now.
+   */
+  private void refuseMainAsMergeTarget(
+      RepositoryLookup.RepositoryView repo, String resolvedTarget, Long workspaceId) {
+    if (!defaultMainBranch(repo).equals(resolvedTarget)) {
+      return;
+    }
+    throw new ConflictException(
+        "'"
+            + resolvedTarget
+            + "' is the repository's default branch and is written by integrate alone. Use POST"
+            + " /workspaces/api/workspaces/"
+            + (workspaceId == null ? "{id}" : workspaceId)
+            + "/integrate, which merges, stamps a release version and pushes it as one commit.");
+  }
+
+  /** The id of the ACTIVE workspace owning {@code branch}, or null — for an error message only. */
+  private Long findWorkspaceIdForBranch(String repoId, String branch) {
+    Workspace wt = findWorkspaceByBranch(repoId, branch);
+    return wt == null ? null : wt.id;
   }
 
   /**
@@ -1375,6 +1573,10 @@ public class WorkspaceService {
     if (source.equals(resolvedTarget)) {
       throw new BadRequestException("Cannot integrate '" + source + "' into itself");
     }
+    // Checked after the self-merge guard, which is a plainer error about the same request: merging
+    // a branch into itself is malformed whatever the branch is, while the rule below is about which
+    // door writes the default branch.
+    refuseMainAsMergeTarget(repo, resolvedTarget, findWorkspaceIdForBranch(repoId, source));
     // Guard and complete the source before the origin-side merge reads its ref: refuse a dirty
     // working tree (a plain branch has none, so it is never blocked) and push any commits that live
     // only inside the source container so they aren't silently dropped from the integration.
@@ -1466,6 +1668,10 @@ public class WorkspaceService {
         // The workspaces dir no longer holds host checkouts (they are containers now); ensure it
         // exists so the throwaway merge workspace can be created under it.
         Files.createDirectories(mergeCwd.getParent());
+        // Prune first. A crashed merge leaves its worktree registered in the bare and the NEXT
+        // merge then fails with "already checked out" — a failure that outlives the process that
+        // caused it and that nothing here used to clear. Same fix the integrate flow carries.
+        git.exec(originPath.toFile(), "git", "worktree", "prune");
         git.exec(
             originPath.toFile(), "git", "worktree", "add", mergeCwd.toString(), resolvedTarget);
       } catch (Exception e) {
@@ -1531,6 +1737,22 @@ public class WorkspaceService {
    */
   private void doDiscard(
       String repoId, Workspace workspace, WorkspaceStatus resolution, String result) {
+    doDiscard(repoId, workspace, resolution, result, null, null);
+  }
+
+  /**
+   * {@link #doDiscard(String, Workspace, WorkspaceStatus, String)} with the branch and commit the
+   * resolution refers to, recorded on the history event. Integrate is the caller that has both — the
+   * default branch it released into and the merge commit's sha — and a resolution event that names
+   * neither is a timeline entry a person cannot follow back to the release.
+   */
+  private void doDiscard(
+      String repoId,
+      Workspace workspace,
+      WorkspaceStatus resolution,
+      String result,
+      String target,
+      String commit) {
     Path originPath = Path.of(dataDir, repoId, "origin");
 
     try {
@@ -1567,8 +1789,8 @@ public class WorkspaceService {
               ? WorkspaceEventType.INTEGRATED
               : WorkspaceEventType.ABANDONED,
           branch,
-          null,
-          null);
+          target,
+          commit);
       // Pre-launch composition state (prompt drafts, their attachments) is not a durable record
       // like the history events, and its FK cascade never fires because the workspace row is only
       // soft-deleted. Whoever owns those tables drops them on this event, in this transaction.
@@ -1601,4 +1823,11 @@ public class WorkspaceService {
 
   public record MergeResult(
       String commitHash, boolean hasConflicts, String output, boolean cleanedUp) {}
+
+  /**
+   * What a successful integrate answers. Three facts, none derivable from the others: the version
+   * that was just minted, the merge commit carrying both the merge and the bump, and the source
+   * branch — which the merge's parents record as a sha but never as a name.
+   */
+  public record IntegrateResult(String version, String commitSha, String branch) {}
 }

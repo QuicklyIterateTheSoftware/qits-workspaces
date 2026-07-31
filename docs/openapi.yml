@@ -61,6 +61,15 @@ components:
       format: date-time
       examples:
       - 2022-03-10T16:15:50Z
+    IntegrateRequest:
+      type: object
+      required:
+      - summary
+      properties:
+        summary:
+          type: string
+          maxLength: 100
+          pattern: \S
     MergeBranchRequest:
       type: object
       required:
@@ -97,16 +106,21 @@ components:
     Response10:
       type: object
       properties:
+        technicalProcessId:
+          type: string
+    Response11:
+      type: object
+      properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
-    Response11:
+    Response12:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry1"
-    Response12:
+    Response13:
       type: object
       properties:
         workspace:
@@ -144,25 +158,29 @@ components:
     Response6:
       type: object
       properties:
-        workspace:
-          $ref: "#/components/schemas/WorkspaceDto"
-        technicalProcessId:
+        version:
+          type: string
+        commitSha:
+          type: string
+        branch:
           type: string
     Response7:
       type: object
       properties:
+        workspace:
+          $ref: "#/components/schemas/WorkspaceDto"
+        technicalProcessId:
+          type: string
+    Response8:
+      type: object
+      properties:
         success:
           type: boolean
-    Response8:
+    Response9:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
-    Response9:
-      type: object
-      properties:
-        technicalProcessId:
-          type: string
     ServiceEventDto:
       type: object
       properties:
@@ -432,7 +450,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response11"
+                $ref: "#/components/schemas/Response12"
       summary: List
       tags:
       - Workspace History Controller
@@ -457,7 +475,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response10"
+                $ref: "#/components/schemas/Response11"
       summary: Update
       tags:
       - Workspace History Controller
@@ -475,7 +493,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response12"
+                $ref: "#/components/schemas/Response13"
       summary: Get
       tags:
       - Workspace History Controller
@@ -557,7 +575,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response8"
+                $ref: "#/components/schemas/Response9"
         "400":
           description: Bad Request
       summary: Create
@@ -578,7 +596,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response9"
+                $ref: "#/components/schemas/Response10"
       summary: Active Process
       tags:
       - Workspace Controller
@@ -622,7 +640,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response7"
+                $ref: "#/components/schemas/Response8"
         "400":
           description: Bad Request
       summary: Discard
@@ -643,8 +661,35 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response6"
+                $ref: "#/components/schemas/Response7"
       summary: Ensure Container
+      tags:
+      - Workspace Controller
+  /workspaces/api/workspaces/{id}/integrate:
+    post:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntegrateRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response6"
+        "400":
+          description: Bad Request
+      summary: Integrate
       tags:
       - Workspace Controller
   /workspaces/api/workspaces/{id}/merge:

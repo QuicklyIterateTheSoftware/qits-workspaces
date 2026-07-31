@@ -1,10 +1,12 @@
 package eu.wohlben.qits.workspaces.api;
 
 import eu.wohlben.qits.workspaces.error.DomainException;
+import eu.wohlben.qits.workspaces.error.IntegrateConflictException;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -17,6 +19,14 @@ import java.util.Map;
  * <p>Scoped to <em>this</em> context's exception type. An application that also runs the monorepo's
  * {@code eu.wohlben.qits.domain.error.DomainException} keeps its own mapper for it; the two coexist
  * because they map unrelated types.
+ *
+ * <p><b>The envelope is {@code {"message": …}} and stays that way</b> — one shape for every domain
+ * error, which is what lets a client handle them uniformly. {@link IntegrateConflictException} is
+ * the single exception and it is <em>additive</em>: the same {@code message}, plus a {@code reason}
+ * and (for the conflict modes) a {@code conflicts} array. Integrate has four ways to refuse that a
+ * person does four different things about, and prose was the only channel carrying the difference —
+ * so a client had to word-match it. A field is not a second envelope; it is the same one with the
+ * discriminator the prose was already trying to encode.
  */
 @Provider
 public class WorkspacesExceptionMapper implements ExceptionMapper<DomainException> {
@@ -28,9 +38,14 @@ public class WorkspacesExceptionMapper implements ExceptionMapper<DomainExceptio
     if (message == null || message.isBlank()) {
       message = Response.Status.fromStatusCode(status).getReasonPhrase();
     }
-    return Response.status(status)
-        .entity(Map.of("message", message))
-        .type(MediaType.APPLICATION_JSON)
-        .build();
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("message", message);
+    if (exception instanceof IntegrateConflictException conflict) {
+      body.put("reason", conflict.reason().name());
+      if (!conflict.conflicts().isEmpty()) {
+        body.put("conflicts", conflict.conflicts());
+      }
+    }
+    return Response.status(status).entity(body).type(MediaType.APPLICATION_JSON).build();
   }
 }

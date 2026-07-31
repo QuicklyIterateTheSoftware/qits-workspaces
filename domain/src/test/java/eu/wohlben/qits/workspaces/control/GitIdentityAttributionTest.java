@@ -70,6 +70,10 @@ public class GitIdentityAttributionTest {
     // The seed shape: fork off the fixture's 'feature' branch and integrate it into master via
     // the host-side merge (no container involved) — the path that used to depend on ambient
     // ~/.gitconfig and failed with "Committer identity unknown" in identity-less environments.
+    // master is an ordinary branch here, not this repository's default one: the default branch
+    // is written by integrate alone now, and its 409 would stand in front of what this test is
+    // about. Repointing main is one line and leaves the merge under test byte-for-byte the same.
+    repositories.setMainBranch(repoId, "feature");
     workspaceService.createWorkspace(repoId, "feeder", "feature", "feeder", null);
 
     workspaceService.mergeWorkspace(workspaceIds.of(repoId, "feeder"), "master");

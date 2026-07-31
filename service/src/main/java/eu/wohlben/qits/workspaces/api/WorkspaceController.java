@@ -8,6 +8,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -221,6 +222,44 @@ public class WorkspaceController {
     var result = workspaceService.mergeWorkspace(id, request.target());
     return new MergeWorkspaceRequest.Response(
         result.commitHash(), result.hasConflicts(), result.output());
+  }
+
+  /**
+   * @param summary the release commit's subject after the version scope. Capped at 100 because a
+   *     conventional subject budget is 72 and {@code release(2026.731.193059): } already costs ~24
+   *     of it — the cap lets the summary be the whole of what is left and no more.
+   */
+  public static record IntegrateRequest(@NotBlank @Size(max = 100) String summary) {
+    /** @see eu.wohlben.qits.workspaces.control.WorkspaceService.IntegrateResult */
+    public record Response(String version, String commitSha, String branch) {}
+  }
+
+  /**
+   * Integrate this workspace: merge its branch into the repository's default branch, stamped with a
+   * fresh {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>):
+   * <summary>} — which is then pushed through the ordinary git host, where the ordinary
+   * post-receive fires and the ordinary pipeline builds it.
+   *
+   * <p><b>Its own verb, not a widening of {@code merge}.</b> Different response, different failure
+   * modes and different semantics: merge moves a ref, integrate performs a release. Workspace-keyed,
+   * so it lives here rather than on {@code /branches} — the rule {@link BranchController}'s own
+   * javadoc supplies. And the target is not a parameter: it is always the default branch, which is
+   * the feature.
+   *
+   * <p>The failures are 409s and they are told apart structurally. Each body carries the usual
+   * {@code message} plus an additive {@code reason} — {@code CONFLICT}, {@code MERGE_CONFLICT},
+   * {@code NOT_FAST_FORWARD}, {@code ALREADY_INTEGRATED}, {@code PUSH_REJECTED} — and, for the two
+   * conflict modes, a {@code conflicts} array of the conflicted paths. A conflict or a lost race
+   * released <b>nothing</b> and left the default branch byte-identical; "already integrated" is what
+   * a lost 200 looks like on retry and means the work is in.
+   */
+  @POST
+  @Path("/{id}/integrate")
+  public IntegrateRequest.Response integrate(
+      @PathParam("id") Long id, @Valid IntegrateRequest request) {
+    var result = workspaceService.integrateWorkspace(id, request.summary());
+    return new IntegrateRequest.Response(
+        result.version(), result.commitSha(), result.branch());
   }
 
   // POST /{workspaceId}/fast-forward and /{workspaceId}/update-from-parent used to live here. Both

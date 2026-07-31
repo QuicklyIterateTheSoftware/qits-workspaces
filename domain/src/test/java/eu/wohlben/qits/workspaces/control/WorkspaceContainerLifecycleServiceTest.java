@@ -170,6 +170,10 @@ public class WorkspaceContainerLifecycleServiceTest {
     String repoId = clonedRepo();
     // The seed path: fork off the fixture's 'feature' branch (which carries a commit master
     // lacks) and merge it into master — all host-side, the workspace never provisioned.
+    // master is an ordinary branch here, not this repository's default one: the default branch
+    // is written by integrate alone now, and its 409 would stand in front of what this test is
+    // about. Repointing main is one line and leaves the merge under test byte-for-byte the same.
+    repositories.setMainBranch(repoId, "feature");
     workspaceService.createWorkspace(repoId, "feeder", "feature", "feeder", null);
     Path originPath = Path.of(dataDir, repoId, "origin");
     String masterBefore =
@@ -506,6 +510,10 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Test
   public void integrateRefusesADirtyWorkspaceBranch() throws Exception {
     String repoId = clonedRepo();
+    // master is an ordinary branch here, not this repository's default one: the default branch
+    // is written by integrate alone now, and its 409 would stand in front of what this test is
+    // about. Repointing main is one line and leaves the merge under test byte-for-byte the same.
+    repositories.setMainBranch(repoId, "feature");
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     makeDirty(containers.containerName("feat", repoId));
@@ -521,6 +529,10 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Test
   public void abandonRefusesADirtyWorkspace() throws Exception {
     String repoId = clonedRepo();
+    // master is an ordinary branch here, not this repository's default one: the default branch
+    // is written by integrate alone now, and its 409 would stand in front of what this test is
+    // about. Repointing main is one line and leaves the merge under test byte-for-byte the same.
+    repositories.setMainBranch(repoId, "feature");
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
     workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
     makeDirty(containers.containerName("feat", repoId));

@@ -269,6 +269,88 @@ bumped too — for the publishable library repos that inner manifest is the rele
 A missing or unparseable manifest **fails loudly**. A bump that silently skips a file ships a
 release whose artifacts still carry the previous version, and that is discovered much later.
 
+## The integrate flow
+
+`POST /workspaces/api/workspaces/{id}/integrate` is **the one door into a repository's default
+branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
+version into the same index, commits both as **one** commit — `release(<version>): <summary>` — and
+**pushes** it. `ReleaseIntegrator` is the git half; `WorkspaceService.integrateWorkspace` owns the
+row, the lease, the announcement and the resolution.
+
+**It pushes a repository this service is already holding, and that is the point.** The bare origin
+is on our own disk, so `main` could be advanced by writing the ref — which is exactly what
+`mergeIntoTarget` does, and it is why **no merge this service ever performed produced a CI run**: a
+filesystem ref update fires no `post-receive`. Pushing over HTTP through qits-artifacts makes
+receive-pack the sole writer of the default branch, so the protection hook sees every release and
+the existing post-receive → qits-ci → build chain happens for the ordinary reason. Nothing
+downstream learns a new trick. The address is `qits.artifacts.url` behind the `GitHostAddress` port.
+
+Four properties, each of which is why a step is where it is:
+
+- **`git worktree add --detach` is what makes "no partial state" true.** The merge, the bump and the
+  commit all happen against a `HEAD` that is not a branch, so a conflict, a bump failure or a crash
+  leaves the default branch **byte-identical**. A failed integrate needs no unwind — only a worktree
+  removal, which is in a `finally`. The orphaned commit is git's to collect.
+- **`git merge --no-ff --no-commit` is what makes bump-and-merge one commit.** `MERGE_HEAD` stays
+  set and the index stays staged; the bump writes into that same index; the single `git commit` that
+  follows is a two-parent merge that also carries the version change. No amend, no second commit.
+- **The push is the compare-and-swap.** It carries `--push-option=qits.release`, which the git host
+  accepts for **fast-forward updates only** — deliberately not force — so two integrates racing
+  cannot both win. The loser is rejected as non-fast-forward and told to retry. That is why no
+  distributed lock exists here.
+- **The stamp is taken once**, at step 4, and threaded through. Recomputed per file, a slow bump
+  would write two versions into one commit.
+
+**The 409s carry a `reason`, and it is additive.** The envelope is still `{"message": …}`; an
+`IntegrateConflictException` adds `reason` ∈ `CONFLICT` / `MERGE_CONFLICT` / `NOT_FAST_FORWARD` /
+`ALREADY_INTEGRATED` / `PUSH_REJECTED`, plus `conflicts` (the conflicted paths) for the two conflict
+modes. `WorkspacesExceptionMapper` is where that happens and it is the only type it special-cases.
+`PUSH_REJECTED` is the git host's protection hook refusing: **that must surface as a 4xx carrying
+the hook's own message, never a 500**, because the message is the only thing on screen that says
+what to do instead.
+
+**`merge` and `branches/merge` now 409 when the target resolves to the default branch**, naming
+`/integrate` and the workspace id. They keep every other target — merging into a *parent* branch is
+what stacked workspaces do all day. One consequence, recorded because it is a real loss rather than
+an oversight: **a plain branch can no longer be auto-cleaned up after integration.** A plain
+branch's cleanup parent is the main branch by definition (`canCleanupBranch`), so it is eligible
+only once merged *into* that branch — and that door is integrate's, while integrate is
+workspace-keyed. Workspace branches still resolve and are still deleted; that happens inside
+integrate.
+
+**Three inherited sharp edges this flow had to fix rather than inherit**, and two of them were
+platform-wide:
+
+- **Stale worktrees were never pruned** anywhere in this service. A crashed merge left its admin
+  registered and the *next* one failed with "already checked out" — a failure outliving the process
+  that caused it. Both the integrate flow and `mergeIntoTarget` prune before adding now.
+- **`.tmp-merge-<System.currentTimeMillis()>` collides** within a millisecond. Integrate's worktree
+  is `.tmp-integrate-<workspace row id>`, which is unique by construction.
+- **`GitExecutor` had no timeout at all.** The push is this service's first *network* git call and
+  integrate answers synchronously, so it is the one invocation with a deadline
+  (`qits.workspace.integrate.push-timeout-ms`). The bound covers the whole call, not just
+  `waitFor` — a transport that connects and then says nothing blocks in `readLine()`, so the drain
+  runs on its own thread and `destroyForcibly` is what unblocks it. Local filesystem git keeps its
+  unbounded wait, where a bound would only turn slow into broken.
+
+**`TestOrigin` sets `receive.advertisePushOptions`**, and it is load-bearing rather than tidy. JGit
+advertises push options in production; a local `receive-pack` does **not** by default, and `git push
+--push-option` fails outright against a server that did not advertise them. Without that line the
+fixture would refuse the exact argv that ships. `FakeGitHostAddress` points the push at the local
+bare and replaces the **transport only** — the push, the ref negotiation and the fast-forward check
+are all real, which is what lets `IntegrateControllerTest` assert the compare-and-swap. Its
+`beforeNextPush` hook moves the default branch at the one instant a race is about; staged rather
+than raced, because a real race is nondeterministic about which side loses.
+
+**`ReleaseAnnouncer` is a seam with no implementation, on purpose.** The `SoftwareRelease` event is
+a named follow-up; what this feature owes it is a clean place to stand, so step 7's success returns
+a record through one method (`announceRelease`) instead of vanishing into the middle of a larger
+one. It is announced **after the push and before the transaction commits**: the push is
+irreversible the instant receive-pack accepts it, so a statement conditional on the transaction
+would be silent about a release that really happened. One gap named rather than closed:
+`RepositoryLookup.RepositoryView` is `(id, mainBranch)` and carries no `projectId`, which that
+event's payload needs — the view has to widen when it lands.
+
 ## Authentication
 
 Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
