@@ -1,16 +1,31 @@
 # The pipeline qits-ci runs on every push to a tracked branch of this repository.
 #
-# One step: build this repo's docker/Dockerfile and publish it under the tag that is the whole
-# contract with qits-cd — <registry>/<repository>/<this repo's name>:<sha>. The step's own
-# container only drives the docker CLI; the build and the push happen in the host's daemon
-# through the socket this step declares (docker: true), which is also why the native build's
-# memory is the daemon's and not this container's. A failed push is a failed step is a FAILED
-# run, so the CD announcement (SUCCESS only) keeps implying "the image exists".
+# One step, two halves, and the split between them is the whole point:
+#
+#   1. build the client SPA (service/src/main/webui = the qits-spa-workspaces submodule) HERE, in
+#      the step container, which sits on qits-net and can therefore reach the platform's own npm
+#      registry — where @qits/ui-components lives and where nothing else can reach it from;
+#   2. build this repo's docker/Dockerfile, whose builder stage packages that already-built bundle
+#      and never runs an install.
+#
+# A RUN step inside a docker build reaches the public internet but reaches the platform registry by
+# no address at all (not the qits-net alias, not localhost:8081, not host.docker.internal). That is
+# why the halves are split, and it is why this step's image is node-docker-base rather than ci-base:
+# it needs node, npm and git for half one and the docker CLI for half two. The same arrangement is
+# qits-gateway's, which carries qits-spa-home the same way; that repo is where the pattern is
+# maintained and the two should keep matching.
+#
+# Half two publishes under the tag that is the whole contract with qits-cd —
+# <registry>/<repository>/<this repo's name>:<sha>. The step's own container only drives the docker
+# CLI; the build and the push happen in the host's daemon through the socket this step declares
+# (docker: true), which is also why the native build's memory is the daemon's and not this
+# container's. A failed push is a failed step is a FAILED run, so the CD announcement (SUCCESS only)
+# keeps implying "the image exists".
 #
 # A verify step belongs ahead of this one once a JDK build image exists; today the Dockerfile's
 # own native stage is the gate.
 steps:
-  - image: qits/build-images/ci-base:latest
+  - image: qits/build-images/node-docker-base:latest
     docker: true
     timeout-seconds: 3600
     script: |
@@ -29,6 +44,49 @@ steps:
       # worth recognising if a sibling repo is ever born private too.)
       git submodule update --init --depth 1 service/src/main/webui
 
+      # --- half one: the bundle ---------------------------------------------------------------
+      #
+      # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem
+      # and same fix as qits-spa-workspaces' own pipeline — that repo's recipe is where this
+      # pattern is maintained, and the two should keep matching.
+      #
+      # npm pins a full resolved URL per package, and the SPA's lockfile is generated on the
+      # deployment host, so every entry names localhost:8081 — an address that does not exist in
+      # this container. `npm ci` fetches tarballs by that URL and never asks the configured registry
+      # for them, so the environment below does not reach them: without this swap the install dies
+      # on connection refused. The paths are identical on both addresses, so replacing the ORIGIN
+      # and keeping the path is all it takes, and the integrity hashes are what make that safe —
+      # bytes from the other address must still hash the same. The checkout is this step's own;
+      # nothing is edited that anyone will ever read again.
+      #
+      # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
+      # registry mounted under a path. @npmcli/arborist glues rather than resolves (reify.js:
+      # `registry.slice(0, -1) + resolvedURL.pathname`), so
+      # http://qits-artifacts:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz comes
+      # out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball 404s.
+      #
+      # The origin is derived from the injected env rather than spelled here: no repository states a
+      # deployment's addresses, and the one address the SPA does state (localhost:8081, in its
+      # .npmrc, for a developer on the host) is the one being replaced.
+      cd service/src/main/webui
+      npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      sed -i -E "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_origin#" package-lock.json
+
+      # ENVIRONMENT, not a file. qits-spa-workspaces COMMITS an .npmrc (localhost:8081, right for a
+      # developer on the host), and npm ranks a project .npmrc ABOVE ~/.npmrc — so a `cat > ~/.npmrc`
+      # preamble would be written and silently ignored. `npm_config_*` environment outranks both
+      # files, so it wins without touching the submodule's tree.
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+
+      # dist/qits-spa-workspaces/browser — the bundle the image build consumes, and the ONE artifact
+      # this half exists to produce. Lint and test are qits-spa-workspaces' own pipeline's job;
+      # repeating them here would only make this repo red for someone else's commit.
+      npm run build
+      cd -
+
+      # --- half two: the image ------------------------------------------------------------------
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspaces:$QITS_CI_SHA"
       docker build -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
