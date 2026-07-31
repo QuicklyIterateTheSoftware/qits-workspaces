@@ -237,6 +237,38 @@ artifactId. Any change to it must be mirrored in
 [qits-workspace-daemon](https://github.com/QuicklyIterateTheSoftware/qits-workspace-daemon) and bump
 `DaemonProtocol.CAPABILITY_VERSION`. `DaemonCodecTest` runs on both sides and is what catches drift.
 
+## The version bump engine
+
+`VersionStamp` + `VersionBumper` in `domain/…/control/` write a release version into a checkout.
+Pure: they read and write files under one directory and touch nothing else, which is what lets the
+integrate flow call them inside a detached worktree before any ref has moved.
+
+`VersionStamp.of(Instant)` is `YYYY.MMDD.HHMMSS` — `2026.731.193059` — computed as **integer
+arithmetic in UTC**, so no identifier can carry a leading zero. That is the whole point of the
+shape: the requested `$year.$month.$day-HHMMSS` is invalid semver outright, and its obvious repair
+is valid at 19:30:59 and *invalid* at 09:30:59, a bug that passes every daytime test.
+
+**Both bumpers splice character spans into the original text; neither ever round-trips a tree.** A
+re-serialized pom reformats the whole file, and a re-serialized `package-lock.json` reorders
+thousands of lines including the `resolved` URLs this platform pins deliberately. The one thing to
+know before touching `PomVersions`: **the JDK's StAX `Location.getCharacterOffset()` is exact only
+inside the scanner's first 8192-character buffer** — measured, 231 of 2857 start elements wrong
+across the platform's 45 poms, and every real service pom is bigger than one buffer. Line/column
+was exact for all 2857 and is what the locator uses. Jackson's char offsets have no such caveat
+(74,075 string values, all exact), but its string values are decoded lazily, so `currentLocation()`
+is only past the literal *after* `getText()` has been called.
+
+What moves: every reactor pom's own `<version>` and its in-reactor `<parent><version>` — one
+element per pom, six for a five-module reactor — plus any *literal* in-reactor dependency version,
+of which the platform has zero (all 20 are `${project.version}`). The reactor is walked by
+`<module>`, never by directory scan, which is what keeps `.claude/worktrees/` out without an
+exclusion list. On the npm side exactly three fields: `package.json`'s `version` and the lock's
+`.version` and `.packages[""].version`, the three `npm ci` compares. `projects/*/package.json` is
+bumped too — for the publishable library repos that inner manifest is the released one.
+
+A missing or unparseable manifest **fails loudly**. A bump that silently skips a file ships a
+release whose artifacts still carry the previous version, and that is discovered much later.
+
 ## Authentication
 
 Authentication happens at `qits-gateway`. This service resolves a principal from a trusted header
@@ -302,6 +334,13 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
   returns a repo id; pair it with `FakeRepositoryLookup.register`.
+- `domain/src/test/resources/version-fixtures/` holds **copies of real manifests** — qits-ci's
+  five-module reactor verbatim, comments and all, plus an SPA's `package.json` with a trimmed lock
+  and a pnpm library repo. That is a deliberate exception to "tests build their own": the bump
+  engine's job is to leave everything it did not mean to touch byte-identical, and a fixture written
+  to be convenient cannot prove that. `VersionFixtures.copy` puts one in a `@TempDir`, because the
+  bumpers write. The assertion that carries the suite is the round trip: replacing the new version
+  back with the old one must reproduce the original file exactly.
 - The `Fake*` doubles are duplicated between `domain/src/test` and `service/src/test`. That is
   deliberate and matches the monorepo — the two modules do not share a test classpath.
 - Integration tests needing real docker, a built `qits/workspace` image and the daemon binary are

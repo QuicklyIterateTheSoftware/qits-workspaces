@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Every place the literal 1.0.0-SNAPSHOT can appear in a pom WITHOUT being the reactor's own
+         version. The real repositories in this platform happen to have none of these — all 6 of
+         qits-ci's occurrences are genuine version elements — so this fixture is where "no other
+         version element moved" is actually provable. The comment you are reading is itself one of
+         the decoys: 1.0.0-SNAPSHOT. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>decoys</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>child</module>
+    </modules>
+
+    <properties>
+        <!-- A property that happens to hold the same string. Bumping it would be wrong: it names
+             something else's version and merely collides. -->
+        <legacy.tool.version>1.0.0-SNAPSHOT</legacy.tool.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <!-- A LITERAL inter-module version. Zero of these exist in the platform today —
+                     every one of the 20 inter-module dependencies spells ${project.version} — but
+                     one would break the build the moment the root moved, so it is rewritten. -->
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>decoys-child</artifactId>
+                <version>1.0.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <!-- Somebody else's artifact that happens to sit at the same version string. Not
+                     ours to move. -->
+                <groupId>com.example.vendor</groupId>
+                <artifactId>vendor-widgets</artifactId>
+                <version>1.0.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <!-- The expression form, which follows the root for free and must be left alone. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>decoys-child</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <!-- A plugin version. Plugins are not reactor modules and are never touched. -->
+                    <groupId>com.example.vendor</groupId>
+                    <artifactId>vendor-maven-plugin</artifactId>
+                    <version>1.0.0-SNAPSHOT</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>
