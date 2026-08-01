@@ -113,8 +113,48 @@ public class ContainerProxyRouteTest {
   private final AtomicReference<String> lastAuthorization = new AtomicReference<>();
   private final AtomicReference<String> lastHost = new AtomicReference<>();
 
+  /** The text frame that asks the fake daemon to write N 64 KiB binary frames as fast as it can. */
+  private static final String FLOOD = "flood:";
+
+  private static final int FLOOD_FRAME_BYTES = 64 * 1024;
+
+  /**
+   * Completed when the fake daemon has handed every flood frame to its socket. Under a working
+   * pipe this cannot happen while the browser is not reading: the bytes have nowhere to go, so the
+   * write queue stays full and the daemon stays parked on its drain handler.
+   */
+  private final AtomicReference<CompletableFuture<Void>> floodWritten =
+      new AtomicReference<>(new CompletableFuture<>());
+
+  /**
+   * Hand {@code remaining} frames to the socket, stopping whenever its write queue is full and
+   * resuming on drain. That is what a well-behaved producer does — and it is what makes this test
+   * about the proxy rather than about the stub: a producer that ignored its own queue would balloon
+   * the stub's heap instead of the one under test.
+   */
+  private void flood(io.vertx.core.http.ServerWebSocket ws, int remaining) {
+    io.vertx.core.buffer.Buffer frame =
+        io.vertx.core.buffer.Buffer.buffer(new byte[FLOOD_FRAME_BYTES]);
+    int left = remaining;
+    while (left > 0 && !ws.writeQueueFull()) {
+      ws.writeBinaryMessage(frame);
+      left--;
+    }
+    if (left == 0) {
+      floodWritten.get().complete(null);
+      return;
+    }
+    int rest = left;
+    ws.drainHandler(
+        drained -> {
+          ws.drainHandler(null);
+          flood(ws, rest);
+        });
+  }
+
   @BeforeEach
   void startFakeDaemon() throws Exception {
+    floodWritten.set(new CompletableFuture<>());
     daemonVertx = Vertx.vertx();
     daemonServer =
         daemonVertx
@@ -133,16 +173,26 @@ public class ContainerProxyRouteTest {
             // in production while this test stayed green.
             .webSocketHandshakeHandler(
                 handshake -> {
-                  if (("Bearer " + TOKEN).equals(handshake.headers().get("Authorization"))) {
-                    handshake.accept();
-                  } else {
+                  if (!("Bearer " + TOKEN).equals(handshake.headers().get("Authorization"))) {
                     handshake.reject(401);
+                  } else if (handshake.path().endsWith("/gone")) {
+                    // The real daemon refuses an upgrade for a command that is not running. The
+                    // refusal is the answer, not a transport failure, so it has to reach the client.
+                    handshake.reject(404);
+                  } else {
+                    handshake.accept();
                   }
                 })
             .webSocketHandler(
                 ws ->
                     ws.textMessageHandler(
-                        msg -> ws.writeTextMessage("ws-daemon:" + ws.path() + ":" + msg)))
+                        msg -> {
+                          if (msg.startsWith(FLOOD)) {
+                            flood(ws, Integer.parseInt(msg.substring(FLOOD.length())));
+                          } else {
+                            ws.writeTextMessage("ws-daemon:" + ws.path() + ":" + msg);
+                          }
+                        }))
             .listen(daemonPort(), "127.0.0.1")
             .toCompletionStage()
             .toCompletableFuture()
@@ -247,6 +297,108 @@ public class ContainerProxyRouteTest {
     assertEquals(
         "ws-daemon:" + path + ":{\"type\":\"data\",\"data\":\"x\"}", reply.get(10, TimeUnit.SECONDS));
     ws.abort();
+  }
+
+  /**
+   * The one test that is about the fix rather than about the feature.
+   *
+   * <p>{@code vertx-http-proxy} proxies an upgrade with three bare {@code a.handler(b::write)}
+   * installs — no {@code writeQueueFull}, no {@code pause}, no {@code drainHandler} — so a producer
+   * in the container writes as fast as it likes and the bytes a browser has not read yet accumulate
+   * on <em>this</em> process's heap. A chatty dev server on a terminal socket is exactly that
+   * producer.
+   *
+   * <p>So: park the browser (a paused socket stops reading, and its TCP window closes behind it) and
+   * ask the daemon for 32 MiB. With a bounded pipe the daemon simply cannot get rid of it — the
+   * proxy stops reading, its queue stays full, and the write is still unfinished a second and a half
+   * later. Resume the browser and the whole thing arrives, byte for byte, which is the other half of
+   * the claim: the bound must not lose or reorder anything.
+   *
+   * <p>Without the fix the flood completes while the browser is still parked, because the proxy
+   * swallowed all 32 MiB. That is the assertion.
+   */
+  @Test
+  public void aParkedBrowserStopsTheDaemonRatherThanFillingThisProcessesHeap() throws Exception {
+    Long id = workspaceWithContainer();
+    int frames = 512;
+    long expectedBytes = (long) frames * FLOOD_FRAME_BYTES;
+
+    io.vertx.core.http.WebSocketClient client = daemonVertx.createWebSocketClient();
+    try {
+      io.vertx.core.http.WebSocket browser =
+          client
+              .connect(
+                  RestAssured.port,
+                  "127.0.0.1",
+                  "/workspaces/container/" + id + "/terminal/commands/flooded")
+              .toCompletionStage()
+              .toCompletableFuture()
+              .get(10, TimeUnit.SECONDS);
+
+      CompletableFuture<Void> allReceived = new CompletableFuture<>();
+      java.util.concurrent.atomic.AtomicLong received = new java.util.concurrent.atomic.AtomicLong();
+      browser.binaryMessageHandler(
+          buffer -> {
+            if (received.addAndGet(buffer.length()) >= expectedBytes) {
+              allReceived.complete(null);
+            }
+          });
+
+      // Stop reading before asking for anything, so the daemon's very first frames have nowhere to
+      // go and the whole chain is under pressure from the start.
+      browser.pause();
+      browser.writeTextMessage(FLOOD + frames);
+
+      try {
+        floodWritten.get().get(1500, TimeUnit.MILLISECONDS);
+        throw new AssertionError(
+            "the daemon handed over all "
+                + expectedBytes
+                + " bytes while the browser was not reading — the proxy is buffering them");
+      } catch (java.util.concurrent.TimeoutException expected) {
+        // Good: the daemon is parked on its drain handler because this hop stopped reading.
+      }
+
+      browser.resume();
+      floodWritten.get().get(30, TimeUnit.SECONDS);
+      allReceived.get(30, TimeUnit.SECONDS);
+      assertEquals(expectedBytes, received.get(), "every byte, in order, once the reader comes back");
+    } finally {
+      client.close();
+    }
+  }
+
+  /**
+   * A refusal is an answer. The daemon rejects an upgrade for a command that is no longer running,
+   * and the client needs that status to say "this run is over" rather than "something broke" — so
+   * the handshake response is forwarded rather than flattened into a 502.
+   */
+  @Test
+  public void aRefusedHandshakeReachesTheClientWithTheDaemonsOwnStatus() throws Exception {
+    Long id = workspaceWithContainer();
+
+    io.vertx.core.http.WebSocketClient client = daemonVertx.createWebSocketClient();
+    try {
+      Exception refusal =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              Exception.class,
+              () ->
+                  client
+                      .connect(
+                          RestAssured.port,
+                          "127.0.0.1",
+                          "/workspaces/container/" + id + "/terminal/commands/gone")
+                      .toCompletionStage()
+                      .toCompletableFuture()
+                      .get(10, TimeUnit.SECONDS));
+
+      // Not a hang and not a 502: the daemon's own 404 survives the hop.
+      org.junit.jupiter.api.Assertions.assertTrue(
+          String.valueOf(refusal.getCause()).contains("404"),
+          "expected the daemon's 404 to reach the client, got: " + refusal.getCause());
+    } finally {
+      client.close();
+    }
   }
 
   @Test

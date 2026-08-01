@@ -178,11 +178,18 @@ literal and must carry `/workspaces` itself. Five do, each for its own reason:
   (`ContainerProxyPath.base`, injected by `WorkspaceContainerFactory`) — the same arrangement
   `ServiceProxyRoute` has with a dev server's `QITS_PUBLIC_BASE`. A hop that rewrites a path leaves
   the two ends disagreeing about the destination's address; do not add a `substring` here.
-  Note also that **`vertx-http-proxy` skips its interceptor chain on a WebSocket upgrade**, so the
-  bearer has to be set on the inbound request for the two interactive sockets
-  (`presentBearerOnUpgrade`). Both interceptors are dead on that path — the same defect the gateway
-  works around in `EdgeHeaders.applyToUpgrade`, and a stub origin that accepts any handshake will
-  not show it.
+  **A WebSocket upgrade does not go through `vertx-http-proxy` at all** — `proxyUpgrade` does it by
+  hand. Two reasons, both read out of 4.5.26. The library skips its whole interceptor chain on an
+  upgrade, so the bearer never reached the daemon and both interactive sockets answered 401 (the
+  same defect the gateway works around in `EdgeHeaders.applyToUpgrade`). And the pipe it then builds
+  is bare `a.handler(b::write)` installs with **no `writeQueueFull`, no `pause`, no `drainHandler`**
+  and a failure arm that prints `"Handle this case"` and a stack trace — so a chatty dev server on a
+  terminal socket piles up in this process's heap. The hand-rolled path pauses and drains in both
+  directions (the discipline `DaemonStreamRoute` already had one hop further in) and forwards a
+  refused handshake with the daemon's own status instead of a bare 502. It pipes **raw bytes, never
+  frames**: re-framing would break the terminal's close semantics.
+  A stub origin that accepts any handshake shows neither defect, which is why
+  `ContainerProxyRouteTest` rejects on a bad bearer and parks a reader mid-flood.
 - `DaemonStreamRoute` — `WorkspaceTunnels.STREAM_PATH_PREFIX`, `/workspaces/daemon/stream/`, where a
   daemon's reverse-tunnel dial-back lands. It shares a prefix with `DaemonControlSocket` and does not
   collide (`{id}` matches one segment, so no daemon can be named `stream`), and it is a **raw** route
