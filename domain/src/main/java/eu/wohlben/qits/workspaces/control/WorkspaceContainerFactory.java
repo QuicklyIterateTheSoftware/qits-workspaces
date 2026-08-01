@@ -161,9 +161,44 @@ public class WorkspaceContainerFactory {
    */
   @Inject Instance<RepositoryAddressResolver> nameResolver;
 
+  /**
+   * The owning project id, for {@code QITS_WORKSPACE_DAEMON_PROJECT_ID} and the {@code
+   * qits.project} labels. No {@link RepositoryAddressResolver} implementation exists in the
+   * deployable (name-addressing never shipped), so before this port was consulted the env var
+   * shipped <b>empty</b> — and the daemon's agent launch validates that id, so every launch failed
+   * on "Invalid project id" (D2). {@code RepositoryLookup} has carried {@code projectId} since the
+   * SCMRelease work; an {@code Instance<>} so the hand-built unit-test factory can leave it empty.
+   */
+  @Inject Instance<RepositoryLookup> repositories;
+
   /** The repo's project-scoped name, or empty when unresolvable or no resolver is installed. */
   private Optional<RepositoryAddressResolver.ProjectScopedName> scopedName(String repoId) {
     return nameResolver.isResolvable() ? nameResolver.get().resolve(repoId) : Optional.empty();
+  }
+
+  /**
+   * The repo's owning project id: the scoped name's when a name resolver answers, else {@link
+   * RepositoryLookup}'s, else blank. Failures resolve to blank rather than failing the container —
+   * the id is enrichment (labels, the daemon's MCP scoping), never a provisioning gate.
+   */
+  private String projectIdFor(String repoId) {
+    Optional<String> scoped =
+        scopedName(repoId).map(RepositoryAddressResolver.ProjectScopedName::projectId);
+    if (scoped.isPresent()) {
+      return scoped.get();
+    }
+    if (!repositories.isResolvable()) {
+      return "";
+    }
+    try {
+      return repositories
+          .get()
+          .find(repoId)
+          .map(RepositoryLookup.RepositoryView::projectId)
+          .orElse("");
+    } catch (RuntimeException e) {
+      return ""; // an unreachable registry costs the id, never the container
+    }
   }
 
   /**
@@ -249,7 +284,7 @@ public class WorkspaceContainerFactory {
    * The project id a repo belongs to (blank when unresolved), for the {@code qits.project} label.
    */
   private String resolveProjectId(String repoId) {
-    return scopedName(repoId).map(RepositoryAddressResolver.ProjectScopedName::projectId).orElse("");
+    return projectIdFor(repoId);
   }
 
   /**
@@ -322,13 +357,11 @@ public class WorkspaceContainerFactory {
     Optional<RepositoryAddressResolver.ProjectScopedName> scopedName = scopedName(repoId);
     // The owning project id, also as a label so it mirrors the per-workspace volume's qits.project
     // (the volume labels carry it for dangling-volume reconcile; the container carries it for
-    // symmetry). Blank when the repo has no project.
-    container.label(
-        "qits.project",
-        scopedName.map(RepositoryAddressResolver.ProjectScopedName::projectId).orElse(""));
-    container.env(
-        "QITS_WORKSPACE_DAEMON_PROJECT_ID",
-        scopedName.map(RepositoryAddressResolver.ProjectScopedName::projectId).orElse(""));
+    // symmetry). Resolved through projectIdFor — the RepositoryLookup fallback is what stopped
+    // this env var from shipping empty (D2). Blank only when no registry answers.
+    String projectId = projectIdFor(repoId);
+    container.label("qits.project", projectId);
+    container.env("QITS_WORKSPACE_DAEMON_PROJECT_ID", projectId);
     container.env(
         "QITS_WORKSPACE_DAEMON_REPO_NAME",
         scopedName.map(RepositoryAddressResolver.ProjectScopedName::name).orElse(""));

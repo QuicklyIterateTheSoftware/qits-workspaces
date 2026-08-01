@@ -13,8 +13,9 @@ import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.entity.ServiceEventSeverity;
 import eu.wohlben.qits.workspaces.entity.ServiceStatus;
 import eu.wohlben.qits.workspaces.mapper.ServiceDefinitionMapper;
-import jakarta.annotation.PostConstruct;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -125,9 +126,14 @@ public class ServiceSupervisor {
   /**
    * Subscribe the projection sink once at startup, so a daemon's service events reach this
    * supervisor's state machine, segments, and proxy. No-op when the driver is absent (cli/tests).
+   *
+   * <p>Observes {@link StartupEvent} rather than relying on {@code @PostConstruct}: an
+   * application-scoped bean instantiates lazily, so a {@code @PostConstruct} subscription only
+   * exists once something else touches the supervisor — and until then every daemon-reported
+   * transition (a boot-time auto-start, a reconnect re-report after a qits restart) is dropped
+   * with no projection to land on. Measured live as part of D1.
    */
-  @PostConstruct
-  void subscribeProjection() {
+  void subscribeProjection(@Observes StartupEvent event) {
     if (!serviceDriver.isUnsatisfied()) {
       serviceDriver.get().subscribe(new ProjectionSink());
     }
@@ -153,54 +159,73 @@ public class ServiceSupervisor {
    * Start {@code serviceId} (the config-declared {@code id:}) in the workspace. One running
    * instance per (workspace, service) is enforced — "restart" beats two dev servers fighting over a
    * port.
+   *
+   * <p>The definition is resolved <b>before</b> the supervisor monitor is taken. The config read is
+   * a control-socket round trip, and its {@code ConfigView} reply arrives on the same serialized
+   * inbound pipeline that delivers service transitions — a transition parked on this monitor while
+   * a monitor-holding read awaits its reply starves the read to timeout (measured live as D1's
+   * "Service not declared" leg). No blocking call belongs inside the monitor.
    */
-  public synchronized ServiceInstanceDto start(Long id, String serviceId) {
+  public ServiceInstanceDto start(Long id, String serviceId) {
     Workspace workspace = workspaceResolver.resolveActive(id);
-    return start(workspace.repositoryId, workspace.workspaceId, workspace.id, serviceId, null);
+    ServiceDefinitionDto definition = requireDefinition(workspace.id, serviceId);
+    return start(workspace.repositoryId, workspace.workspaceId, workspace.id, definition, null);
   }
 
   /**
-   * {@link #start(String, String, String)} with an optional {@link TechnicalProcess}: the auto
-   * start path passes the container start's process so this service's startup settles into its
-   * {@code service:<name>} segment.
+   * {@link #start(Long, String)} with the already-resolved definition and an optional {@link
+   * TechnicalProcess}: the auto-start path (the lifecycle coupler) resolved the config once to
+   * decide <em>what</em> to start and passes the result through, so this method never re-reads the
+   * config — the second read is what deadlocked against the socket pipeline (see {@link
+   * #start(Long, String)}).
    *
-   * <p>Either way the host only <em>registers a projection</em>. An auto-start (process != null,
-   * from the lifecycle coupler) needs no instruction — the daemon self-starts the service from its
-   * in-container config, and we pre-register so its streamed events settle this segment/status. A
-   * manual start (process == null) asks the daemon to start it now over the socket.
+   * <p>Either way the host only <em>registers a projection</em>. An auto-start (process != null)
+   * needs no instruction — the daemon self-starts the service from its in-container config, and we
+   * pre-register so its streamed events settle this segment/status. A manual start (process ==
+   * null) asks the daemon to start it now over the socket, after the monitor is released.
    */
-  public synchronized ServiceInstanceDto start(
+  public ServiceInstanceDto start(
       String repoId,
       String workspaceId,
       Long rowId,
-      String serviceId,
+      ServiceDefinitionDto definition,
       TechnicalProcess process) {
-    ServiceDefinitionDto definition =
-        resolveDefinitions(rowId).stream()
-            .filter(d -> d.id().equals(serviceId))
-            .findFirst()
-            .orElseThrow(
-                () ->
-                    new NotFoundException(
-                        "Service not declared in the workspace qits config: " + serviceId));
-    Key key = new Key(rowId, serviceId);
-    Instance existing = instances.get(key);
-    if (existing != null && isLive(existing.status)) {
-      throw new BadRequestException(
-          "Service '" + definition.name() + "' is already running in this workspace");
+    Instance instance;
+    synchronized (this) {
+      Key key = new Key(rowId, definition.id());
+      Instance existing = instances.get(key);
+      if (existing != null && isLive(existing.status)) {
+        throw new BadRequestException(
+            "Service '" + definition.name() + "' is already running in this workspace");
+      }
+      instance = new Instance(repoId, workspaceId, rowId, definition);
+      instance.process = process;
+      instance.tail = new TailSink();
+      instance.status = ServiceStatus.STARTING;
+      instances.put(key, instance);
     }
-    Instance instance = new Instance(repoId, workspaceId, rowId, definition);
-    instance.process = process;
-    instance.tail = new TailSink();
-    instance.status = ServiceStatus.STARTING;
-    instances.put(key, instance);
+    // Outside the monitor: the send blocks on the connection's event loop, and nothing that blocks
+    // belongs inside it (see start(Long, String)).
     if (process == null && !serviceDriver.isUnsatisfied()) {
       serviceDriver
           .get()
           .startService(
               rowId, definition.name(), definition.startScript(), definition.environment());
     }
-    return toInstanceDto(instance, null, rowId);
+    synchronized (this) {
+      return toInstanceDto(instance, null, rowId);
+    }
+  }
+
+  /** Resolve one declared service definition by id, or 404 — outside the supervisor monitor. */
+  private ServiceDefinitionDto requireDefinition(Long rowId, String serviceId) {
+    return resolveDefinitions(rowId).stream()
+        .filter(d -> d.id().equals(serviceId))
+        .findFirst()
+        .orElseThrow(
+            () ->
+                new NotFoundException(
+                    "Service not declared in the workspace qits config: " + serviceId));
   }
 
   /**

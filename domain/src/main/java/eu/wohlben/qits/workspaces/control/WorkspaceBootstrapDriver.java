@@ -47,6 +47,34 @@ public interface WorkspaceBootstrapDriver {
   record Result(boolean ok) {}
 
   /**
+   * Register a sink that receives <b>every</b> step outcome the daemon reports, awaited or not, for
+   * the life of the app — the persistent counterpart of the per-run {@link StepSink}. This is what
+   * lets a chain the daemon ran on its own (its HTTP {@code POST /bootstrap-commands/run}, reached
+   * through the container proxy) still land as host {@code workspace_bootstrap_run} rows: no host
+   * awaiter exists for such a run, so a sink tied to an await never sees it (measured live as D1's
+   * missing-rows leg). The host recorder subscribes once at startup, the {@code
+   * WorkspaceServiceDriver#subscribe} precedent.
+   */
+  void subscribe(OutcomeSink sink);
+
+  /**
+   * Receives step outcomes as the daemon streams them, with the workspace identity the backend
+   * knows (repoId from the daemon's {@code Hello}, the label, and the row id the socket is keyed
+   * by). Callbacks may arrive on a dispatch thread; implementations guard their own failures.
+   */
+  interface OutcomeSink {
+
+    /** One step's terminal outcome: {@code SKIPPED}, {@code SUCCEEDED}, or {@code FAILED}. */
+    void onOutcome(
+        String repoId,
+        String workspaceId,
+        Long workspaceRowId,
+        String stepName,
+        String outcome,
+        Integer exitCode);
+  }
+
+  /**
    * Receives a bootstrap chain's per-step progress as the daemon streams it, so the host can settle
    * process segments, record run outcomes, and hint the UI. Callbacks arrive on the socket thread.
    */

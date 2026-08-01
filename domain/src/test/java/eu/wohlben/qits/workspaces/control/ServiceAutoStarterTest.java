@@ -192,6 +192,56 @@ public class ServiceAutoStarterTest {
   }
 
   @Test
+  public void theDaemonStartPathCouplesWithOneConfigReadAndProjectsReady() throws Exception {
+    // The load-bearing daemon-start assertion (D1): the coupler fires on a container start,
+    // resolves the auto-start set with ONE config read, and passes the resolved definition through
+    // — the supervisor must not read the config again. Live, the second read was a control-socket
+    // round trip whose reply queued behind a transition parked on the supervisor monitor: it
+    // starved to timeout and every auto-start died with "Service not declared". A config staged to
+    // answer exactly once is how that stays fixed. The probe is proxyTarget — projection state,
+    // no config read of its own — which is also the exact lookup the broken Web view died on.
+    String repoId = repoWithWorkspace();
+    Long rowId = workspaceIds.of(repoId, "work");
+    QitsConfig.ServiceDecl decl =
+        new QitsConfig.ServiceDecl(
+            "one-read",
+            "one-read",
+            null,
+            "sleep 300",
+            null,
+            true,
+            RestartPolicy.NEVER,
+            0,
+            "TERM",
+            null,
+            new QitsConfig.WebViewDecl(4321, "/", null),
+            null);
+    configReader.setConfigOnce(rowId, new QitsConfig(null, null, null, List.of(decl), null));
+
+    containerEvents.fireStarted(repoId, "work", rowId);
+
+    awaitProxyStatus(rowId, "one-read", ServiceStatus.STARTING);
+
+    // The daemon reports READY; the projection settles it off the one definition already carried.
+    driver.sink().onState(repoId, "work", rowId, "one-read", "READY", null);
+    awaitProxyStatus(rowId, "one-read", ServiceStatus.READY);
+  }
+
+  private void awaitProxyStatus(Long rowId, String serviceId, ServiceStatus expected)
+      throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MILLIS;
+    ServiceSupervisor.ProxyTarget last = null;
+    while (System.currentTimeMillis() < deadline) {
+      last = supervisor.proxyTarget(rowId, serviceId).orElse(null);
+      if (last != null && last.status() == expected) {
+        return;
+      }
+      Thread.sleep(50);
+    }
+    throw new AssertionError("Timed out waiting for proxy " + expected + "; last: " + last);
+  }
+
+  @Test
   public void manualStartStillWorksWithAutoStartOff() throws Exception {
     // Auto-start is opt-out per service, but manual start/stop stays available for any service.
     String repoId = repoWithWorkspace();

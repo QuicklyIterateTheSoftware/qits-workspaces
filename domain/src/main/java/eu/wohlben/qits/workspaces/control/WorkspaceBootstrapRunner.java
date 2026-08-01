@@ -4,8 +4,10 @@ import eu.wohlben.qits.workspaces.entity.BootstrapOutcome;
 import eu.wohlben.qits.workspaces.entity.Workspace;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -120,6 +122,39 @@ public class WorkspaceBootstrapRunner {
   @PreDestroy
   void shutdown() {
     manualRunExecutor.shutdownNow();
+  }
+
+  /**
+   * Subscribe the persistent outcome recorder at startup, so <b>every</b> chain the daemon reports
+   * lands as {@code workspace_bootstrap_run} rows — including runs the host never awaited (the daemon's own
+   * HTTP {@code POST /bootstrap-commands/run}, reached through the container proxy, which used to
+   * answer 202 and write nothing host-side). The per-run {@link RecordingSink} keeps the process
+   * segments; rows have exactly one writer, here.
+   */
+  void subscribeRecorder(@Observes StartupEvent event) {
+    if (driver.isUnsatisfied()) {
+      return;
+    }
+    driver
+        .get()
+        .subscribe(
+            (repoId, workspaceId, rowId, stepName, outcome, exitCode) -> {
+              try {
+                BootstrapOutcome resolved = BootstrapOutcome.valueOf(outcome);
+                // A skip has no run of its own — record no exit code (the check's non-zero is the
+                // skip reason, not a run outcome). commandId is always null: the step ran in the
+                // container, not via a host Command row.
+                Integer recordedExit = resolved == BootstrapOutcome.SKIPPED ? null : exitCode;
+                bootstrapRunService.recordOutcome(
+                    repoId, workspaceId, rowId, stepName, stepName, resolved, null, recordedExit);
+              } catch (RuntimeException e) {
+                // A workspace deleted mid-chain (NotFound) or an unknown outcome string must not
+                // escape into the dispatcher — a dropped row is diagnostic loss, not a failure.
+                LOG.debugf(
+                    "bootstrap outcome not recorded for workspace %s step '%s': %s",
+                    workspaceId, stepName, e.getMessage());
+              }
+            });
   }
 
   /** Whether a bootstrap run is currently in flight for the workspace. */
@@ -306,10 +341,9 @@ public class WorkspaceBootstrapRunner {
   }
 
   /**
-   * Turns the daemon's streamed step events into host state: {@code bootstrap:<name>} process
-   * segments, {@link BootstrapRun} outcome rows (keyed by the step name — the file is the only
-   * chain source, so the name <em>is</em> the stable snapshot key), and BOOTSTRAP UI hints (fired
-   * by {@link BootstrapRunService#recordOutcome}).
+   * Turns the daemon's streamed step events into {@code bootstrap:<name>} process segments for the
+   * awaited run. Outcome rows are <b>not</b> written here — the persistent recorder ({@link
+   * #subscribeRecorder}) is their single writer, so a run with no awaiter records the same rows.
    */
   private final class RecordingSink implements WorkspaceBootstrapDriver.StepSink {
 
@@ -347,15 +381,9 @@ public class WorkspaceBootstrapRunner {
 
     @Override
     public void onOutcome(String name, String outcome, Integer exitCode) {
+      // No row write here: the persistent recorder (subscribeRecorder) is the single writer of
+      // BootstrapRun rows, awaited run or not. This sink only settles the process segments.
       BootstrapOutcome resolved = BootstrapOutcome.valueOf(outcome);
-      // A skip has no run of its own — record no exit code (the check's non-zero is the skip
-      // reason,
-      // not a run outcome). commandId is always null now: the step ran in the container, not via a
-      // host Command row (its live output is the bootstrap:<name> process segment, not a Command
-      // log).
-      Integer recordedExit = resolved == BootstrapOutcome.SKIPPED ? null : exitCode;
-      bootstrapRunService.recordOutcome(
-          repoId, workspaceId, rowId, name, name, resolved, null, recordedExit);
       if (process != null) {
         String segment = bootstrapSegment(name);
         if (openedSegments.add(segment)) {

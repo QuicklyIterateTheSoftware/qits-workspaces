@@ -84,6 +84,7 @@ public class WorkspaceBootstrapRunnerTest {
   @Inject ServiceSupervisor supervisor;
   @Inject WorkspaceContainerEventPublisher containerEvents;
   @Inject WorkspaceReadyForServicesRecorder readyRecorder;
+  @Inject FakeWorkspaceBootstrapDriver bootstrapDriver;
   @Inject GitExecutor git;
 
   @ConfigProperty(name = "qits.repositories.data-dir")
@@ -373,6 +374,23 @@ public class WorkspaceBootstrapRunnerTest {
     // Drain: the first run's success fires ready and the coupler auto-starts the daemon — await
     // it so the async pipeline is quiescent before the next test stages its own config.
     awaitServiceStatus(repoId, serviceId, ServiceStatus.STARTING);
+  }
+
+  @Test
+  public void anUnawaitedDaemonRunStillRecordsItsOutcomeRow() throws Exception {
+    // The daemon can run the chain on its own (its HTTP `POST /bootstrap-commands/run`, reached
+    // through the container proxy) — no host awaiter exists for such a run, so a sink tied to an
+    // await never sees it. Measured live (D1): the POST answered 202 and wrote no row. The
+    // persistent recorder the runner subscribes at startup is what closes it; the fake fans the
+    // outcome to it exactly as the registry fans an unawaited BootstrapOutcome frame.
+    String repoId = repoWithWorkspace("Bootstrap Unawaited", null);
+
+    bootstrapDriver.reportUnawaitedOutcome(
+        repoId, "work", workspaceIds.of(repoId, "work"), "own-run", "SUCCEEDED", 0);
+
+    BootstrapRunDto run = awaitOutcome(repoId, "own-run", BootstrapOutcome.SUCCEEDED);
+    assertEquals(0, run.exitCode());
+    assertNull(run.commandId(), "an in-container step leaves no host Command audit row");
   }
 
   // DROPPED IN EXTRACTION: repositoryWithRecordedBootstrapRunDeletesCleanly.

@@ -25,18 +25,37 @@ public class FakeWorkspaceConfigReader implements WorkspaceConfigReader {
 
   private final Map<Long, WorkspaceConfigView> views = new ConcurrentHashMap<>();
 
+  private final java.util.Set<Long> oneShot = ConcurrentHashMap.newKeySet();
+
   @Override
   public Optional<WorkspaceConfigView> readConfig(Long workspaceId) {
-    return Optional.ofNullable(views.get(workspaceId));
+    WorkspaceConfigView view = views.get(workspaceId);
+    if (view != null && oneShot.remove(workspaceId)) {
+      views.remove(workspaceId);
+    }
+    return Optional.ofNullable(view);
   }
 
   /** Stage {@code config} as {@code workspaceId}'s in-container config (warning-free). */
   public void setConfig(Long workspaceId, QitsConfig config) {
+    oneShot.remove(workspaceId);
     views.put(workspaceId, new WorkspaceConfigView(config, null));
+  }
+
+  /**
+   * Stage a config that answers exactly one read, then reads empty. The live config read is a
+   * control-socket round trip that can stop answering at any moment (a reconnect, a reply starved
+   * behind a blocked pipeline — the measured D1 deadlock), so a consumer that resolves the
+   * definitions once must carry them rather than read again; this staging is how a test proves it.
+   */
+  public void setConfigOnce(Long workspaceId, QitsConfig config) {
+    views.put(workspaceId, new WorkspaceConfigView(config, null));
+    oneShot.add(workspaceId);
   }
 
   /** Forget every staged config (call between tests sharing the bean). */
   public void clear() {
     views.clear();
+    oneShot.clear();
   }
 }

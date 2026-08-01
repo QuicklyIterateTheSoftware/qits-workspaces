@@ -23,6 +23,12 @@ import java.util.Map;
  * "doesn't map to a QitsConfig" warning that looks like a daemon bug. {@code @RegisterForReflection}
  * does not descend into nested types, so a record added below has to be added here too. See {@link
  * WorkspaceMetadata} for the same defect caught the harder way.
+ *
+ * <p><b>The enums are targets too.</b> Jackson resolves an enum's constants reflectively, so an
+ * unregistered {@link RestartPolicy}/{@link HealthCheckKind} makes the binary's deserialization
+ * throw on any config whose services carry {@code restart-policy:} or a health check — caught, and
+ * degraded to {@link #EMPTY}. Measured live as D1's first leg: every such workspace auto-started
+ * nothing, silently, while the JVM suite stayed green.
  */
 @io.quarkus.runtime.annotations.RegisterForReflection(
     targets = {
@@ -33,7 +39,9 @@ import java.util.Map;
       QitsConfig.ServiceDecl.class,
       QitsConfig.BootstrapDecl.class,
       QitsConfig.WebViewDecl.class,
-      QitsConfig.HealthCheckDecl.class
+      QitsConfig.HealthCheckDecl.class,
+      RestartPolicy.class,
+      HealthCheckKind.class
     })
 public record QitsConfig(
     RepositorySection repository,

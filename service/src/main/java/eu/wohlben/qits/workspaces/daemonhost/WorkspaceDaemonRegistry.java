@@ -208,10 +208,39 @@ public class WorkspaceDaemonRegistry
    * Host coordinators subscribed to service (dev-server) lifecycle events (Part 4). The daemon owns
    * the process lifecycle and streams every transition; the host {@code ServiceSupervisor} projects
    * them. Registered once at host startup, so it's a small, stable list — {@code
-   * CopyOnWriteArrayList} makes the socket-thread iteration lock-free.
+   * CopyOnWriteArrayList} makes the iteration lock-free.
    */
   private final CopyOnWriteArrayList<WorkspaceServiceDriver.ServiceEventSink> serviceSinks =
       new CopyOnWriteArrayList<>();
+
+  /**
+   * Persistent bootstrap-outcome recorders ({@link WorkspaceBootstrapDriver#subscribe}), fed every
+   * {@link BootstrapOutcome} frame — awaited or not. This is how a chain the daemon ran on its own
+   * (its HTTP run verb, through the container proxy) still writes host rows.
+   */
+  private final CopyOnWriteArrayList<WorkspaceBootstrapDriver.OutcomeSink> outcomeSinks =
+      new CopyOnWriteArrayList<>();
+
+  /**
+   * One ordered thread for everything fanned out to subscribed sinks — service transitions, service
+   * output, bootstrap-outcome recording. <b>Never the socket thread.</b> websockets-next processes
+   * one inbound frame per connection at a time, so a sink that blocks (the supervisor monitor, a DB
+   * write) parks the whole pipeline — including the {@code ConfigView} reply a config read on
+   * another thread is awaiting, which starved those reads to timeout (measured, D1). Single-threaded
+   * so one workspace's transitions stay in arrival order.
+   */
+  private final java.util.concurrent.ExecutorService sinkDispatch =
+      java.util.concurrent.Executors.newSingleThreadExecutor(
+          runnable -> {
+            Thread thread = new Thread(runnable, "daemon-sink-dispatch");
+            thread.setDaemon(true);
+            return thread;
+          });
+
+  @jakarta.annotation.PreDestroy
+  void shutdownDispatch() {
+    sinkDispatch.shutdownNow();
+  }
 
   /** The label a connected daemon announced for itself, or null when it has not said Hello yet. */
   private static String labelOf(DaemonConnection client) {
@@ -666,21 +695,34 @@ public class WorkspaceDaemonRegistry
     client.connection.sendTextAndAwait(codec.encode(new PullBranch(correlationId, branch)));
   }
 
-  /** Fan a service's lifecycle transition out to every subscribed host coordinator. */
+  /**
+   * Fan a service's lifecycle transition out to every subscribed host coordinator — on the {@link
+   * #sinkDispatch} thread, never the socket thread (see the field's javadoc for the deadlock this
+   * prevents). repoId/label are captured before the hop so a disconnect can't blank them mid-fan.
+   */
   private void routeServiceState(
       Long workspaceId, DaemonConnection client, ServiceTransition event) {
     if (serviceSinks.isEmpty()) {
       return;
     }
     String repoId = client != null ? client.repoId : null;
-    for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
-      sink.onState(
-          repoId, labelOf(client), workspaceId, event.id(), event.state(), event.exitCode());
-    }
+    String label = labelOf(client);
+    sinkDispatch.execute(
+        () -> {
+          for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
+            try {
+              sink.onState(
+                  repoId, label, workspaceId, event.id(), event.state(), event.exitCode());
+            } catch (RuntimeException e) {
+              LOG.debugf("service transition sink failed (dropped): %s", e.getMessage());
+            }
+          }
+        });
   }
 
   /**
-   * Fan a running service's streamed output (correlation {@code service:<name>}) out to the sinks.
+   * Fan a running service's streamed output (correlation {@code service:<name>}) out to the sinks —
+   * off the socket thread, like {@link #routeServiceState}.
    */
   private void streamServiceOutput(
       Long workspaceId, DaemonConnection client, CommandChunk chunk) {
@@ -688,17 +730,24 @@ public class WorkspaceDaemonRegistry
       return;
     }
     String repoId = client != null ? client.repoId : null;
+    String label = labelOf(client);
     String name =
         chunk.correlationId().substring(DaemonProtocol.SERVICE_CORRELATION_PREFIX.length());
-    for (String line : chunk.text().split("\n", -1)) {
-      if (line.isEmpty()) {
-        continue;
-      }
-      for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
-        sink.onLine(
-            repoId, labelOf(client), workspaceId, name, chunk.stream().name(), line);
-      }
-    }
+    sinkDispatch.execute(
+        () -> {
+          for (String line : chunk.text().split("\n", -1)) {
+            if (line.isEmpty()) {
+              continue;
+            }
+            for (WorkspaceServiceDriver.ServiceEventSink sink : serviceSinks) {
+              try {
+                sink.onLine(repoId, label, workspaceId, name, chunk.stream().name(), line);
+              } catch (RuntimeException e) {
+                LOG.debugf("service output sink failed (dropped): %s", e.getMessage());
+              }
+            }
+          }
+        });
   }
 
   /**
@@ -741,12 +790,38 @@ public class WorkspaceDaemonRegistry
   }
 
   /**
-   * Route one bootstrap step's terminal outcome to the awaiting sink (buffered until it registers).
+   * Route one bootstrap step's terminal outcome to the awaiting sink (buffered until it registers)
+   * — and, independently, to every persistent {@link WorkspaceBootstrapDriver.OutcomeSink}. The
+   * persistent fan-out is what records rows for a chain the host never awaited (the daemon's HTTP
+   * run verb); it hops to {@link #sinkDispatch} because the recorder writes the database, and a DB
+   * write on the socket thread parks the connection's serialized inbound pipeline.
    */
   private void routeBootstrapOutcome(Long workspaceId, BootstrapOutcome outcome) {
     bootstraps
         .computeIfAbsent(workspaceId, id -> new PendingBootstrap())
         .deliver(sink -> sink.onOutcome(outcome.name(), outcome.outcome(), outcome.exitCode()));
+    if (outcomeSinks.isEmpty()) {
+      return;
+    }
+    DaemonConnection client = clients.get(workspaceId);
+    String repoId = client != null ? client.repoId : null;
+    String label = labelOf(client);
+    sinkDispatch.execute(
+        () -> {
+          for (WorkspaceBootstrapDriver.OutcomeSink sink : outcomeSinks) {
+            try {
+              sink.onOutcome(
+                  repoId, label, workspaceId, outcome.name(), outcome.outcome(), outcome.exitCode());
+            } catch (RuntimeException e) {
+              LOG.debugf("bootstrap outcome sink failed (dropped): %s", e.getMessage());
+            }
+          }
+        });
+  }
+
+  @Override
+  public void subscribe(WorkspaceBootstrapDriver.OutcomeSink sink) {
+    outcomeSinks.add(sink);
   }
 
   /** Feed a bootstrap step's streamed output (correlation {@code bootstrap:<name>}) to the sink. */

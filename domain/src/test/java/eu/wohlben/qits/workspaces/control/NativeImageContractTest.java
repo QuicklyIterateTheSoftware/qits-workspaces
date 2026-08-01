@@ -70,4 +70,36 @@ public class NativeImageContractTest {
         missing.isEmpty(),
         "nested records not in QitsConfig's @RegisterForReflection(targets): " + missing);
   }
+
+  /**
+   * The enums the record tree binds are targets too. Jackson resolves an enum's constants
+   * reflectively, so an unregistered enum makes the binary's {@code QitsConfig} read throw — caught
+   * and degraded to the EMPTY config, which auto-started nothing for any workspace whose services
+   * declared {@code restart-policy:} or a health-check {@code kind:}. Measured live (D1); the JVM
+   * suite could not see it, which is why the registration is pinned here. Found by walking the
+   * record components rather than naming the two enums, so the next enum-typed field joins the
+   * assertion by existing.
+   */
+  @Test
+  public void everyEnumBoundByTheQitsConfigTreeIsRegisteredForReflection() {
+    Set<Class<?>> registered =
+        Set.of(QitsConfig.class.getAnnotation(RegisterForReflection.class).targets());
+    Set<Class<?>> enums =
+        registered.stream()
+            .filter(Class::isRecord)
+            .flatMap(record -> Arrays.stream(record.getRecordComponents()))
+            .map(java.lang.reflect.RecordComponent::getType)
+            .filter(Class::isEnum)
+            .collect(Collectors.toSet());
+
+    List<String> missing =
+        enums.stream()
+            .filter(e -> !registered.contains(e))
+            .map(Class::getSimpleName)
+            .collect(Collectors.toList());
+    assertTrue(
+        missing.isEmpty(),
+        "enums bound by QitsConfig's record tree but not in @RegisterForReflection(targets): "
+            + missing);
+  }
 }

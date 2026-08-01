@@ -37,6 +37,27 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
   String dataDir;
 
+  /** The persistent outcome recorders, fed on every step outcome like the real registry. */
+  private final java.util.concurrent.CopyOnWriteArrayList<OutcomeSink> outcomeSinks =
+      new java.util.concurrent.CopyOnWriteArrayList<>();
+
+  @Override
+  public void subscribe(OutcomeSink sink) {
+    outcomeSinks.add(sink);
+  }
+
+  /**
+   * Play the daemon reporting a step outcome for a chain the host never awaited (its own HTTP run
+   * verb) — delivered only to the persistent {@link OutcomeSink}s, exactly like the registry's
+   * fan-out of an unawaited {@code BootstrapOutcome} frame.
+   */
+  public void reportUnawaitedOutcome(
+      String repoId, String workspaceId, Long rowId, String stepName, String outcome, Integer exitCode) {
+    for (OutcomeSink sink : outcomeSinks) {
+      sink.onOutcome(repoId, workspaceId, rowId, stepName, outcome, exitCode);
+    }
+  }
+
   @Override
   public Optional<Result> awaitBootstrap(
       Long workspaceId, StepSink sink, Duration connectTimeout, Duration chainTimeout) {
@@ -174,6 +195,8 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
         if (check.exitCode() != 0) {
           sink.onStep(stepName, "SKIP");
           sink.onOutcome(stepName, "SKIPPED", check.exitCode());
+          reportUnawaitedOutcome(
+              repoId, workspaceId, rowId, stepName, "SKIPPED", check.exitCode());
           continue;
         }
       }
@@ -189,6 +212,10 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
               step.execute());
       boolean stepOk = exec.exitCode() == 0;
       sink.onOutcome(stepName, stepOk ? "SUCCEEDED" : "FAILED", exec.exitCode());
+      // The real registry fans every outcome frame to the persistent recorders too — mirror that,
+      // or the awaited path would stop producing rows now that the awaiting sink writes none.
+      reportUnawaitedOutcome(
+          repoId, workspaceId, rowId, stepName, stepOk ? "SUCCEEDED" : "FAILED", exec.exitCode());
       if (!stepOk) {
         ok = false;
         break; // fail-fast: abort the rest of the chain

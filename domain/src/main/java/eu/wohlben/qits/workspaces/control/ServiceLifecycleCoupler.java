@@ -55,6 +55,17 @@ public class ServiceLifecycleCoupler {
   @ConfigProperty(name = "qits.services.autostop-enabled", defaultValue = "true")
   boolean autostopEnabled;
 
+  /**
+   * How long to wait for the workspace's config to become readable before deciding the auto-start
+   * set. The config is read over the daemon control socket, and on a container (re)start this
+   * observer routinely runs before the daemon has dialed home — an immediate read then answers
+   * empty and auto-start silently resolves to zero services (measured live as D1's restart leg).
+   * Bounded: a workspace whose daemon never connects still ends with an empty set. Test config sets
+   * 0 (one immediate read), the mirror-freshness precedent.
+   */
+  @ConfigProperty(name = "qits.services.autostart-connect-timeout-ms", defaultValue = "20000")
+  long connectTimeoutMs;
+
   void onReadyForServices(@ObservesAsync WorkspaceReadyForServices evt) {
     // The technical process (if this start is stream-tracked) must always learn the auto-start
     // set — even when it is empty or the kill switch is off — because its terminal `done` waits
@@ -63,7 +74,7 @@ public class ServiceLifecycleCoupler {
     List<ServiceDefinitionDto> autoStarts =
         !autostartEnabled || configReader.isUnsatisfied()
             ? List.of()
-            : configReader.get().readConfig(evt.workspaceRowId()).stream()
+            : awaitConfig(evt.workspaceRowId()).stream()
                 .flatMap(view -> view.config().services().stream())
                 .map(definitions::toDto)
                 .filter(ServiceDefinitionDto::autoStart)
@@ -73,8 +84,10 @@ public class ServiceLifecycleCoupler {
     }
     for (ServiceDefinitionDto service : autoStarts) {
       try {
+        // The resolved definition is passed through — the supervisor must not re-read the config
+        // (the second read is the socket-pipeline deadlock this coupler's fix removed).
         supervisor.start(
-            evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), service.id(), process);
+            evt.repoId(), evt.workspaceId(), evt.workspaceRowId(), service, process);
       } catch (BadRequestException alreadyRunning) {
         // An instance is already live (a concurrent manual start, or a re-adopted session). The
         // supervisor enforces one instance per (workspace, service); tolerating this is exactly the
@@ -103,6 +116,30 @@ public class ServiceLifecycleCoupler {
             "Auto-start failed for service '%s' in workspace %s",
             service.name(),
             evt.workspaceId());
+      }
+    }
+  }
+
+  /**
+   * Read the workspace's config, retrying until a daemon answers or {@link #connectTimeoutMs}
+   * passes. A present-but-empty answer (a config-free checkout) stops the wait immediately — the
+   * retry is only for "no daemon has answered yet", which {@code readConfig} reports as {@code
+   * Optional.empty()}. Runs on the async observer thread, so waiting here blocks no request and no
+   * socket.
+   */
+  private java.util.Optional<WorkspaceConfigView> awaitConfig(Long workspaceRowId) {
+    WorkspaceConfigReader reader = configReader.get();
+    long deadline = System.nanoTime() + connectTimeoutMs * 1_000_000L;
+    while (true) {
+      java.util.Optional<WorkspaceConfigView> view = reader.readConfig(workspaceRowId);
+      if (view.isPresent() || System.nanoTime() >= deadline) {
+        return view;
+      }
+      try {
+        Thread.sleep(200);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return java.util.Optional.empty();
       }
     }
   }

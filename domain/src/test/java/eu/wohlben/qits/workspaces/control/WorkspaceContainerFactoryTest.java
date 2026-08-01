@@ -52,6 +52,8 @@ class WorkspaceContainerFactoryTest {
     f.nameResolver =
         nameResolver(
             Optional.of(new RepositoryAddressResolver.ProjectScopedName("proj-1", "my-repo")));
+    // No repository registry by default — the lookup fallback has its own test.
+    f.repositories = StubInstance.empty();
     return f;
   }
 
@@ -166,6 +168,31 @@ class WorkspaceContainerFactoryTest {
     // fallback.
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=");
+  }
+
+  @Test
+  void withoutANameResolverTheProjectIdFallsBackToTheRepositoryRegistry() {
+    // No RepositoryAddressResolver implementation ships (name-addressing never landed), so before
+    // the fallback this env var was ALWAYS empty in the deployable — and the daemon's agent launch
+    // validates it, so every launch died on "Invalid project id" (D2). RepositoryLookup has
+    // carried projectId since the SCMRelease work; it is the registry that owns the answer.
+    WorkspaceContainerFactory f = factory();
+    f.nameResolver = nameResolver(Optional.empty());
+    f.repositories =
+        StubInstance.of(
+            repoId ->
+                Optional.of(
+                    new RepositoryLookup.RepositoryView(
+                        repoId, "53c78589-6af3-4221-b3ef-315c867b0863", "main")));
+
+    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+
+    assertSequence(
+        argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=53c78589-6af3-4221-b3ef-315c867b0863");
+    // The repo name stays blank: qits-artifacts serves no /git/<projectId>/<name> route, so the
+    // daemon must keep id-addressing its clone. The project id alone is MCP scoping, not addressing.
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=");
+    assertSequence(argv, "--label", "qits.project=53c78589-6af3-4221-b3ef-315c867b0863");
   }
 
   @Test
