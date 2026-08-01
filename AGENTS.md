@@ -431,10 +431,11 @@ platform-wide:
 
 - **Stale worktrees were never pruned** anywhere in this service. A crashed merge left its admin
   registered and the *next* one failed with "already checked out" — a failure outliving the process
-  that caused it. Both the integrate flow and `mergeIntoTarget` prune before adding now.
-- **`.tmp-merge-<System.currentTimeMillis()>` collides** within a millisecond. The flow's worktree
-  is `.tmp-integrate-<slugged source branch>`, unique per repository by construction and the reason
-  the flow is keyed by branch rather than by a workspace row.
+  that caused it. `RepoMirror.worktree` prunes before adding, and removes a surviving directory the
+  prune cannot (prune drops the registration, not the files).
+- **`.tmp-merge-<System.currentTimeMillis()>` collides** within a millisecond. The worktree is named
+  after the **slugged source branch**, unique per repository by construction and the reason the flow
+  is keyed by branch rather than by a workspace row.
 - **`GitExecutor` had no timeout at all.** Every git call that talks to the git host — the mirror's
   clone and fetch, `ls-remote`, and every push — now carries one
   (`qits.workspace.git.network-timeout-ms`, which widened and replaced

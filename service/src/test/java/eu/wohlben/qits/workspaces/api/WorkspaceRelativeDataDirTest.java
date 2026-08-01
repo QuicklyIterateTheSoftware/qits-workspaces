@@ -15,12 +15,13 @@ import org.junit.jupiter.api.Test;
 /**
  * Regression test for the workspace path bug.
  *
- * <p>{@code git worktree add} runs with its working directory set to the bare origin. When {@code
- * qits.repositories.data-dir} is a <em>relative</em> path (as in dev), a relative workspace path
- * would be created nested under origin instead of the repo's workspaces directory — leaving {@code
- * list}/{@code merge}/{@code discard} unable to find it on disk. The other controller tests use an
- * absolute temp dir and so never exercised this case. This test pins the relative-data-dir
- * behaviour.
+ * <p>Host git used to run with its working directory set to the bare origin, so when {@code
+ * qits.repositories.data-dir} was a <em>relative</em> path (as in dev) a relative workspace path was
+ * created nested under origin instead of the repo's workspaces directory — leaving {@code
+ * list}/{@code merge}/{@code discard} unable to find it on disk. The mirror resolves its root to an
+ * absolute path once, at construction, which is what makes the bug unreachable rather than fixed;
+ * this test keeps a relative data dir exercised so the property stays asserted. The other
+ * controller tests use an absolute temp dir and so never covered it.
  */
 @QuarkusTest
 @TestProfile(WorkspaceRelativeDataDirTest.TestProfile.class)

@@ -79,7 +79,7 @@ public class CaptureService {
   }
 
   /**
-   * First candidate free in <em>both</em> namespaces: branch refs on the bare origin and ACTIVE
+   * First candidate free in <em>both</em> namespaces: branch refs the git host holds and ACTIVE
    * workspace ids (either can linger without the other — a branch created outside qits, or a
    * workspace whose slug collides). Two captures in the same minute must both land.
    */
