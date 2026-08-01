@@ -16,6 +16,13 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class FakeRepositoryLookup implements RepositoryLookup {
 
+  /**
+   * The project every fake repository belongs to. One constant rather than a second map: no test
+   * asserts on more than one project, and {@code SoftwareRelease} only needs the field to be
+   * carried rather than to vary.
+   */
+  public static final String PROJECT_ID = "test-project";
+
   private final Map<String, String> mainBranches = new ConcurrentHashMap<>();
 
   @Override
@@ -23,7 +30,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     String mainBranch = mainBranches.get(repoId);
     return mainBranch == null
         ? Optional.empty()
-        : Optional.of(new RepositoryView(repoId, mainBranch));
+        : Optional.of(new RepositoryView(repoId, PROJECT_ID, mainBranch));
   }
 
   /** Make {@code repoId} resolvable, with {@code master} as its main branch. */

@@ -18,6 +18,9 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import java.util.List;
+import org.eclipse.microprofile.openapi.annotations.media.Content;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 
 /**
  * Workspaces, addressed by their own id.
@@ -214,8 +217,24 @@ public class WorkspaceController {
     public record Response(String commitHash, boolean hasConflicts, String output) {}
   }
 
+  /**
+   * Merge this workspace's branch into an arbitrary target, in a host-side worktree, without a
+   * push.
+   *
+   * <p>409 when the target resolves to the repository's default branch, naming both doors that do
+   * write it: {@code /release} and {@code /integrate}.
+   */
   @POST
   @Path("/{id}/merge")
+  @APIResponse(responseCode = "200", description = "Merged.")
+  @APIResponse(
+      responseCode = "409",
+      description = "The target is the repository's default branch. Use /integrate or /release.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such workspace.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
   public MergeWorkspaceRequest.Response merge(
       @PathParam("id") Long id,
       @Valid MergeWorkspaceRequest request) {
@@ -225,26 +244,25 @@ public class WorkspaceController {
   }
 
   /**
-   * @param summary the release commit's subject after the version scope. Capped at 100 because a
-   *     conventional subject budget is 72 and {@code release(2026.731.193059): } already costs ~24
-   *     of it — the cap lets the summary be the whole of what is left and no more.
+   * @param summary the commit's subject after the scope. Capped at 100 because a conventional
+   *     subject budget is 72 and {@code release(2026.731.193059): } already costs ~24 of it — the
+   *     cap lets the summary be the whole of what is left and no more.
    */
-  public static record IntegrateRequest(@NotBlank @Size(max = 100) String summary) {
-    /** @see eu.wohlben.qits.workspaces.control.WorkspaceService.IntegrateResult */
+  public static record ReleaseRequest(@NotBlank @Size(max = 100) String summary) {
+    /** @see eu.wohlben.qits.workspaces.control.WorkspaceService.ReleaseResult */
     public record Response(String version, String commitSha, String branch) {}
   }
 
   /**
-   * Integrate this workspace: merge its branch into the repository's default branch, stamped with a
+   * Release this workspace: merge its branch into the repository's default branch, stamped with a
    * fresh {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>):
    * <summary>} — which is then pushed through the ordinary git host, where the ordinary
-   * post-receive fires and the ordinary pipeline builds it.
+   * post-receive fires and the ordinary pipeline builds it. A {@code SoftwareRelease} event is
+   * published the instant the push is accepted.
    *
-   * <p><b>Its own verb, not a widening of {@code merge}.</b> Different response, different failure
-   * modes and different semantics: merge moves a ref, integrate performs a release. Workspace-keyed,
-   * so it lives here rather than on {@code /branches} — the rule {@link BranchController}'s own
-   * javadoc supplies. And the target is not a parameter: it is always the default branch, which is
-   * the feature.
+   * <p><b>The one door into the default branch</b>, and the target is not a parameter: it is always
+   * that branch, which is the feature. Workspace-keyed, so it lives here rather than on {@code
+   * /branches} — the rule {@link BranchController}'s own javadoc supplies.
    *
    * <p>The failures are 409s and they are told apart structurally. Each body carries the usual
    * {@code message} plus an additive {@code reason} — {@code CONFLICT}, {@code MERGE_CONFLICT},
@@ -254,12 +272,71 @@ public class WorkspaceController {
    * a lost 200 looks like on retry and means the work is in.
    */
   @POST
+  @Path("/{id}/release")
+  @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
+  @APIResponse(
+      responseCode = "400",
+      description = "No summary, an oversized one, or a workspace with no branch to release.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such workspace.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Nothing was released and the default branch is unchanged. `reason` says which refusal.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  public ReleaseRequest.Response release(
+      @PathParam("id") Long id, @Valid ReleaseRequest request) {
+    var result = workspaceService.releaseWorkspace(id, request.summary());
+    return new ReleaseRequest.Response(result.version(), result.commitSha(), result.branch());
+  }
+
+  /** @param summary the commit's subject after the {@code integrate(<branch>)} scope. */
+  public static record IntegrateRequest(@NotBlank @Size(max = 100) String summary) {
+    /** @see eu.wohlben.qits.workspaces.control.WorkspaceService.IntegrateResult */
+    public record Response(String commitSha, String branch, String targetBranch) {}
+  }
+
+  /**
+   * Integrate this workspace into <b>its parent branch</b>: a {@code task/…} landing on the {@code
+   * epic/…} it forked from, as one pushed merge commit — {@code integrate(<branch>): <summary>}.
+   *
+   * <p><b>No version, and that is the difference.</b> This stamps nothing, bumps no manifest, sends
+   * no {@code qits.release} push option and publishes no {@code SoftwareRelease}; the response
+   * carries no {@code version} field for the same reason. Releasing is what the epic then does with
+   * {@code /release}. A workspace forked straight off the default branch is refused with a 409
+   * naming that endpoint, because its parent is the branch only a release may write.
+   *
+   * <p>Everything else is the release flow exactly — repository lease, merge-tree preflight,
+   * detached worktree, {@code merge --no-ff}, one two-parent commit, a fast-forward push through
+   * receive-pack, worktree cleanup in a {@code finally}, and the same 409 family with the same
+   * {@code reason} values. The workspace resolves to {@code INTEGRATED} and its branch is deleted,
+   * as it does after a release.
+   */
+  @POST
   @Path("/{id}/integrate")
+  @APIResponse(responseCode = "200", description = "Merged into the parent branch.")
+  @APIResponse(
+      responseCode = "400",
+      description = "No summary, an oversized one, or a workspace with no branch to integrate.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such workspace.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Nothing landed and the target is unchanged — including when the parent is the default"
+              + " branch, which only /release may write. `reason` says which refusal.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
   public IntegrateRequest.Response integrate(
       @PathParam("id") Long id, @Valid IntegrateRequest request) {
     var result = workspaceService.integrateWorkspace(id, request.summary());
     return new IntegrateRequest.Response(
-        result.version(), result.commitSha(), result.branch());
+        result.commitSha(), result.branch(), result.targetBranch());
   }
 
   // POST /{workspaceId}/fast-forward and /{workspaceId}/update-from-parent used to live here. Both

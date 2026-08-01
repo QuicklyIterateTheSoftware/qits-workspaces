@@ -44,6 +44,13 @@ steps:
       # worth recognising if a sibling repo is ever born private too.)
       git submodule update --init --depth 1 service/src/main/webui
 
+      # The second submodule, and it fails LATER and less legibly if it is forgotten: `eventstream`
+      # is a maven MODULE of this reactor, so an uninitialised one is a missing pom and the image
+      # build dies inside maven rather than at Quinoa's own message. Same public repo, same one
+      # shallow fetch. Both are listed by path rather than by a bare `--init`, so a submodule added
+      # for the SPA's own sake never silently joins the image build.
+      git submodule update --init --depth 1 eventstream
+
       # --- half one: the bundle ---------------------------------------------------------------
       #
       # THE LOCKFILE is the one file this step edits, and npm leaves no alternative. Same problem

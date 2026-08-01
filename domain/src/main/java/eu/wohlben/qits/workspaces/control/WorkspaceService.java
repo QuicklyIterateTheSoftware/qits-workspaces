@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspaces.control;
 
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.ConflictException;
+import eu.wohlben.qits.workspaces.error.IntegrateConflictException;
 import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
 import eu.wohlben.qits.workspaces.dto.WorkspaceDto;
@@ -164,7 +165,10 @@ public class WorkspaceService {
 
   @Inject GitIdentity gitIdentity;
 
-  /** The git half of {@link #integrateWorkspace}: worktree, merge, stamp, bump, commit, push. */
+  /**
+   * The git half of {@link #releaseWorkspace} and {@link #integrateWorkspace}: worktree, merge,
+   * stamp, bump, commit, push — one method, told which of the two it is running.
+   */
   @Inject ReleaseIntegrator integrator;
 
   /**
@@ -1380,7 +1384,7 @@ public class WorkspaceService {
    * <p><b>The target is not a parameter.</b> It is always the repository's default branch, by
    * construction — that is the feature, and it is why this is its own verb rather than a widening of
    * {@link #mergeWorkspace}: a different response (a version, a sha), different failure modes, and
-   * different semantics. Merge moves a ref; integrate performs a release.
+   * different semantics. Merge moves a ref; release performs a release.
    *
    * <p><b>Synchronous.</b> The whole flow is a local merge, a few file edits and one push to a
    * container on the same network. The caller needs the version and the sha to say anything useful,
@@ -1389,15 +1393,51 @@ public class WorkspaceService {
    * that would rather not hold the request open already has a channel.
    *
    * <p><b>Not idempotent, by design.</b> Each call stamps a new version from the clock, because two
-   * integrates are two releases. Retry safety comes from the flow's shape instead: a failed
-   * integrate moved no ref (the detached worktree), so retrying is clean, and a succeeded one whose
-   * response was lost is refused on the retry with {@code ALREADY_INTEGRATED} rather than producing
-   * an empty second release. The {@code INTEGRATED} row is the durable record either way.
+   * releases are two releases. Retry safety comes from the flow's shape instead: a failed release
+   * moved no ref (the detached worktree), so retrying is clean, and a succeeded one whose response
+   * was lost is refused on the retry with {@code ALREADY_INTEGRATED} rather than producing an empty
+   * second release. The {@code INTEGRATED} row is the durable record either way.
+   *
+   * @throws eu.wohlben.qits.workspaces.error.IntegrateConflictException for every refusal the caller
+   *     can act on
+   */
+  public ReleaseResult releaseWorkspace(Long id, String summary) {
+    ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.RELEASE);
+    return new ReleaseResult(landed.version(), landed.commitSha(), landed.branch());
+  }
+
+  /**
+   * The other door, and it never reaches the default branch: merge this workspace's branch into
+   * <b>its parent</b> — a {@code task/…} landing on the {@code epic/…} it forked from — as a single
+   * pushed commit that stamps nothing.
+   *
+   * <p><b>Two processes, not one flow with a switch.</b> An integrate moves work one level up a
+   * stack; a release turns a branch into a version of the software. They share every safety property
+   * ({@link ReleaseIntegrator} is literally one method) and share no meaning, which is why a
+   * workspace whose parent <em>is</em> the default branch is refused here and sent to {@link
+   * #releaseWorkspace} rather than quietly doing a release without a version.
+   *
+   * <p>The workspace resolves exactly as a release resolves it: the work is in the parent, so the
+   * container, the volume, the branch and the ACTIVE row all go. What is missing compared with a
+   * release is the version, the manifest bump, the {@code qits.release} push option and the {@code
+   * SoftwareRelease} event — none of which a merge between two working branches has any business
+   * producing.
    *
    * @throws eu.wohlben.qits.workspaces.error.IntegrateConflictException for every refusal the caller
    *     can act on
    */
   public IntegrateResult integrateWorkspace(Long id, String summary) {
+    ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.PLAIN);
+    return new IntegrateResult(landed.commitSha(), landed.branch(), landed.targetBranch());
+  }
+
+  /**
+   * The shared body of {@link #releaseWorkspace} and {@link #integrateWorkspace}: the guards, the
+   * lease, the git flow, the announcement and the resolution. Only the target and the mode differ,
+   * and both are decided in the first ten lines.
+   */
+  private ReleaseIntegrator.Landed landWorkspace(
+      Long id, String summary, ReleaseIntegrator.Mode mode) {
     // Deliberately NOT one @Transactional. Between the guards and the row work sit two waits a
     // transaction has no business holding open: the repository lease (up to a minute) and the push
     // (up to two). Narayana's default transaction timeout is shorter than their sum, so a busy
@@ -1407,15 +1447,25 @@ public class WorkspaceService {
     Workspace workspace = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
     String repoId = workspace.repositoryId;
     var repo = repositories.require(repoId);
-    String target = defaultMainBranch(repo);
+    boolean release = mode == ReleaseIntegrator.Mode.RELEASE;
+    String mainBranch = defaultMainBranch(repo);
+    // A release lands on the default branch by construction. An integrate lands on the branch this
+    // workspace forked from — and on the default branch never, which is the next guard.
+    String target = release ? mainBranch : parentBranchOf(workspace, mainBranch);
     String source = workspace.branch;
 
     if (summary == null || summary.isBlank()) {
-      throw new BadRequestException("An integrate needs a summary for its release commit");
+      throw new BadRequestException(
+          "A" + (release ? " release" : "n integrate") + " needs a summary for its commit");
     }
     if (source == null || source.isBlank() || source.startsWith("-")) {
       throw new BadRequestException(
           "Workspace '" + workspace.workspaceId + "' has no branch to integrate");
+    }
+    if (!release) {
+      // The rule that keeps the two doors apart. A workspace forked straight off the default branch
+      // has nothing to integrate into: its parent IS the branch only a release may write.
+      refuseMainAsMergeTarget(repo, target, workspace.id);
     }
     if (source.equals(target)) {
       throw new BadRequestException(
@@ -1423,7 +1473,7 @@ public class WorkspaceService {
               + workspace.workspaceId
               + "' is on '"
               + target
-              + "', which is already the branch integrate releases to");
+              + "', which is already the branch it would land on");
     }
     // The source's container may hold uncommitted work the origin-side merge would silently leave
     // behind. Same guard the merge endpoints open with, for the same reason.
@@ -1431,38 +1481,54 @@ public class WorkspaceService {
 
     String leaseToken = acquireIntegrateLease(repoId);
 
-    ReleaseIntegrator.PublishedRelease release;
+    ReleaseIntegrator.Landed landed;
     try {
-      release = integrator.integrate(repoId, source, target, summary, workspace.id);
+      landed =
+          integrator.land(
+              new ReleaseIntegrator.Run(repoId, source, target, summary, mode));
     } finally {
       processRegistry.releaseRepository(repoId, leaseToken);
     }
 
-    // The seam, and the whole of it: one call, immediately after the push, with everything the
-    // future SoftwareRelease publisher needs. Deliberately before the row work below — the push has
-    // already happened and cannot be taken back, so an announcement conditional on the resolution
-    // committing would be silent about a release that really did occur.
-    announceRelease(repoId, release);
+    // The SoftwareRelease seam, and the whole of it: one call, immediately after the push, with
+    // everything the publisher needs. Deliberately before the row work below — the push has already
+    // happened and cannot be taken back, so an announcement conditional on the resolution committing
+    // would be silent about a release that really did occur. A plain integrate announces nothing,
+    // because a plain integrate released nothing.
+    if (release) {
+      announceRelease(repo, landed);
+    }
 
+    String subject =
+        release
+            ? "release(" + landed.version() + "): " + summary
+            : "integrate(" + source + "): " + summary;
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
               // The push advanced the target's origin ref; if a live workspace owns it, pull it in.
               notifyIncomingMerge(repoId, target);
-              // The work is in the default branch, so the workspace resolves: container and volume
+              // The work is in the target branch, so the workspace resolves: container and volume
               // gone, branch deleted, row INTEGRATED, WorkspaceEventType.INTEGRATED recorded — the
-              // same mechanics branch cleanup has always used, now carrying the release's own
-              // target and sha. Re-read inside this transaction: the row above is detached, and
+              // same mechanics branch cleanup has always used, now carrying this flow's own target
+              // and sha. Re-read inside this transaction: the row above is detached, and
               // WorkspaceResolved observers join here.
               doDiscard(
                   repoId,
                   requireActive(id),
                   WorkspaceStatus.INTEGRATED,
-                  "release(" + release.version() + "): " + summary,
+                  subject,
                   target,
-                  release.commitSha());
+                  landed.commitSha());
             });
-    return new IntegrateResult(release.version(), release.commitSha(), source);
+    return landed;
+  }
+
+  /** The branch a workspace forked from; the default branch for one that records none. */
+  private static String parentBranchOf(Workspace workspace, String mainBranch) {
+    return (workspace.parent == null || workspace.parent.isBlank())
+        ? mainBranch
+        : workspace.parent;
   }
 
   /**
@@ -1502,14 +1568,16 @@ public class WorkspaceService {
   }
 
   /** The {@link ReleaseAnnouncer} seam's single call site. */
-  private void announceRelease(String repoId, ReleaseIntegrator.PublishedRelease release) {
+  private void announceRelease(
+      RepositoryLookup.RepositoryView repo, ReleaseIntegrator.Landed release) {
     if (releaseAnnouncer.isUnsatisfied()) {
       return;
     }
     releaseAnnouncer
         .get()
         .onReleasePublished(
-            repoId,
+            repo.projectId(),
+            repo.id(),
             release.branch(),
             release.version(),
             release.commitSha(),
@@ -1517,27 +1585,40 @@ public class WorkspaceService {
   }
 
   /**
-   * The rule that makes "integrate is the only flow into the default branch" true in the API and not
+   * The rule that makes "release is the only flow into the default branch" true in the API and not
    * only at the git host.
    *
-   * <p>{@code merge} keeps working for every other target — merging into a <em>parent</em> branch is
-   * what stacked workspaces do all day — but a merge whose target resolves to the default branch is
-   * refused here, naming the endpoint that does it properly. Without this the claim would be false
-   * in the API even while true at the git host, and the git host would then refuse the write anyway:
-   * a worse error, later, instead of a clear one now.
+   * <p>{@code merge} and {@code integrate} keep working for every other target — landing on a
+   * <em>parent</em> branch is what stacked workspaces do all day — but any of them whose target
+   * resolves to the default branch is refused here, naming the door that writes it properly. Without
+   * this the claim would be false in the API even while true at the git host, and the git host would
+   * then refuse the write anyway: a worse error, later, instead of a clear one now.
+   *
+   * <p>The message names <b>both</b> doors, because a caller who reached this line wanted one of
+   * them and cannot be told which from here: {@code /integrate} for a plain merge into a parent,
+   * {@code /release} for the version-stamped push into the default branch.
+   *
+   * <p>It carries {@code RELEASE_REQUIRED} rather than a bare 409, so a client can offer the right
+   * button instead of word-matching prose for an endpoint name. Nothing was attempted, which is what
+   * separates this from every other value in the enum.
    */
   private void refuseMainAsMergeTarget(
       RepositoryLookup.RepositoryView repo, String resolvedTarget, Long workspaceId) {
     if (!defaultMainBranch(repo).equals(resolvedTarget)) {
       return;
     }
-    throw new ConflictException(
+    String id = workspaceId == null ? "{id}" : String.valueOf(workspaceId);
+    throw new IntegrateConflictException(
+        IntegrateConflictException.Reason.RELEASE_REQUIRED,
         "'"
             + resolvedTarget
-            + "' is the repository's default branch and is written by integrate alone. Use POST"
+            + "' is the repository's default branch and is written by release alone. Use POST"
             + " /workspaces/api/workspaces/"
-            + (workspaceId == null ? "{id}" : workspaceId)
-            + "/integrate, which merges, stamps a release version and pushes it as one commit.");
+            + id
+            + "/release, which merges, stamps a release version and pushes it as one commit — or"
+            + " POST /workspaces/api/workspaces/"
+            + id
+            + "/integrate to merge into this branch's parent instead, which stamps nothing.");
   }
 
   /** The id of the ACTIVE workspace owning {@code branch}, or null — for an error message only. */
@@ -1825,9 +1906,18 @@ public class WorkspaceService {
       String commitHash, boolean hasConflicts, String output, boolean cleanedUp) {}
 
   /**
-   * What a successful integrate answers. Three facts, none derivable from the others: the version
+   * What a successful release answers. Three facts, none derivable from the others: the version
    * that was just minted, the merge commit carrying both the merge and the bump, and the source
    * branch — which the merge's parents record as a sha but never as a name.
    */
-  public record IntegrateResult(String version, String commitSha, String branch) {}
+  public record ReleaseResult(String version, String commitSha, String branch) {}
+
+  /**
+   * What a successful plain integrate answers. <b>No version</b>, because none was minted — the
+   * absence is the contract, and a null field would have invited a caller to look for one. The
+   * target is here and is not on {@link ReleaseResult} for the mirror-image reason: a release's
+   * target is always the default branch and would be a constant, while an integrate's is whichever
+   * parent this branch forked from.
+   */
+  public record IntegrateResult(String commitSha, String branch, String targetBranch) {}
 }

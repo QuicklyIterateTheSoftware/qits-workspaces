@@ -10,6 +10,9 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import org.eclipse.microprofile.openapi.annotations.media.Content;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 
 /**
  * Branch-level integration and cleanup: the two operations the branch list offers on a row that is
@@ -49,9 +52,30 @@ public class BranchController {
         String commitHash, boolean hasConflicts, String output, boolean cleanedUp) {}
   }
 
-  /** Integrate {@code source} into {@code target}, defaulting to the repo's main branch. */
+  /**
+   * Merge {@code source} into {@code target}, defaulting to the repo's main branch.
+   *
+   * <p>409 {@code RELEASE_REQUIRED} when the target resolves to that default branch: it is written
+   * by {@code /workspaces/{id}/release} alone, and {@code /workspaces/{id}/integrate} is the door
+   * for a plain merge into a parent.
+   */
   @POST
   @Path("/merge")
+  @APIResponse(responseCode = "200", description = "Merged.")
+  @APIResponse(
+      responseCode = "400",
+      description = "A blank, dash-leading or self-referential branch name.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such repository.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "The target is the repository's default branch. `reason` is RELEASE_REQUIRED and the"
+              + " message names the two endpoints that do write it.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
   public MergeBranchRequest.Response mergeBranch(
       @QueryParam("repositoryId") String repoId, @Valid MergeBranchRequest request) {
     var result =
@@ -70,6 +94,16 @@ public class BranchController {
    */
   @POST
   @Path("/cleanup")
+  @APIResponse(responseCode = "200", description = "Removed.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "The branch is not eligible: uncommitted changes, unmerged commits, or dependents.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such repository.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
   public CleanupBranchRequest.Response cleanupBranch(
       @QueryParam("repositoryId") String repoId, @Valid CleanupBranchRequest request) {
     workspaceService.cleanupBranch(repoId, request.branch(), request.result());

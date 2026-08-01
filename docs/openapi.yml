@@ -11,6 +11,24 @@ components:
       - BUSY
       - WAITING
       - ENDED
+    ApiError:
+      type: object
+      description: "The error envelope: a message, plus a reason on a 409."
+      properties:
+        message:
+          type: string
+          description: "What went wrong, in words. Always present."
+        reason:
+          $ref: "#/components/schemas/Reason"
+          type: string
+          description: "Which refusal this is. Present on the 409s the release and\
+            \ integrate flows raise, absent on every other error. A value a client\
+            \ does not recognise is shown as the message verbatim."
+        conflicts:
+          type: array
+          items:
+            type: string
+          description: The conflicted paths. Present only for CONFLICT and MERGE_CONFLICT.
     CleanupBranchRequest:
       type: object
       required:
@@ -87,6 +105,24 @@ components:
       properties:
         target:
           type: string
+    Reason:
+      type: string
+      enum:
+      - CONFLICT
+      - MERGE_CONFLICT
+      - NOT_FAST_FORWARD
+      - ALREADY_INTEGRATED
+      - PUSH_REJECTED
+      - RELEASE_REQUIRED
+    ReleaseRequest:
+      type: object
+      required:
+      - summary
+      properties:
+        summary:
+          type: string
+          maxLength: 100
+          pattern: \S
     Response:
       type: object
       properties:
@@ -106,21 +142,26 @@ components:
     Response10:
       type: object
       properties:
+        workspace:
+          $ref: "#/components/schemas/WorkspaceDto"
+    Response11:
+      type: object
+      properties:
         technicalProcessId:
           type: string
-    Response11:
+    Response12:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
-    Response12:
+    Response13:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry1"
-    Response13:
+    Response14:
       type: object
       properties:
         workspace:
@@ -135,11 +176,20 @@ components:
     Response3:
       type: object
       properties:
+        version:
+          type: string
+        commitSha:
+          type: string
+        branch:
+          type: string
+    Response4:
+      type: object
+      properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
         technicalProcessId:
           type: string
-    Response4:
+    Response5:
       type: object
       properties:
         commitHash:
@@ -148,39 +198,34 @@ components:
           type: boolean
         output:
           type: string
-    Response5:
+    Response6:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry"
-    Response6:
+    Response7:
       type: object
       properties:
-        version:
-          type: string
         commitSha:
           type: string
         branch:
           type: string
-    Response7:
+        targetBranch:
+          type: string
+    Response8:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
         technicalProcessId:
           type: string
-    Response8:
+    Response9:
       type: object
       properties:
         success:
           type: boolean
-    Response9:
-      type: object
-      properties:
-        workspace:
-          $ref: "#/components/schemas/WorkspaceDto"
     ServiceEventDto:
       type: object
       properties:
@@ -402,13 +447,24 @@ paths:
         required: true
       responses:
         "200":
-          description: OK
+          description: Removed.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response1"
         "400":
-          description: Bad Request
+          description: "The branch is not eligible: uncommitted changes, unmerged\
+            \ commits, or dependents."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
       summary: Cleanup Branch
       tags:
       - Branch Controller
@@ -427,13 +483,31 @@ paths:
         required: true
       responses:
         "200":
-          description: OK
+          description: Merged.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response"
         "400":
-          description: Bad Request
+          description: "A blank, dash-leading or self-referential branch name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The target is the repository's default branch. `reason` is
+            RELEASE_REQUIRED and the message names the two endpoints that do write
+            it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
       summary: Merge Branch
       tags:
       - Branch Controller
@@ -450,7 +524,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response12"
+                $ref: "#/components/schemas/Response13"
       summary: List
       tags:
       - Workspace History Controller
@@ -475,7 +549,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response11"
+                $ref: "#/components/schemas/Response12"
       summary: Update
       tags:
       - Workspace History Controller
@@ -493,7 +567,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response13"
+                $ref: "#/components/schemas/Response14"
       summary: Get
       tags:
       - Workspace History Controller
@@ -558,7 +632,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response5"
+                $ref: "#/components/schemas/Response6"
       summary: List
       tags:
       - Workspace Controller
@@ -575,7 +649,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response9"
+                $ref: "#/components/schemas/Response10"
         "400":
           description: Bad Request
       summary: Create
@@ -596,7 +670,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response10"
+                $ref: "#/components/schemas/Response11"
       summary: Active Process
       tags:
       - Workspace Controller
@@ -640,7 +714,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response8"
+                $ref: "#/components/schemas/Response9"
         "400":
           description: Bad Request
       summary: Discard
@@ -661,7 +735,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response7"
+                $ref: "#/components/schemas/Response8"
       summary: Ensure Container
       tags:
       - Workspace Controller
@@ -682,13 +756,32 @@ paths:
         required: true
       responses:
         "200":
-          description: OK
+          description: Merged into the parent branch.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response6"
+                $ref: "#/components/schemas/Response7"
         "400":
-          description: Bad Request
+          description: "No summary, an oversized one, or a workspace with no branch\
+            \ to integrate."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: "Nothing landed and the target is unchanged — including when\
+            \ the parent is the default branch, which only /release may write. `reason`\
+            \ says which refusal."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
       summary: Integrate
       tags:
       - Workspace Controller
@@ -709,11 +802,24 @@ paths:
         required: true
       responses:
         "200":
-          description: OK
+          description: Merged.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response4"
+                $ref: "#/components/schemas/Response5"
+        "409":
+          description: The target is the repository's default branch. Use /integrate
+            or /release.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "400":
           description: Bad Request
       summary: Merge
@@ -734,8 +840,53 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response3"
+                $ref: "#/components/schemas/Response4"
       summary: Recreate Container
+      tags:
+      - Workspace Controller
+  /workspaces/api/workspaces/{id}/release:
+    post:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseRequest"
+        required: true
+      responses:
+        "200":
+          description: Released; the version and the merge commit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response3"
+        "400":
+          description: "No summary, an oversized one, or a workspace with no branch\
+            \ to release."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Nothing was released and the default branch is unchanged. `reason`
+            says which refusal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Release
       tags:
       - Workspace Controller
   /workspaces/api/workspaces/{id}/stop-container:

@@ -3,7 +3,6 @@ package eu.wohlben.qits.workspaces.api;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.control.FakeGitHostAddress;
@@ -19,37 +18,29 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.regex.Pattern;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@code POST /workspaces/api/workspaces/{id}/integrate} — the one door into a repository's default
- * branch.
+ * {@code POST /workspaces/api/workspaces/{id}/integrate} — the other door, and it never reaches the
+ * default branch.
  *
- * <p>Every case here runs against a <b>real bare origin</b> and performs a <b>real {@code git
- * push}</b> into it ({@link FakeGitHostAddress} replaces the transport and nothing else), because
- * the three claims worth making are all claims about git: that the release is one commit with two
- * parents carrying both the merge and the bump, that a failure releases nothing and leaves the
- * default branch byte-identical, and that the push is a genuine compare-and-swap. None of those
- * survives a mocked git.
+ * <p>An integrate lands a workspace on <b>its parent</b>: a task branch on the epic it forked from,
+ * which the epic later releases. So the fixture every case here builds is a two-level stack, and the
+ * assertions that carry the suite are the two things an integrate is <em>not</em>: no version
+ * anywhere near the commit, and no {@code SoftwareRelease}. Everything it <em>is</em> — the detached
+ * worktree, the single two-parent commit, the real push, the 409 family — it shares with the release
+ * flow by construction, because {@code ReleaseIntegrator} is one method told which mode it is in.
+ * {@code ReleaseControllerTest} is where those shared properties are proven hardest.
  *
- * <p>What is deliberately <em>not</em> proven here is the git host's protection hook, which lives in
- * qits-artifacts and is proven there and on the live platform. This suite pushes with the production
- * argv — {@code --push-option=qits.release} — so the fixture has to advertise push options the way
- * JGit does; see {@code TestOrigin}.
+ * <p>Like that suite, every case runs against a <b>real bare origin</b> and performs a <b>real
+ * {@code git push}</b> into it. The one production difference asserted here is the argv: an
+ * integrate sends no {@code --push-option}, because the git host's hook guards the default branch
+ * and this push does not touch it.
  */
 @QuarkusTest
 public class IntegrateControllerTest {
-
-  /** {@code YYYY.MMDD.HHMMSS}, and no identifier may carry a leading zero. */
-  private static final Pattern VERSION =
-      Pattern.compile("(?:[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)");
 
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
@@ -78,15 +69,22 @@ public class IntegrateControllerTest {
     return repoId;
   }
 
-  private void createWorkspace(String repoId, String label, String branch) {
+  private void createWorkspace(String repoId, String label, String parent, String branch) {
     given()
         .contentType(ContentType.JSON)
-        .body(
-            new WorkspaceController.CreateWorkspaceRequest(repoId, label, "master", branch, null))
+        .body(new WorkspaceController.CreateWorkspaceRequest(repoId, label, parent, branch, null))
         .when()
         .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
+  }
+
+  /** The stack every case needs: {@code epic-b} off master, {@code task-b} off {@code epic-b}. */
+  private String seedStack() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "epic", "master", "epic-b");
+    createWorkspace(repoId, "task", "epic-b", "task-b");
+    return repoId;
   }
 
   private io.restassured.response.Response integrate(String repoId, String label, String summary) {
@@ -111,7 +109,7 @@ public class IntegrateControllerTest {
         .path("entries.workspace.workspaceId");
   }
 
-  /** A minimal but real maven reactor root, so the bump has something to render the version into. */
+  /** A minimal but real maven reactor root — the thing a release would rewrite and this must not. */
   private static final String POM =
       """
       <?xml version="1.0" encoding="UTF-8"?>
@@ -128,240 +126,189 @@ public class IntegrateControllerTest {
   // -----------------------------------------------------------------------------------------
 
   /**
-   * The claim the whole feature rests on: <b>one</b> commit, with <b>two</b> parents, carrying the
-   * merge <i>and</i> the version bump. Not a merge then an amend, not a merge then a bump commit —
-   * {@code merge --no-ff --no-commit} leaves the index open and the bump writes into it, so the
-   * single commit that follows is the release.
+   * The whole of what an integrate is: one commit with two parents on the <b>parent branch</b>, the
+   * manifests untouched, and the default branch exactly where it was.
+   *
+   * <p>"Untouched" is asserted as the pom being <b>byte-identical</b> across the merge rather than as
+   * an absence of a version string. A release's bump is a splice into the original text, so a bump
+   * that ran and produced a coincidentally similar file would pass a substring check and fail this
+   * one.
    */
   @Test
-  public void anIntegrateIsOneMergeCommitCarryingBothTheMergeAndTheBump() throws Exception {
-    String repoId = seedRepository();
-    TestOrigin.commitOnBranch(dataDir, repoId, "master", "pom.xml", POM, "add a pom");
-    createWorkspace(repoId, "work", "work-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "work-b", "feature.md", "shipped\n", "the work");
+  public void anIntegrateIsOneMergeCommitOnTheParentWithNoVersionAnywhere() throws Exception {
+    String repoId = seedStack();
+    // The pom rides in on the task branch, so it is in the merged tree either way — which is what
+    // makes "byte-identical" a statement about the bump rather than about the file's absence.
+    TestOrigin.commitOnBranch(dataDir, repoId, "task-b", "pom.xml", POM, "add a pom");
+    TestOrigin.commitOnBranch(dataDir, repoId, "task-b", "feature.md", "shipped\n", "the work");
 
     String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
-    String sourceTip = inOrigin(repoId, "git", "rev-parse", "work-b");
+    String epicBefore = inOrigin(repoId, "git", "rev-parse", "epic-b");
+    String sourceTip = inOrigin(repoId, "git", "rev-parse", "task-b");
 
     var response =
-        integrate(repoId, "work", "teach the explorer to group runs by repository")
+        integrate(repoId, "task", "fold the parser into the epic")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
-            .body("version", matchesRegex(VERSION.pattern()))
             .body("commitSha", not(emptyOrNullString()))
-            .body("branch", equalTo("work-b"))
+            .body("branch", equalTo("task-b"))
+            .body("targetBranch", equalTo("epic-b"))
+            .body("version", nullValue())
             .extract();
-    String version = response.path("version");
     String commitSha = response.path("commitSha");
 
-    // The push moved the ref, and it moved it to exactly what the caller was told.
-    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", "master"));
+    // The push moved the PARENT's ref, and moved it to exactly what the caller was told.
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", "epic-b"));
+    assertEquals(
+        masterBefore,
+        inOrigin(repoId, "git", "rev-parse", "master"),
+        "an integrate never touches the default branch — that door is /release");
 
     // ONE commit, TWO parents, and they are the two tips that went in.
-    String parents = inOrigin(repoId, "git", "rev-list", "--parents", "-n", "1", "master");
+    String parents = inOrigin(repoId, "git", "rev-list", "--parents", "-n", "1", "epic-b");
     assertEquals(
-        List.of(commitSha, masterBefore, sourceTip),
+        List.of(commitSha, epicBefore, sourceTip),
         List.of(parents.split(" ")),
-        "the release must be a single merge commit of the old default branch and the source");
+        "the integrate must be a single merge commit of the old parent and the source");
 
     assertEquals(
-        "release(" + version + "): teach the explorer to group runs by repository",
-        inOrigin(repoId, "git", "log", "-1", "--format=%s", "master"));
-    assertTrue(
-        inOrigin(repoId, "git", "log", "-1", "--format=%b", "master")
-            .contains("Integrates workspace branch `work-b`."),
-        "the body names the source branch, which the merge's parents record only as a sha");
+        "integrate(task-b): fold the parser into the epic",
+        inOrigin(repoId, "git", "log", "-1", "--format=%s", "epic-b"),
+        "the scope is the SOURCE branch, and the subject is not a release(...)");
+    assertEquals(
+        "Integrates workspace branch `task-b` into `epic-b` without a release.",
+        inOrigin(repoId, "git", "log", "-1", "--format=%b", "epic-b").trim(),
+        "the body names both branches, which the merge's parents record only as shas");
 
-    // The bump is IN that commit: the tree carries the stamped version and the merged content.
-    assertTrue(
-        inOrigin(repoId, "git", "show", "master:pom.xml").contains("<version>" + version + "</version>"),
-        "the release commit's tree must carry the bumped version");
-    assertEquals("shipped", inOrigin(repoId, "git", "show", "master:feature.md"));
+    // The manifest is byte-identical: nothing stamped it, and the placeholder version survives.
+    assertEquals(
+        POM.trim(),
+        inOrigin(repoId, "git", "show", "epic-b:pom.xml"),
+        "a plain integrate bumps nothing");
+    assertEquals("shipped", inOrigin(repoId, "git", "show", "epic-b:feature.md"));
+    assertEquals(
+        "",
+        inOrigin(repoId, "git", "diff", "--name-only", sourceTip, commitSha),
+        "the merge commit's tree is the source's tree: no file changed on the way in");
 
-    // And it is one commit rather than two: the version change is part of the merge commit itself.
-    assertTrue(
-        inOrigin(repoId, "git", "diff", "--name-only", masterBefore, commitSha)
-            .lines()
-            .anyMatch("pom.xml"::equals),
-        "the bump must be reachable from the merge commit, not from a follow-up one");
+    // The workspace resolved, exactly as a release resolves one.
+    assertTrue(!activeLabels(repoId).contains("task"), "an integrated workspace leaves the listing");
+    assertTrue(activeLabels(repoId).contains("epic"), "the parent workspace is untouched");
 
-    // The workspace resolved, so the ACTIVE-only listing no longer answers it.
-    assertTrue(!activeLabels(repoId).contains("work"), "an integrated workspace leaves the listing");
-
-    // The SoftwareRelease seam: exactly one statement, with everything the future publisher needs.
-    assertEquals(1, announcer.announced().size());
-    FakeReleaseAnnouncer.Announced announced = announcer.announced().get(0);
-    assertEquals(repoId, announced.repoId());
-    assertEquals("work-b", announced.branch(), "the SOURCE branch — there is no target field");
-    assertEquals(version, announced.version());
-    assertEquals(commitSha, announced.commitSha());
-    assertNotNull(announced.publishedAt(), "an event with no occurredAt is a 400 on the wire");
+    // The difference that matters most: no release happened, so nothing was announced.
+    assertEquals(
+        List.of(),
+        announcer.announced(),
+        "a plain integrate is not a release and must publish no SoftwareRelease");
   }
 
   /**
-   * A repository with no manifests is still a release. The version comes from the clock regardless
-   * of stack; detection only decides which files render it. This is what keeps "integrate is the
-   * only flow into the default branch" universal instead of carving out the stub repositories.
+   * The stack, one level further: the epic that just absorbed a task can be released, and only then
+   * does a version exist. This is the shape the two endpoints were split for, asserted end to end
+   * rather than inferred from the two suites side by side.
    */
   @Test
-  public void aRepositoryWithNoVersionFilesIsStillARelease() throws Exception {
-    String repoId = seedRepository();
-    createWorkspace(repoId, "stackless", "stackless-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "stackless-b", "notes.txt", "hi\n", "a note");
+  public void theEpicThatAbsorbedATaskIsWhatGetsReleased() throws Exception {
+    String repoId = seedStack();
+    TestOrigin.commitOnBranch(dataDir, repoId, "task-b", "pom.xml", POM, "add a pom");
+
+    integrate(repoId, "task", "the task's work")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
 
     String version =
-        integrate(repoId, "stackless", "no manifests here")
+        given()
+            .contentType(ContentType.JSON)
+            .body(new WorkspaceController.ReleaseRequest("ship the epic"))
+            .when()
+            .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "epic") + "/release")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
             .extract()
             .path("version");
 
     assertEquals(
-        "release(" + version + "): no manifests here",
+        "release(" + version + "): ship the epic",
         inOrigin(repoId, "git", "log", "-1", "--format=%s", "master"));
-    assertEquals(1, announcer.announced().size());
+    assertTrue(
+        inOrigin(repoId, "git", "show", "master:pom.xml")
+            .contains("<version>" + version + "</version>"),
+        "the release is where the bump happens, and it happens once for the whole stack");
+    assertEquals(1, announcer.announced().size(), "one release, one SoftwareRelease");
   }
 
   // -----------------------------------------------------------------------------------------
-  // the refusals
+  // the wrong door
   // -----------------------------------------------------------------------------------------
 
   /**
-   * A conflict releases nothing, and "nothing" is asserted as the default branch being
-   * <b>byte-identical</b> rather than as an absence of errors. That is a property of the flow's
-   * shape: the merge happens in a detached worktree and the only thing that ever moves a ref is the
-   * push, so there is nothing to unwind.
+   * A workspace forked straight off the default branch has no parent to integrate into — its parent
+   * <em>is</em> the branch only a release may write. It is refused with the reason a client can
+   * branch on, so the UI offers the Release button instead of word-matching prose.
    */
   @Test
-  public void aConflictIsA409WithTheFileListAndLeavesTheDefaultBranchByteIdentical()
-      throws Exception {
+  public void aWorkspaceWhoseParentIsTheDefaultBranchIsSentToRelease() throws Exception {
     String repoId = seedRepository();
-    TestOrigin.commitOnBranch(dataDir, repoId, "master", "shared.txt", "base\n", "base");
-    createWorkspace(repoId, "clash", "clash-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "clash-b", "shared.txt", "theirs\n", "their edit");
-    TestOrigin.commitOnBranch(dataDir, repoId, "master", "shared.txt", "ours\n", "our edit");
+    createWorkspace(repoId, "straight", "master", "straight-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "straight-b", "notes.txt", "hi\n", "a note");
 
     String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
 
-    integrate(repoId, "clash", "this will not apply")
+    integrate(repoId, "straight", "nowhere to fold this")
+        .then()
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("reason", equalTo("RELEASE_REQUIRED"))
+        .body("message", containsString("/release"));
+
+    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
+    assertTrue(activeLabels(repoId).contains("straight"), "nothing was attempted");
+    assertEquals(List.of(), announcer.announced());
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // the refusals it shares with a release
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * The 409 family is the flow's, not the endpoint's. A conflict leaves the <b>parent</b> branch
+   * byte-identical for the same reason it leaves the default branch alone in a release: the merge
+   * happens in a detached worktree and only the push moves a ref.
+   */
+  @Test
+  public void aConflictIsA409WithTheFileListAndLeavesTheParentByteIdentical() throws Exception {
+    String repoId = seedStack();
+    TestOrigin.commitOnBranch(dataDir, repoId, "epic-b", "shared.txt", "base\n", "base");
+    TestOrigin.commitOnBranch(dataDir, repoId, "task-b", "shared.txt", "theirs\n", "their edit");
+    TestOrigin.commitOnBranch(dataDir, repoId, "epic-b", "shared.txt", "ours\n", "our edit");
+
+    String epicBefore = inOrigin(repoId, "git", "rev-parse", "epic-b");
+
+    integrate(repoId, "task", "this will not apply")
         .then()
         .statusCode(Response.Status.CONFLICT.getStatusCode())
         .body("message", containsString("conflict"))
         .body("reason", equalTo("CONFLICT"))
         .body("conflicts", hasItem("shared.txt"));
 
-    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
-    assertTrue(activeLabels(repoId).contains("clash"), "a refused integrate resolves nothing");
-    assertEquals(List.of(), announcer.announced(), "nothing was released, so nothing is announced");
+    assertEquals(epicBefore, inOrigin(repoId, "git", "rev-parse", "epic-b"));
+    assertTrue(activeLabels(repoId).contains("task"), "a refused integrate resolves nothing");
   }
 
-  /**
-   * What a lost 200 looks like on the retry. Integrate is not idempotent by design — each call
-   * stamps a new version, because two integrates are two releases — so retry safety comes from the
-   * preflight instead: a source that is already an ancestor of the default branch is refused rather
-   * than turned into an empty second release.
-   */
+  /** What a lost 200 looks like on the retry, at this door too. */
   @Test
-  public void anAlreadyIntegratedBranchIsRefusedRatherThanReleasedAgain() throws Exception {
-    String repoId = seedRepository();
-    createWorkspace(repoId, "twice", "twice-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "twice-b", "done.txt", "done\n", "the work");
-    // The branch reaches the default branch by some other route — which is exactly the state a
-    // successful integrate whose response never arrived leaves behind.
-    inOrigin(repoId, "git", "branch", "-f", "master", "twice-b");
-    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+  public void anAlreadyIntegratedBranchIsRefusedRatherThanMergedAgain() throws Exception {
+    String repoId = seedStack();
+    TestOrigin.commitOnBranch(dataDir, repoId, "task-b", "done.txt", "done\n", "the work");
+    inOrigin(repoId, "git", "branch", "-f", "epic-b", "task-b");
+    String epicBefore = inOrigin(repoId, "git", "rev-parse", "epic-b");
 
-    integrate(repoId, "twice", "already in")
+    integrate(repoId, "task", "already in")
         .then()
         .statusCode(Response.Status.CONFLICT.getStatusCode())
         .body("reason", equalTo("ALREADY_INTEGRATED"))
         .body("message", containsString("already integrated"));
 
-    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
-    assertEquals(List.of(), announcer.announced());
-  }
-
-  /**
-   * The push is the compare-and-swap, and this is the case that proves it: the default branch moves
-   * at the one instant a race is about, and the loser is <b>rejected</b> rather than silently
-   * overwriting. {@code qits.release} is deliberately not granted force, which is what makes that
-   * true at the git host too.
-   *
-   * <p>The two assertions that matter are the 409 and the state of the branch afterwards: it holds
-   * the other writer's value exactly, never a mix of the two.
-   */
-  @Test
-  public void aRaceLostAtThePushIsReportedAsNotFastForwardAndReleasesNothing() throws Exception {
-    String repoId = seedRepository();
-    createWorkspace(repoId, "loser", "loser-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "loser-b", "mine.txt", "mine\n", "my work");
-
-    // "feature" diverged from master before master's second commit, so pointing master at it is a
-    // move no descendant of the old master can fast-forward over — a real second writer's ref.
-    String otherWriter = inOrigin(repoId, "git", "rev-parse", "feature");
-    gitHost.beforeNextPush(
-        () -> {
-          try {
-            inOrigin(repoId, "git", "branch", "-f", "master", "feature");
-          } catch (Exception e) {
-            throw new IllegalStateException(e);
-          }
-        });
-
-    integrate(repoId, "loser", "the second one")
-        .then()
-        .statusCode(Response.Status.CONFLICT.getStatusCode())
-        .body("reason", equalTo("NOT_FAST_FORWARD"))
-        .body("message", containsString("fast-forward"));
-
-    assertEquals(
-        otherWriter,
-        inOrigin(repoId, "git", "rev-parse", "master"),
-        "the default branch holds the winner's commit exactly, never a mix of the two");
-    assertTrue(activeLabels(repoId).contains("loser"), "the loser resolved nothing");
-    assertEquals(List.of(), announcer.announced());
-  }
-
-  /**
-   * Two integrates of one repository at once. The repository lease is not what makes this safe — the
-   * push already is — but it is what turns "one of them fails" into "one of them waits", and this is
-   * the test that says so: <b>both</b> come back 200. Without the wait the second would be refused
-   * as busy; without any lease at all it would find the first one's worktree still checked out.
-   */
-  @Test
-  public void twoConcurrentIntegratesAreSerializedAndBothLand() throws Exception {
-    String repoId = seedRepository();
-    createWorkspace(repoId, "first", "first-b");
-    createWorkspace(repoId, "second", "second-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "first-b", "one.txt", "one\n", "first work");
-    TestOrigin.commitOnBranch(dataDir, repoId, "second-b", "two.txt", "two\n", "second work");
-
-    ExecutorService pool = Executors.newFixedThreadPool(2);
-    try {
-      List<Callable<Integer>> calls =
-          List.of(
-              () -> integrate(repoId, "first", "one of two").statusCode(),
-              () -> integrate(repoId, "second", "two of two").statusCode());
-      List<Future<Integer>> results = pool.invokeAll(calls);
-      for (Future<Integer> result : results) {
-        assertEquals(200, result.get(), "the lease serializes; neither integrate should be refused");
-      }
-    } finally {
-      pool.shutdownNow();
-    }
-
-    // Both releases are in, each as its own merge commit, and both files are on the branch.
-    assertEquals("one", inOrigin(repoId, "git", "show", "master:one.txt"));
-    assertEquals("two", inOrigin(repoId, "git", "show", "master:two.txt"));
-    assertEquals(
-        2,
-        inOrigin(repoId, "git", "log", "--format=%s", "master").lines()
-            .filter(subject -> subject.startsWith("release("))
-            .count());
-    assertEquals(2, announcer.announced().size());
-    assertTrue(
-        !activeLabels(repoId).contains("first") && !activeLabels(repoId).contains("second"),
-        "both workspaces resolved");
+    assertEquals(epicBefore, inOrigin(repoId, "git", "rev-parse", "epic-b"));
   }
 
   // -----------------------------------------------------------------------------------------
@@ -370,23 +317,9 @@ public class IntegrateControllerTest {
 
   @Test
   public void aSummaryIsRequired() throws Exception {
-    String repoId = seedRepository();
-    createWorkspace(repoId, "blank", "blank-b");
+    String repoId = seedStack();
 
-    integrate(repoId, "blank", "  ")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
-  }
-
-  /** 100 characters, because {@code release(2026.731.193059): } already costs ~24 of a 72 budget. */
-  @Test
-  public void anOversizedSummaryIsRefused() throws Exception {
-    String repoId = seedRepository();
-    createWorkspace(repoId, "long", "long-b");
-
-    integrate(repoId, "long", "x".repeat(101))
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
+    integrate(repoId, "task", "  ").then().statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
 
   @Test
@@ -398,18 +331,5 @@ public class IntegrateControllerTest {
         .post("/workspaces/api/workspaces/999999/integrate")
         .then()
         .statusCode(Response.Status.NOT_FOUND.getStatusCode());
-  }
-
-  /**
-   * The workspace that sits <em>on</em> the default branch has nothing to integrate into it. A 400
-   * rather than a 409: the request is malformed, not losing a race.
-   */
-  @Test
-  public void theDefaultBranchCannotIntegrateIntoItself() throws Exception {
-    String repoId = seedRepository();
-
-    integrate(repoId, "master", "nowhere to go")
-        .then()
-        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
   }
 }

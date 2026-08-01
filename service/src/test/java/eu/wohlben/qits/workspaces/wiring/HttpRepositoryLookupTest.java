@@ -75,7 +75,7 @@ public class HttpRepositoryLookupTest {
   }
 
   @Test
-  public void aKnownRepositoryYieldsItsIdAndMainBranch() throws Exception {
+  public void aKnownRepositoryYieldsItsIdProjectAndMainBranch() throws Exception {
     String base =
         serve(
             200,
@@ -88,13 +88,14 @@ public class HttpRepositoryLookupTest {
     assertTrue(found.isPresent());
     assertEquals("repo-1", found.get().id());
     assertEquals("main", found.get().mainBranch());
+    assertEquals("p-1", found.get().projectId(), "SoftwareRelease names the project");
   }
 
   /**
    * Fields qits-projects sends that this context does not bind are ignored rather than fatal. That
    * is what lets that service evolve its RepositoryDto without breaking this one, so it is asserted
-   * rather than assumed — the case above already carries url/archetype/projectId; this one adds a
-   * field that does not exist yet.
+   * rather than assumed — the case above already carries url and archetype; this one adds a field
+   * that does not exist yet.
    */
   @Test
   public void anUnknownFieldFromProjectsIsNotFatal() throws Exception {

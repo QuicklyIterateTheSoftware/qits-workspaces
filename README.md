@@ -19,16 +19,20 @@ the boundary. Everything that runs *inside* the container belongs to
 | `domain/` | `eu.wohlben.qits.workspaces.*` — entity, persistence, dto, mapper, control, and the framework-free SPIs the daemon implements. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
+| `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SoftwareRelease`. Plain records; a consumer depends on this jar and gets no domain. |
+| `eventstream/` | The platform event bus client — a **submodule**, [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), built in place as a reactor module. |
 | `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/workspaces`. |
 
 So a checkout needs one command a plain clone does not give you:
 
     git submodule update --init
 
-Skip it and the build stops at `No package.json found in Web UI directory` — `git clone` materialises
-a gitlink as an empty directory, and an empty `webui` is the one state Quinoa treats as a
-misconfiguration rather than as "no UI here". (A checkout with the directory *absent* builds fine,
-with a warning.)
+Skip it and the build stops twice over, and neither message names a submodule. `eventstream` is a
+maven module, so an empty directory is a missing pom and the reactor dies before compiling anything.
+`webui` empty stops Quinoa at `No package.json found in Web UI directory` — `git clone` materialises
+a gitlink as an empty directory, and that is the one state Quinoa treats as a misconfiguration rather
+than as "no UI here". (A checkout with the `webui` directory *absent* builds fine, with a warning;
+an absent `eventstream` does not.)
 
 Quinoa shells out to `npm`, so a build here also wants **node on `PATH`** — the machine's own, which
 is the point: nothing in `application.properties` asks Quinoa to download one, so `./mvnw package`
@@ -141,6 +145,18 @@ the daemon's dial-home control socket, and it authenticates by workspace id, not
 monorepo this lived in `auth/core`'s `PublicPaths`; under the gateway it is `PublicPaths` there.
 And `qits.repositories.data-dir` is a shared on-disk contract: qits-projects clones into the same
 tree and qits-artifacts serves it over git smart-HTTP, so all three must resolve it to one volume.
+
+**The event bus needs nothing.** A release publishes `SoftwareRelease` through the `qits-eventstream`
+jar, which ships every key it needs as a default: `qits.events.url` is the qits-net alias, and
+`docker/Dockerfile` names the outbox's database (`/data/eventstream`) because the jar's own
+`${user.home}` default has nowhere to land in an image with no passwd entry. So the image boots
+unchanged and a deployment overrides only what it wants moved:
+
+    QITS_EVENTS_URL=http://qits-events:8080
+    QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL=jdbc:h2:file:/data/eventstream/h2/eventstream
+
+Both are the shipped values written out; set them when the bus lives somewhere else. The outbox is
+durable, so whatever path it ends up on must be on the data volume — `/data` already is.
 
 ## Where it answers
 

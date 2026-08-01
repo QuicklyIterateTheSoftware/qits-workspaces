@@ -43,11 +43,13 @@ public interface ProjectsRepositories {
   record GetRepositoryResponse(Repository repository) {}
 
   /**
-   * The two fields this context is entitled to. qits-projects' {@code RepositoryDto} also carries
-   * {@code url}, {@code archetype} and {@code projectId}; not binding to them is what keeps that
-   * service free to change them, and {@code ignoreUnknown} is what makes that true rather than
-   * aspirational.
+   * The three fields this context is entitled to. qits-projects' {@code RepositoryDto} also carries
+   * {@code url} and {@code archetype}; not binding to them is what keeps that service free to change
+   * them, and {@code ignoreUnknown} is what makes that true rather than aspirational.
+   *
+   * <p>{@code projectId} joined when {@code SoftwareRelease} landed: the event names the project a
+   * release belongs to, and this is the only place the workspaces context can learn it.
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
-  record Repository(String id, String mainBranch) {}
+  record Repository(String id, String mainBranch, String projectId) {}
 }

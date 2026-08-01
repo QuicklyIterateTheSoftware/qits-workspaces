@@ -235,9 +235,27 @@ RUN mkdir -p /data/repositories && chown -R 1001:root /data && chmod -R 775 /dat
 # the three-way on-disk contract in the header only holds if all three resolve it to the same volume,
 # and three services each told the same string separately is three chances to get it wrong.
 #
-# Note what is NOT set beside it: no QUARKUS_DATASOURCE_* default. That asymmetry is the whole point
-# — the git tree works out of the box, the prototype database refuses to.
+# Note what is NOT set beside it: no QUARKUS_DATASOURCE_WORKSPACES_JDBC_URL default. That asymmetry
+# is the whole point — the git tree works out of the box, the prototype database refuses to.
 ENV QITS_REPOSITORIES_DATA_DIR=/data/repositories
+
+# The event outbox's database, and it IS named here, which looks like the opposite of the line above
+# until you ask whose data it is. It is not this service's: it is the qits-eventstream library's
+# private durability for events it has accepted but not yet delivered, with its own schema and its
+# own lineage, and this service reads none of it. There is no data-architecture decision to leave
+# open, so there is nothing for a deployment to declare on purpose.
+#
+# And leaving it unset is not "refuses to start" here, it is "refuses to start LATER": the jar's own
+# default roots the file at `${user.home}`, which in this image resolves to `?` (no passwd entry for
+# uid 1001 — the header argues that at length), so an unnamed outbox is a boot failure on the next
+# redeploy rather than a prompt to configure something. A service whose release door is what
+# publishes the event must not be the service the event's plumbing bricks.
+#
+# H2 creates the directory itself; it is not in the RUN above because a named volume mounted at /data
+# masks whatever the image put there, so a mkdir would only help the first container ever to run.
+# A deployment that wants the outbox elsewhere still overrides QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL
+# exactly as qits-ci's does.
+ENV QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL=jdbc:h2:file:/data/eventstream/h2/eventstream
 
 EXPOSE 8080
 USER 1001

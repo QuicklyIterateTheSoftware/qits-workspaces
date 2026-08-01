@@ -8,24 +8,36 @@ import jakarta.enterprise.context.ApplicationScoped;
 /**
  * The test-side {@link ReleaseAnnouncer}: it records what it was told and does nothing else.
  *
- * <p>Nothing implements this port in production yet — the {@code SoftwareRelease} event is a named
- * follow-up — so this double exists to make the seam <em>testable now</em> rather than a claim that
- * only the future feature could check. What it holds is the shape of the statement and the fact that
- * exactly one is made per successful integrate, and none at all when nothing was released.
+ * <p>It wins over the production {@code bus/SoftwareReleaseAnnouncer}, which is a {@code
+ * @DefaultBean} for exactly that reason — the suite must not publish to a real qits-events, and two
+ * unqualified beans of one type are an ambiguous dependency that fails the whole build at {@code
+ * ArcProcessor#validate}. What this double holds is the shape of the statement and the fact that
+ * exactly one is made per successful RELEASE: none when nothing was released, and none at all for a
+ * plain integrate.
  */
 @ApplicationScoped
 public class FakeReleaseAnnouncer implements ReleaseAnnouncer {
 
-  /** One announcement, as the future publisher would receive it. */
+  /** One announcement, as the publisher receives it. */
   public record Announced(
-      String repoId, String branch, String version, String commitSha, Instant publishedAt) {}
+      String projectId,
+      String repoId,
+      String branch,
+      String version,
+      String commitSha,
+      Instant publishedAt) {}
 
   private final List<Announced> announced = new CopyOnWriteArrayList<>();
 
   @Override
   public void onReleasePublished(
-      String repoId, String branch, String version, String commitSha, Instant publishedAt) {
-    announced.add(new Announced(repoId, branch, version, commitSha, publishedAt));
+      String projectId,
+      String repoId,
+      String branch,
+      String version,
+      String commitSha,
+      Instant publishedAt) {
+    announced.add(new Announced(projectId, repoId, branch, version, commitSha, publishedAt));
   }
 
   public List<Announced> announced() {

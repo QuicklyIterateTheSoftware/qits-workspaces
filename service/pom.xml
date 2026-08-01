@@ -50,6 +50,30 @@
             <artifactId>qits-workspaces-daemon-protocol</artifactId>
         </dependency>
         <dependency>
+            <!-- The platform event bus client. Joining it here is what turns a library module into
+                 a deployable that publishes: the outbox's datasource, its Flyway lineage and the
+                 sweeper's scheduled job all arrive with this jar, configured by the defaults it
+                 ships in its own META-INF/microprofile-config.properties. The only things this
+                 module says about it are where it is dark (application.properties) and where its
+                 database goes in a container with no home directory (docker/Dockerfile).
+
+                 It brings quarkus-scheduler, which is NEW to this deployable and the only extension
+                 this dependency adds that was not already here. quarkus-undertow stays absent, as
+                 Quinoa requires:
+                 `./mvnw -pl service -am dependency:tree -Dincludes=io.quarkus:quarkus-undertow`
+                 is still empty. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
+            <!-- This service's event vocabulary — today just SoftwareRelease. Declared explicitly
+                 rather than taken transitively through qits-eventstream above, because this module
+                 uses the class by name (bus/SoftwareReleaseAnnouncer constructs it) and a
+                 compile-time use belongs in the pom that makes it. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-workspaces-events</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>

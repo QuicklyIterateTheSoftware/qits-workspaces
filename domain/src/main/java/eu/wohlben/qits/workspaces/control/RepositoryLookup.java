@@ -5,7 +5,7 @@ import java.util.Optional;
 
 /**
  * The owning application's repository registry, narrowed to what the workspaces context actually
- * needs of it: does this repository exist, and what is its main branch.
+ * needs of it: does this repository exist, which project owns it, and what is its main branch.
  *
  * <p>A workspace has no meaning without a repository to branch from, but this context deliberately
  * holds no foreign key into the repositories tables (see {@link
@@ -20,8 +20,15 @@ import java.util.Optional;
  */
 public interface RepositoryLookup {
 
-  /** The repository facts this context reads. */
-  record RepositoryView(String id, String mainBranch) {}
+  /**
+   * The repository facts this context reads.
+   *
+   * <p>{@code projectId} is here for one caller and one reason: {@code SoftwareRelease} names the
+   * project a release belongs to, and the flow that publishes it holds a repository id and nothing
+   * else. It is nullable — a registry that does not answer with one costs the event a field, never
+   * the release.
+   */
+  record RepositoryView(String id, String projectId, String mainBranch) {}
 
   /** The repository behind {@code repoId}, or empty when it does not exist. */
   Optional<RepositoryView> find(String repoId);

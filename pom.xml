@@ -36,8 +36,18 @@
     <name>qits-workspaces</name>
 
     <modules>
-        <!-- Listed first: `service` depends on it. -->
+        <!-- Listed in the direction of the dependency arrow, which is documentation only — maven
+             computes the reactor order itself. `service` depends on all four.
+
+             `eventstream` is a SUBMODULE — the qits-eventstream repository, checked out here so the
+             reactor can build it in place. Its pom is parentless and carries its own groupId and
+             version; the reactor resolves it as a module all the same. A clone that has not
+             initialised its submodules has no such directory and the build fails at once, which is
+             the intended signal; AGENTS.md spells the command that fixes it (an XML comment may not
+             contain two consecutive dashes, so it cannot be spelled here). -->
         <module>workspace-daemon-protocol</module>
+        <module>eventstream</module>
+        <module>workspaces-events</module>
         <module>domain</module>
         <module>service</module>
     </modules>
@@ -98,6 +108,18 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-workspaces-daemon-protocol</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The submodule. Same groupId and version as this reactor by coincidence of its
+                     own pom, which is why it resolves version-less here like any sibling. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-eventstream</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-workspaces-events</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

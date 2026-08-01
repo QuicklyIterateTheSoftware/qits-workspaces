@@ -28,6 +28,10 @@ public class IntegrateConflictException extends ConflictException {
    * useful part — it names the endpoint to use and what a deployment must configure. A client that
    * does not recognise the value falls through to showing the message verbatim, which is exactly
    * the right treatment.
+   *
+   * <p><b>The set is additive and stays that way.</b> {@link #RELEASE_REQUIRED} joined when the two
+   * doors split, and it is the enum's whole purpose working: a new refusal is a new value, never a
+   * new envelope.
    */
   public enum Reason {
     /** The preflight three-way merge conflicts. Nothing was attempted; no ref moved. */
@@ -38,8 +42,18 @@ public class IntegrateConflictException extends ConflictException {
     NOT_FAST_FORWARD,
     /** The source branch is already an ancestor of the default branch. The work is in. */
     ALREADY_INTEGRATED,
-    /** The git host refused the push. {@code message} is the host's own words. */
-    PUSH_REJECTED
+    /** The git host refused the push. {@code message} is the host's own words. Not retryable. */
+    PUSH_REJECTED,
+    /**
+     * The wrong door: this merge or integrate would land on the repository's default branch, which
+     * only a release writes. Nothing was attempted. The caller wants {@code
+     * POST /workspaces/api/workspaces/{id}/release} instead, and the message names it.
+     *
+     * <p>A refusal about <em>which endpoint</em> rather than about the state of the branches, which
+     * is why it is worth a value of its own: a client can offer the right button instead of
+     * word-matching prose for the endpoint name.
+     */
+    RELEASE_REQUIRED
   }
 
   private final Reason reason;

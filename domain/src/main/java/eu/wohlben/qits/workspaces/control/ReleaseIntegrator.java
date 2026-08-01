@@ -20,12 +20,24 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * The git half of an integrate: merge a branch into the repository's default branch, stamp the
- * version into the same index, commit it once, and <b>push</b>.
+ * The git half of landing one branch on another: merge, optionally stamp a version into the same
+ * index, commit it once, and <b>push</b>.
  *
  * <p>Pure mechanics — it owns no row, fires no event and resolves no workspace. {@link
- * WorkspaceService#integrateWorkspace} owns all of that and calls this for the seven steps that are
- * about git and files.
+ * WorkspaceService} owns all of that and calls this for the steps that are about git and files.
+ *
+ * <h2>One method, two spellings</h2>
+ *
+ * A <b>release</b> and a plain <b>integrate</b> are two different processes to a user — one lands on
+ * the default branch and stamps a version, the other lands a task branch on its parent and stamps
+ * nothing — but they are one flow to git, and {@link Mode} is the whole of the difference: whether
+ * the version is stamped and bumped, what the commit subject reads, and whether the push carries the
+ * release option. Every safety property below is shared by construction rather than by two
+ * implementations agreeing to keep matching.
+ *
+ * <p>The flow is keyed by <b>(repository, source branch)</b> and by nothing else — the worktree name
+ * is derived from the source branch, not from a workspace row — so a branch-keyed caller is a thin
+ * resolver over this same method rather than a second copy of it.
  *
  * <h2>Why it pushes a repository it is already holding</h2>
  *
@@ -47,12 +59,17 @@ import org.jboss.logging.Logger;
  *
  * <h2>Why the push is the compare-and-swap</h2>
  *
- * The push carries {@code -o qits.release}, which the git host's protection hook accepts for
- * <b>fast-forward updates only</b>. It is deliberately not granted force, so two integrates racing
+ * A release's push carries {@code -o qits.release}, which the git host's protection hook accepts for
+ * <b>fast-forward updates only</b>. It is deliberately not granted force, so two releases racing
  * cannot both win: the loser is rejected as non-fast-forward and told to retry, with the default
  * branch in a correct state either way. That is git's own atomic ref update doing the work, which
  * is why this feature needs no distributed lock — the in-process repository lease upstream only
  * turns the common case from "one fails" into "one waits".
+ *
+ * <p>A plain integrate sends <b>no push option</b>, and that is not an oversight: the hook guards
+ * the default branch and nothing else, so a task branch landing on its parent is an ordinary push.
+ * It is still a compare-and-swap, because an ordinary push is fast-forward-only — that property
+ * belongs to receive-pack, not to the option.
  *
  * <h2>Three inherited sharp edges, fixed here</h2>
  *
@@ -62,9 +79,9 @@ import org.jboss.logging.Logger;
  *       that caused it. {@link #prepareWorktree} prunes first, and removes a leftover directory the
  *       prune cannot (prune drops the registration, not the files).
  *   <li><b>{@code .tmp-merge-<currentTimeMillis>} collides</b> within a millisecond. The name here
- *       is the workspace row id, which is unique by construction.
+ *       is the source branch, which is unique per repository by construction.
  *   <li><b>{@code GitExecutor} had no timeout.</b> The push is this service's first <i>network</i>
- *       git call and integrate answers synchronously, so it gets a deadline; the local calls keep
+ *       git call and the flow answers synchronously, so it gets a deadline; the local calls keep
  *       today's behaviour, where a bound would only turn slow into broken.
  * </ul>
  */
@@ -97,27 +114,64 @@ public class ReleaseIntegrator {
   long pushTimeoutMs;
 
   /**
-   * What one integrate produced, and the record the future {@code SoftwareRelease} publisher is
-   * handed.
+   * Which of the two processes this run is. The only difference between them, and therefore the only
+   * thing that can drift.
+   */
+  public enum Mode {
+    /**
+     * A release: stamp a fresh version, bump the manifests into the same index, commit it as {@code
+     * release(<version>): <summary>} and push with {@code -o qits.release}. The target is the
+     * default branch, and this is the only door into it.
+     */
+    RELEASE,
+    /**
+     * A plain integrate: no stamp, no bump, {@code integrate(<source>): <summary>}, no push option.
+     * The target is the source's parent branch and is never the default branch — a task branch
+     * landing on its epic, which the epic then releases.
+     */
+    PLAIN
+  }
+
+  /**
+   * One run of the flow.
    *
-   * @param version the stamp, taken once at step 4 and threaded through
-   * @param commitSha the single merge commit carrying both the merge and the bump
-   * @param branch the source branch that was integrated — the merge's parents record it as a sha,
-   *     never as a name
+   * @param repoId the repository, whose bare origin this service holds
+   * @param sourceBranch the branch being landed — also what the worktree is named after
+   * @param targetBranch what it lands on: the default branch for {@link Mode#RELEASE}, the source's
+   *     parent for {@link Mode#PLAIN}
+   * @param summary the commit subject after the scope
+   */
+  public record Run(
+      String repoId, String sourceBranch, String targetBranch, String summary, Mode mode) {}
+
+  /**
+   * What one run produced, and the record the {@code SoftwareRelease} publisher is handed.
+   *
+   * @param version the stamp, taken once at step 4 and threaded through — <b>null for {@link
+   *     Mode#PLAIN}</b>, which stamps nothing
+   * @param commitSha the single merge commit, carrying the bump too when there was one
+   * @param branch the source branch that was landed — the merge's parents record it as a sha, never
+   *     as a name
+   * @param targetBranch what it landed on
    * @param publishedAt when the push was accepted
    */
-  public record PublishedRelease(
-      String version, String commitSha, String branch, Instant publishedAt) {}
+  public record Landed(
+      String version,
+      String commitSha,
+      String branch,
+      String targetBranch,
+      Instant publishedAt) {}
 
   /**
    * Run the flow for one repository.
    *
-   * @param workspaceRowId names the worktree; only its uniqueness is used
    * @throws IntegrateConflictException for every refusal a caller can act on — see {@link
    *     IntegrateConflictException.Reason}
    */
-  public PublishedRelease integrate(
-      String repoId, String sourceBranch, String targetBranch, String summary, Long workspaceRowId) {
+  public Landed land(Run run) {
+    String repoId = run.repoId();
+    String sourceBranch = run.sourceBranch();
+    String targetBranch = run.targetBranch();
     Path originPath = Path.of(dataDir, repoId, "origin").toAbsolutePath();
     if (!Files.exists(originPath)) {
       throw new NotFoundException("Repository origin not found on disk");
@@ -128,32 +182,34 @@ public class ReleaseIntegrator {
     preflightMerge(originPath, sourceBranch, targetBranch);
 
     // [2] a DETACHED worktree: the property that makes "no partial state" true rather than hoped.
-    Path worktree = prepareWorktree(originPath, repoId, targetBranch, workspaceRowId);
+    Path worktree = prepareWorktree(originPath, repoId, targetBranch, sourceBranch);
     try {
       // [3] the merge, staged but NOT committed — MERGE_HEAD stays set and the index stays open,
       // which is what lets the bump write into the same index and produce ONE commit.
       mergeNoCommit(worktree, sourceBranch);
 
       // [4] the stamp, taken ONCE. Recomputing it per file would let a slow bump write two versions
-      // into one commit.
-      String version = VersionStamp.of(Instant.now());
+      // into one commit. A plain integrate is not a release and takes none.
+      String version = run.mode() == Mode.RELEASE ? VersionStamp.of(Instant.now()) : null;
 
-      // [5] the bump, into the open index.
-      stageBump(worktree, version);
+      // [5] the bump, into the open index. Nothing to render without a version.
+      if (version != null) {
+        stageBump(worktree, version);
+      }
 
-      // [6] one commit: two parents (the merge) plus the version change.
-      String commitSha = commitRelease(worktree, version, summary, sourceBranch);
+      // [6] one commit: two parents (the merge) plus, for a release, the version change.
+      String commitSha = commit(worktree, run, version);
 
       // [7] the push, which is the compare-and-swap.
-      Instant publishedAt = push(worktree, repoId, targetBranch);
+      Instant publishedAt = push(worktree, repoId, targetBranch, run.mode());
 
       LOG.infof(
-          "integrated %s into %s of %s as %s (%s)",
-          sourceBranch, targetBranch, repoId, version, commitSha);
-      return new PublishedRelease(version, commitSha, sourceBranch, publishedAt);
+          "landed %s on %s of %s%s (%s)",
+          sourceBranch, targetBranch, repoId, version == null ? "" : " as " + version, commitSha);
+      return new Landed(version, commitSha, sourceBranch, targetBranch, publishedAt);
     } finally {
       // [9] cleanup. In a finally because every failure above leaves the worktree behind and the
-      // NEXT integrate is what pays for it.
+      // NEXT run is what pays for it.
       removeWorktree(originPath, worktree);
     }
   }
@@ -180,7 +236,7 @@ public class ReleaseIntegrator {
                 + source
                 + "' is already integrated into '"
                 + target
-                + "': it is an ancestor of it, so there is nothing to release.");
+                + "': it is an ancestor of it, so there is nothing to land.");
       }
     } catch (IntegrateConflictException e) {
       throw e;
@@ -218,7 +274,7 @@ public class ReleaseIntegrator {
     if (result.exitCode() == 1) {
       throw new IntegrateConflictException(
           Reason.CONFLICT,
-          "Merging '" + source + "' into '" + target + "' conflicts. Nothing was released and '"
+          "Merging '" + source + "' into '" + target + "' conflicts. Nothing landed and '"
               + target
               + "' is unchanged.",
           GitExecutor.conflictedFiles(result.output()));
@@ -231,9 +287,10 @@ public class ReleaseIntegrator {
   // [2] the detached worktree
   // ---------------------------------------------------------------------------------------------
 
-  private Path prepareWorktree(Path originPath, String repoId, String target, Long workspaceRowId) {
+  private Path prepareWorktree(Path originPath, String repoId, String target, String sourceBranch) {
     Path worktree =
-        Path.of(dataDir, repoId, "workspaces", ".tmp-integrate-" + workspaceRowId).toAbsolutePath();
+        Path.of(dataDir, repoId, "workspaces", ".tmp-integrate-" + slug(sourceBranch))
+            .toAbsolutePath();
     try {
       Files.createDirectories(worktree.getParent());
       // Prune first: a crashed integrate leaves the registration behind and `worktree add` then
@@ -278,6 +335,19 @@ public class ReleaseIntegrator {
     }
   }
 
+  /**
+   * The worktree's name, from the source branch.
+   *
+   * <p>A branch name may hold a {@code /} (that is the whole point of {@code task/…}), so it cannot
+   * be a directory name as it stands. Two branches could slug to one name — but only two running at
+   * once would collide, and the repository lease upstream forbids that. What this buys is the flow
+   * being keyed by <b>(repository, source branch)</b> instead of by a workspace row, which is what
+   * lets a branch-keyed caller reuse it unchanged.
+   */
+  private static String slug(String branch) {
+    return branch.replaceAll("[^A-Za-z0-9._-]", "-");
+  }
+
   private static void deleteRecursively(Path root) throws IOException {
     try (var paths = Files.walk(root)) {
       for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
@@ -316,7 +386,7 @@ public class ReleaseIntegrator {
     }
     throw new IntegrateConflictException(
         Reason.MERGE_CONFLICT,
-        "Merging '" + source + "' conflicts. Nothing was released and the target branch is"
+        "Merging '" + source + "' conflicts. Nothing landed and the target branch is"
             + " unchanged.",
         conflicts);
   }
@@ -352,23 +422,37 @@ public class ReleaseIntegrator {
     }
   }
 
-  private String commitRelease(Path worktree, String version, String summary, String source) {
+  /**
+   * The one commit, and the two subjects.
+   *
+   * <p>The scope says which process this was, so a reader of {@code git log} never has to infer it:
+   * {@code release(<version>)} carries the stamp a release produced, {@code integrate(<source>)}
+   * carries the branch a plain merge landed. The body names both branches — the merge's parents
+   * record the graph, but the branch <em>names</em> do not survive the merge otherwise, and they are
+   * what a human reads.
+   */
+  private String commit(Path worktree, Run run, String version) {
+    boolean release = version != null;
+    String subject =
+        release
+            ? "release(" + version + "): " + run.summary()
+            : "integrate(" + run.sourceBranch() + "): " + run.summary();
+    String body =
+        release
+            ? "Integrates workspace branch `" + run.sourceBranch() + "`."
+            : "Integrates workspace branch `"
+                + run.sourceBranch()
+                + "` into `"
+                + run.targetBranch()
+                + "` without a release.";
     List<String> argv = new ArrayList<>(List.of("git"));
     argv.addAll(gitIdentity.inlineArgs());
-    argv.addAll(
-        List.of(
-            "commit",
-            "-m",
-            "release(" + version + "): " + summary,
-            // The merge's parents record the graph, but the branch NAME does not survive the merge
-            // otherwise, and it is what a human reads.
-            "-m",
-            "Integrates workspace branch `" + source + "`."));
+    argv.addAll(List.of("commit", "-m", subject, "-m", body));
     try {
       git.exec(worktree.toFile(), gitIdentity.envMap(), argv.toArray(String[]::new));
       return git.exec(worktree.toFile(), "git", "rev-parse", "HEAD").trim();
     } catch (Exception e) {
-      throw new InternalServerErrorException("Failed to commit the release: " + e.getMessage());
+      throw new InternalServerErrorException("Failed to commit the merge: " + e.getMessage());
     }
   }
 
@@ -376,8 +460,16 @@ public class ReleaseIntegrator {
   // [7] the push
   // ---------------------------------------------------------------------------------------------
 
-  private Instant push(Path worktree, String repoId, String target) {
+  private Instant push(Path worktree, String repoId, String target, Mode mode) {
     String remote = gitHost.pushUrl(repoId);
+    List<String> argv = new ArrayList<>(List.of("git", "push", "--porcelain"));
+    // Only a release needs the option: the git host's hook guards the default branch and nothing
+    // else, so a plain integrate's target is an ordinary ref and an ordinary push moves it.
+    if (mode == Mode.RELEASE) {
+      argv.add("--push-option=" + RELEASE_PUSH_OPTION);
+    }
+    argv.add(remote);
+    argv.add("HEAD:refs/heads/" + target);
     GitExecutor.ExecResult result;
     try {
       result =
@@ -386,17 +478,12 @@ public class ReleaseIntegrator {
               Duration.ofMillis(pushTimeoutMs),
               Map.of(),
               null,
-              "git",
-              "push",
-              "--porcelain",
-              "--push-option=" + RELEASE_PUSH_OPTION,
-              remote,
-              "HEAD:refs/heads/" + target);
+              argv.toArray(String[]::new));
     } catch (TimeoutException e) {
       throw new InternalServerErrorException(
-          "The release push to " + remote + " timed out; nothing was released.");
+          "The push to " + remote + " timed out; nothing was released.");
     } catch (Exception e) {
-      throw new InternalServerErrorException("The release push failed: " + e.getMessage());
+      throw new InternalServerErrorException("The push failed: " + e.getMessage());
     }
     if (result.exitCode() == 0) {
       return Instant.now();
@@ -416,7 +503,7 @@ public class ReleaseIntegrator {
     String remoteRefusal = remoteRejection(output);
     if (remoteRefusal != null) {
       return new IntegrateConflictException(
-          Reason.PUSH_REJECTED, "The git host refused the release push: " + remoteRefusal);
+          Reason.PUSH_REJECTED, "The git host refused the push: " + remoteRefusal);
     }
     String lower = output == null ? "" : output.toLowerCase();
     if (lower.contains("non-fast-forward")
@@ -426,11 +513,11 @@ public class ReleaseIntegrator {
           Reason.NOT_FAST_FORWARD,
           "'"
               + target
-              + "' moved while this release was being built, so the push was not a fast-forward."
-              + " Nothing was released — integrate again.");
+              + "' moved while this merge was being built, so the push was not a fast-forward."
+              + " Nothing landed — try again.");
     }
     return new InternalServerErrorException(
-        "The release push failed: " + (output == null || output.isBlank() ? "no output" : output));
+        "The push failed: " + (output == null || output.isBlank() ? "no output" : output));
   }
 
   /**

@@ -13,6 +13,17 @@ That is why: the poms duplicate versions instead of inheriting them, the daemon 
 vendored, tests build their own git origins (`TestOrigin`) instead of using fixtures, and the
 container runtime is faked in tests rather than shelling docker.
 
+*A clone*, not a bare `git clone`: two submodules are reactor input and the build needs both.
+
+    git submodule update --init
+
+`eventstream/` is the qits-eventstream repository, listed as a `<module>` and built in place, so an
+uninitialised one is a missing pom and the reactor dies before it compiles anything — a failure that
+names a path and not a submodule. `service/src/main/webui/` is the SPA and stops Quinoa instead. No
+credentials either way: both are public. `.config/qits/ci-post-receive.yml` initialises the two by
+path in the image build for the same reason, and a third submodule added for the SPA's sake would
+have to be added there deliberately.
+
 The one thing beyond `.sdkmanrc`'s GraalVM a build wants is **node on `PATH`** — Quinoa shells out
 to npm for the Angular client. `mvn verify` does not need it (Quinoa is disabled by default in
 tests), `./mvnw package` does, and it is deliberately the machine's OWN node: nothing in
@@ -52,14 +63,17 @@ keep reading `quarkus.http.root-path`.
 
 ## Package and module conventions
 
-`eu.wohlben.qits.workspaces.*`, split across two maven modules with disjoint sub-packages so there
-is no split package:
+`eu.wohlben.qits.workspaces.*`, split across maven modules with disjoint sub-packages so there is no
+split package:
 
 - `domain/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the
   sense that matters: no JAX-RS, no websockets. Entities are Panache active-record with public
   fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
 - `service/` — `api` (JAX-RS + SSE, including the raw vertx routes), `daemonhost` (the control
-  socket and registry).
+  socket and registry), `bus` (the event-bus wiring), `wiring`, `security`.
+- `workspaces-events/` — `events`, and nothing else. Plain records on `qits-eventstream`, no CDI:
+  this is the vocabulary a *consumer* depends on, which is why it is not a package inside `domain`.
+  `domain` does not depend on it — the domain's seam is a port, and the bus stays in the deployable.
 
 `control/` is flat on purpose, and deliberately stayed flat as the context grew: the monorepo split
 it across `domain.repository`, `domain.workspace`, `domain.service`, `domain.bootstrap`,
@@ -241,7 +255,8 @@ artifactId. Any change to it must be mirrored in
 
 `VersionStamp` + `VersionBumper` in `domain/…/control/` write a release version into a checkout.
 Pure: they read and write files under one directory and touch nothing else, which is what lets the
-integrate flow call them inside a detached worktree before any ref has moved.
+release flow call them inside a detached worktree before any ref has moved. Only a release calls
+them; a plain integrate never reaches this code.
 
 `VersionStamp.of(Instant)` is `YYYY.MMDD.HHMMSS` — `2026.731.193059` — computed as **integer
 arithmetic in UTC**, so no identifier can carry a leading zero. That is the whole point of the
@@ -269,13 +284,28 @@ bumped too — for the publishable library repos that inner manifest is the rele
 A missing or unparseable manifest **fails loudly**. A bump that silently skips a file ships a
 release whose artifacts still carry the previous version, and that is discovered much later.
 
-## The integrate flow
+## The two doors: release and integrate
 
-`POST /workspaces/api/workspaces/{id}/integrate` is **the one door into a repository's default
+**`POST /workspaces/api/workspaces/{id}/release`** is **the one door into a repository's default
 branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
-version into the same index, commits both as **one** commit — `release(<version>): <summary>` — and
-**pushes** it. `ReleaseIntegrator` is the git half; `WorkspaceService.integrateWorkspace` owns the
-row, the lease, the announcement and the resolution.
+version into the same index, commits both as **one** commit — `release(<version>): <summary>` —
+**pushes** it, and publishes `SoftwareRelease`.
+
+**`POST /workspaces/api/workspaces/{id}/integrate`** lands a workspace on **its parent branch** — a
+`task/…` on the `epic/…` it forked from — as one pushed commit `integrate(<source>): <summary>`. No
+stamp, no bump, no `qits.release` push option, no event, and no `version` in the response. A
+workspace whose parent *is* the default branch is refused with `RELEASE_REQUIRED` and sent to
+`/release`, because that is the only door that may write it.
+
+**They are two processes and one method.** `ReleaseIntegrator.land(Run)` takes a `Mode`, and the
+mode is the whole difference: stamp-and-bump, the commit subject, the push option. Everything below
+is shared by construction rather than by two implementations agreeing to keep matching — which is
+what makes "integrate is as safe as release" a fact instead of a claim. The flow is keyed by
+**(repository, source branch)**, worktree name included, so a branch-keyed sibling endpoint is a thin
+resolver over the same method rather than a second copy.
+
+`WorkspaceService.landWorkspace` owns the row, the lease, the announcement and the resolution; the
+two public methods are ten lines each and differ only in the target and the mode.
 
 **It pushes a repository this service is already holding, and that is the point.** The bare origin
 is on our own disk, so `main` could be advanced by writing the ref — which is exactly what
@@ -289,34 +319,45 @@ Four properties, each of which is why a step is where it is:
 
 - **`git worktree add --detach` is what makes "no partial state" true.** The merge, the bump and the
   commit all happen against a `HEAD` that is not a branch, so a conflict, a bump failure or a crash
-  leaves the default branch **byte-identical**. A failed integrate needs no unwind — only a worktree
+  leaves the target branch **byte-identical**. A failed run needs no unwind — only a worktree
   removal, which is in a `finally`. The orphaned commit is git's to collect.
 - **`git merge --no-ff --no-commit` is what makes bump-and-merge one commit.** `MERGE_HEAD` stays
   set and the index stays staged; the bump writes into that same index; the single `git commit` that
   follows is a two-parent merge that also carries the version change. No amend, no second commit.
-- **The push is the compare-and-swap.** It carries `--push-option=qits.release`, which the git host
-  accepts for **fast-forward updates only** — deliberately not force — so two integrates racing
-  cannot both win. The loser is rejected as non-fast-forward and told to retry. That is why no
-  distributed lock exists here.
+- **The push is the compare-and-swap.** A release carries `--push-option=qits.release`, which the
+  git host accepts for **fast-forward updates only** — deliberately not force — so two releases
+  racing cannot both win. The loser is rejected as non-fast-forward and told to retry. That is why no
+  distributed lock exists here. An integrate sends no option and is no less safe: the hook guards the
+  default branch alone, and fast-forward-only is receive-pack's property rather than the option's.
 - **The stamp is taken once**, at step 4, and threaded through. Recomputed per file, a slow bump
-  would write two versions into one commit.
+  would write two versions into one commit. A plain integrate takes none at all, which is what makes
+  "no version" a fact about the flow rather than a field the controller drops.
 
 **The 409s carry a `reason`, and it is additive.** The envelope is still `{"message": …}`; an
 `IntegrateConflictException` adds `reason` ∈ `CONFLICT` / `MERGE_CONFLICT` / `NOT_FAST_FORWARD` /
-`ALREADY_INTEGRATED` / `PUSH_REJECTED`, plus `conflicts` (the conflicted paths) for the two conflict
-modes. `WorkspacesExceptionMapper` is where that happens and it is the only type it special-cases.
-`PUSH_REJECTED` is the git host's protection hook refusing: **that must surface as a 4xx carrying
-the hook's own message, never a 500**, because the message is the only thing on screen that says
-what to do instead.
+`ALREADY_INTEGRATED` / `PUSH_REJECTED` / `RELEASE_REQUIRED`, plus `conflicts` (the conflicted paths)
+for the two conflict modes. `WorkspacesExceptionMapper` is where that happens and it is the only type
+it special-cases. `PUSH_REJECTED` is the git host's protection hook refusing: **that must surface as
+a 4xx carrying the hook's own message, never a 500**, because the message is the only thing on screen
+that says what to do instead — and it is **not retryable**, which is how the client treats it, so
+never reuse the value for a race. `RELEASE_REQUIRED` is the wrong-door refusal and the only one where
+nothing was attempted.
 
-**`merge` and `branches/merge` now 409 when the target resolves to the default branch**, naming
-`/integrate` and the workspace id. They keep every other target — merging into a *parent* branch is
-what stacked workspaces do all day. One consequence, recorded because it is a real loss rather than
-an oversight: **a plain branch can no longer be auto-cleaned up after integration.** A plain
-branch's cleanup parent is the main branch by definition (`canCleanupBranch`), so it is eligible
-only once merged *into* that branch — and that door is integrate's, while integrate is
-workspace-keyed. Workspace branches still resolve and are still deleted; that happens inside
-integrate.
+The enum reaches `docs/openapi.yml` through `api/ApiError`, a schema-only record declared on the
+`@APIResponse`s and returned by nothing — the mapper still builds the body, because the extra fields
+are present only when they apply and a record would write them as explicit nulls.
+
+**`merge` and `branches/merge` 409 with `RELEASE_REQUIRED` when the target resolves to the default
+branch**, naming both doors and the workspace id. They keep every other target — merging into a
+*parent* branch is what stacked workspaces do all day, which is also what `/integrate` now does with
+a push and a lease behind it. **`merge` is not redundant**: it still takes an arbitrary target and
+answers with conflicts rather than throwing, and `branches/merge` needs no workspace at all.
+
+One consequence, recorded because it is a real loss rather than an oversight: **a plain branch can no
+longer be auto-cleaned up after integration.** A plain branch's cleanup parent is the main branch by
+definition (`canCleanupBranch`), so it is eligible only once merged *into* that branch — and that
+door is release's, while release is workspace-keyed. Workspace branches still resolve and are still
+deleted; that happens inside the flow.
 
 **Three inherited sharp edges this flow had to fix rather than inherit**, and two of them were
 platform-wide:
@@ -324,10 +365,11 @@ platform-wide:
 - **Stale worktrees were never pruned** anywhere in this service. A crashed merge left its admin
   registered and the *next* one failed with "already checked out" — a failure outliving the process
   that caused it. Both the integrate flow and `mergeIntoTarget` prune before adding now.
-- **`.tmp-merge-<System.currentTimeMillis()>` collides** within a millisecond. Integrate's worktree
-  is `.tmp-integrate-<workspace row id>`, which is unique by construction.
+- **`.tmp-merge-<System.currentTimeMillis()>` collides** within a millisecond. The flow's worktree
+  is `.tmp-integrate-<slugged source branch>`, unique per repository by construction and the reason
+  the flow is keyed by branch rather than by a workspace row.
 - **`GitExecutor` had no timeout at all.** The push is this service's first *network* git call and
-  integrate answers synchronously, so it is the one invocation with a deadline
+  the flow answers synchronously, so it is the one invocation with a deadline
   (`qits.workspace.integrate.push-timeout-ms`). The bound covers the whole call, not just
   `waitFor` — a transport that connects and then says nothing blocks in `readLine()`, so the drain
   runs on its own thread and `destroyForcibly` is what unblocks it. Local filesystem git keeps its
@@ -338,18 +380,38 @@ advertises push options in production; a local `receive-pack` does **not** by de
 --push-option` fails outright against a server that did not advertise them. Without that line the
 fixture would refuse the exact argv that ships. `FakeGitHostAddress` points the push at the local
 bare and replaces the **transport only** — the push, the ref negotiation and the fast-forward check
-are all real, which is what lets `IntegrateControllerTest` assert the compare-and-swap. Its
+are all real, which is what lets `ReleaseControllerTest` assert the compare-and-swap. Its
 `beforeNextPush` hook moves the default branch at the one instant a race is about; staged rather
 than raced, because a real race is nondeterministic about which side loses.
 
-**`ReleaseAnnouncer` is a seam with no implementation, on purpose.** The `SoftwareRelease` event is
-a named follow-up; what this feature owes it is a clean place to stand, so step 7's success returns
-a record through one method (`announceRelease`) instead of vanishing into the middle of a larger
-one. It is announced **after the push and before the transaction commits**: the push is
-irreversible the instant receive-pack accepts it, so a statement conditional on the transaction
-would be silent about a release that really happened. One gap named rather than closed:
-`RepositoryLookup.RepositoryView` is `(id, mainBranch)` and carries no `projectId`, which that
-event's payload needs — the view has to widen when it lands.
+## The SoftwareRelease event
+
+A **release** publishes `SoftwareRelease {projectId, repository, branch, version}` the instant the
+push is accepted. A plain integrate publishes nothing — an event that fired for both would make "a
+release happened" unlistenable, which is the one thing this event exists to be.
+
+`ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SoftwareReleaseAnnouncer` is
+the implementation, so the domain module stays free of the bus and its transport (the `RunAnnouncer`
+precedent in qits-ci, copied down to the package name). It is announced **after the push and before
+the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
+statement conditional on the transaction would be silent about a release that really happened.
+
+Four things about it are easy to undo by accident:
+
+- **`SoftwareReleaseAnnouncer` is a `@DefaultBean`.** The suite's `FakeReleaseAnnouncer` must win,
+  and two unqualified beans of one type fail the build at `ArcProcessor#validate` — for every test at
+  once, not at runtime. Same annotation and same reason as `HttpRepositoryLookup`.
+- **`bus/EventWireReflection` is what makes the publish work in a native image.** `CanonicalJson`
+  builds its own `ObjectMapper` by hand, so nothing registers the event's reflection metadata for it.
+  qits-ci measured both halves of that on deployed binaries: without the targets every publish dies
+  with Jackson's "no serializer found" and the event never even reaches the outbox; without the
+  mix-in `classNames` entry the payload silently gains `eventId`. A JVM suite cannot see either.
+- **The payload is four fields and stays four.** `eventId` and `occurredAt` are record components
+  and are excluded by the library's mix-in, which is why they can be components at all;
+  `SoftwareReleaseTest` asserts the exact canonical string.
+- **`RepositoryLookup.RepositoryView` widened to `(id, projectId, mainBranch)`** for this and for
+  nothing else. `projectId` is nullable: a registry that does not answer with one costs the event a
+  field, never the release.
 
 ## Authentication
 
@@ -400,6 +462,13 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   `CaptureResource`'s payloads present in its `@RegisterForReflection(targets)`, and
   `CaptureCorsRoute` reading an application-owned config key. None of them proves a binary works —
   they prevent the silent re-introduction of what booting one already caught.
+- **The event bus is dark in `%dev` and `%test`, but its datasource is not.**
+  `qits.eventstream.enabled=false` stops publishing and sweeping; Quarkus still opens the connection
+  and runs Flyway at boot, so `service/src/test/resources/application.properties` points the
+  `eventstream` datasource at in-memory H2. Without it every run would create and migrate a real
+  `~/.qits/data/eventstream` and two builds on one host would race for its single-writer file. A test
+  that wants the bus real turns it back on for itself against a stub, never against a live
+  qits-events.
 - `FakeRepositoryLookup` still wins over `wiring/HttpRepositoryLookup` with no change on your part:
   the latter is `@DefaultBean`, which yields to any other bean of the type. **Keep that annotation.**
   Drop it and the two are an ambiguous dependency — the build fails at `ArcProcessor#validate`, not
