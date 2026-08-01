@@ -93,8 +93,9 @@ public class WorkspacePromptAttachmentController {
    * Attach one image. 400 for anything that is not valid base64 or not a PNG or JPEG (the sniff, not
    * the claim), 413 over the per-image cap ({@code qits.workspace.prompt-attachment-max-bytes}).
    *
-   * <p>201 with a {@code Location}: the row has a server-generated id, and the draft blob is written
-   * against it.
+   * <p>201, and no {@code Location}: the id the caller needs is in the body (the draft blob is
+   * written against it), and there is no single-attachment GET to point a header at — the list is
+   * the only read, because the compose UI rehydrates all of them at once or none.
    */
   @POST
   @APIResponse(
@@ -119,7 +120,7 @@ public class WorkspacePromptAttachmentController {
     WorkspacePromptAttachment attachment =
         promptAttachments.addAttachment(
             id, request.mimeType(), request.label(), request.source(), request.dataBase64());
-    return Response.created(java.net.URI.create(attachment.id))
+    return Response.status(Response.Status.CREATED)
         .entity(
             new AddAttachmentRequest.Response(
                 attachment.id,
