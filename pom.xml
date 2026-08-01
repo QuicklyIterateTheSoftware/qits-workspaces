@@ -46,6 +46,7 @@
              the intended signal; AGENTS.md spells the command that fixes it (an XML comment may not
              contain two consecutive dashes, so it cannot be spelled here). -->
         <module>workspace-daemon-protocol</module>
+        <module>gitmirror</module>
         <module>eventstream</module>
         <module>workspaces-events</module>
         <module>domain</module>
@@ -108,6 +109,14 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-workspaces-daemon-protocol</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The git substrate: the mirror cache, its worktrees and its pushes. Framework
+                     -free like the daemon protocol beside it, so `domain` gets a library and not a
+                     second CDI graph. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-workspaces-gitmirror</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

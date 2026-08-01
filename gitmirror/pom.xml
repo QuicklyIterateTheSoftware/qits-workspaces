@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-workspaces</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The git SUBSTRATE: a local mirror per repository, the worktrees the release flow merges in,
+         and the pushes that are now the only way a ref moves. Nothing about releases, versions,
+         workspaces or rows is here — those stay in `domain`, which calls this through a handful of
+         records and two declared ports.
+
+         WHY IT IS ITS OWN MODULE. This service used to reach into the bare origins qits-artifacts
+         serves, on a shared volume, and write refs there directly. That is what made branch
+         creations, merges and skeleton commits fire no post-receive and produce no CI run. Removing
+         it means every one of those becomes a push — and a push needs somewhere to push FROM, which
+         is the mirror. Kept behind its own module boundary so the same machinery can later move out
+         of this deployable entirely (a mirror daemon, or in-process JGit inside qits-artifacts)
+         without the release flow noticing: the seam is the API in this package, not a call graph.
+
+         FRAMEWORK-FREE, deliberately, in the shape of `workspace-daemon-protocol`: no Quarkus, no
+         CDI, no MicroProfile config, no jackson. It takes its collaborators as constructor
+         arguments, so its tests run offline against throwaway local bares with no container, no
+         database and no augmentation — which is the repo's "a clone of this repo alone builds and
+         tests green" rule holding one module deeper. `domain` owns the one CDI producer that builds
+         it from config. -->
+    <artifactId>qits-workspaces-gitmirror</artifactId>
+    <name>qits-workspaces :: gitmirror</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

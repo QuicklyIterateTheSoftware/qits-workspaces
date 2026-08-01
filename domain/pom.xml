@@ -32,6 +32,12 @@
 
     <dependencies>
         <dependency>
+            <!-- The git substrate. A plain library, so nothing in it is a bean and the one CDI
+                 producer that builds it from config lives here, in `wiring`'s sibling. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-workspaces-gitmirror</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>
