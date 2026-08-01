@@ -338,7 +338,11 @@ public class WorkspaceService {
   }
 
   public List<WorkspaceDto> listWorkspaces(String repoId) {
-    repositories.require(repoId);
+    // The existence check and the default branch are one answer: this call already had to be made,
+    // and mainBranch rides on it. Carrying it into every row is what lets a client tell "Integrate"
+    // from "Release" — only a release may write the default branch — without asking qits-projects
+    // for one string.
+    RepositoryLookup.RepositoryView repository = repositories.require(repoId);
 
     // One refresh for the whole listing, and a failure only costs the ahead/behind numbers: the
     // browser polls this route, so a git host that is briefly away must not 500 the page it is on.
@@ -401,6 +405,7 @@ public class WorkspaceService {
                   wt.workspaceId,
                   wt.parent,
                   branch,
+                  repository.mainBranch(),
                   ab.ahead(),
                   ab.behind(),
                   conflicts,

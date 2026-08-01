@@ -10,6 +10,10 @@ public interface WorkspaceMapper {
 
   @Mapping(source = "parent", target = "parent")
   @Mapping(target = "branch", ignore = true)
+  // The create response is a thin view of the row and has never carried the computed fields; the
+  // repository's default branch is one more of them. The caller reads the full shape from
+  // GET /workspaces/{id} or the listing.
+  @Mapping(target = "repositoryMainBranch", ignore = true)
   @Mapping(target = "ahead", ignore = true)
   @Mapping(target = "behind", ignore = true)
   @Mapping(target = "conflictsWithParent", ignore = true)

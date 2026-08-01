@@ -11,6 +11,13 @@ import java.time.Instant;
  *     repository beside it
  * @param workspaceId the branch-derived label. A display name and a path/container-name segment,
  *     not an identifier: unique only per repository, and reusable once the workspace resolves
+ * @param repositoryMainBranch the default branch of the repository this workspace belongs to. Not
+ *     decoration and not a duplicate of anything here: it is what makes {@code parent} readable.
+ *     Only a release may write the default branch, so a client deciding between "Integrate" and
+ *     "Release" is asking whether {@code parent} equals this — and without it that costs a second
+ *     request to another service for one string. Free here: the listing already resolves the
+ *     repository to check it exists, and this is a field of the answer it already has. {@code null}
+ *     only on the create response, which is a thin view (see {@code WorkspaceMapper})
  * @param ahead commits the workspace's branch has that its parent does not (commits in front)
  * @param behind commits the parent has that the workspace's branch does not (commits it trails by)
  * @param conflictsWithParent whether merging the parent into this branch would hit merge conflicts.
@@ -60,6 +67,7 @@ public record WorkspaceDto(
     String workspaceId,
     String parent,
     String branch,
+    String repositoryMainBranch,
     Integer ahead,
     Integer behind,
     boolean conflictsWithParent,

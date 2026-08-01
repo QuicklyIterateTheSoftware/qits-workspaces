@@ -427,6 +427,8 @@ components:
           type: string
         branch:
           type: string
+        repositoryMainBranch:
+          type: string
         ahead:
           type: integer
           format: int32

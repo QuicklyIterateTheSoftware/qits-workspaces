@@ -647,6 +647,10 @@ public class WorkspaceControllerTest {
         .body("workspace.parent", equalTo("feature"))
         .body("workspace.status", equalTo("ACTIVE"))
         .body("workspace.preamble", equalTo("why this exists"))
+        // The repository's default branch rides along, because "may this be integrated or must it
+        // be released?" is `parent == repositoryMainBranch` and asking another service for that one
+        // string would be a second request per page.
+        .body("workspace.repositoryMainBranch", equalTo("master"))
         // Not a second shape: the status strip reads runtime, daemon and cleanliness off exactly
         // the fields the list already carries, so one client cache holds both.
         .body("workspace", hasKey("runtimeStatus"))
