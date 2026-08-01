@@ -655,6 +655,106 @@ class DaemonControlSocketTest {
     }
   }
 
+  /**
+   * ⚖9. The registry used to <em>evict</em> a command on {@code ENDED}, so the rollup went straight
+   * from a live state to nothing and {@code WorkspaceDto.agentActivity} could never carry the value
+   * at all. That is not cosmetic: the agent-activity bar is ordered by when a workspace's state last
+   * changed precisely so a session that has just stopped sits at the front — it is the one waiting
+   * for the next prompt — and evicting it made that workspace disappear at exactly that moment.
+   */
+  @Test
+  void anEndedSessionStaysInTheRollupInsteadOfVanishing() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
+      hints.clear();
+
+      report(peer, "cmd-1", DaemonProtocol.AgentState.BUSY, "UserPromptSubmit");
+      await(() -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.BUSY)));
+
+      report(peer, "cmd-1", DaemonProtocol.AgentState.ENDED, "SessionEnd");
+      await(
+          () -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.ENDED)));
+      // The flip to ENDED is a change like any other, so the bar hears about it on all three
+      // channels rather than silently losing the row.
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", (Long) null));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, null, (Long) null));
+
+      // A resume writes over the same command's entry — a live report always beats a remembered
+      // one, so the TTL only ever governs a session that stayed finished.
+      report(peer, "cmd-1", DaemonProtocol.AgentState.BUSY, "UserPromptSubmit");
+      await(() -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.BUSY)));
+    }
+  }
+
+  /**
+   * ENDED is the lowest precedence, which is what stops one finished session from mislabelling a
+   * workspace that still has a live conversation in it.
+   */
+  @Test
+  void aWorkspaceReadsEndedOnlyWhenEveryTrackedSessionHas() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
+
+      report(peer, "cmd-a", DaemonProtocol.AgentState.ENDED, "SessionEnd");
+      report(peer, "cmd-b", DaemonProtocol.AgentState.IDLE, "Stop");
+      await(() -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.IDLE)));
+
+      report(peer, "cmd-b", DaemonProtocol.AgentState.ENDED, "SessionEnd");
+      await(
+          () -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.ENDED)));
+    }
+  }
+
+  /**
+   * The other half of "keep it, don't evict it": it has to stop being true eventually, and an open
+   * browser has to be told. Nothing on the detail page polls, so the sweep's hint is the only way
+   * the fade reaches a client — the rollup itself already answers correctly the instant the TTL
+   * passes, which is why the sweep is an announcement rather than the thing that makes it true.
+   *
+   * <p>Driven at a chosen instant rather than by sleeping past the real thirty-minute TTL.
+   */
+  @Test
+  void anEndedSessionExpiresOnTheTtlAndTheExpiryIsAnnounced() throws Exception {
+    try (FakePeer peer = connect()) {
+      await(() -> registry.isDaemonLive(WORKSPACE_ROW_ID));
+
+      report(peer, "cmd-1", DaemonProtocol.AgentState.ENDED, "SessionEnd");
+      await(
+          () -> registry.activityFor(WORKSPACE_ROW_ID).equals(Optional.of(AgentActivityState.ENDED)));
+
+      hints.clear();
+      // Still inside the window: nothing dropped, nothing announced.
+      assertEquals(0, registry.expireEndedSessions(System.currentTimeMillis()));
+      assertEquals(Optional.of(AgentActivityState.ENDED), registry.activityFor(WORKSPACE_ROW_ID));
+      assertEquals(0L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID));
+
+      long pastTheTtl = System.currentTimeMillis() + Duration.ofHours(2).toMillis();
+      assertEquals(1, registry.expireEndedSessions(pastTheTtl));
+      assertTrue(
+          registry.activityFor(WORKSPACE_ROW_ID).isEmpty(),
+          "an expired ENDED falls back to no activity at all");
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, "repo-1", (Long) null));
+      await(() -> hints.has(Topic.AGENT_ACTIVITY, null, (Long) null));
+
+      // Idempotent: the entry is gone, so a second sweep has nothing to drop and stays silent.
+      hints.clear();
+      assertEquals(0, registry.expireEndedSessions(pastTheTtl));
+      assertEquals(0L, hints.count(Topic.AGENT_ACTIVITY, "repo-1", WORKSPACE_ROW_ID));
+    }
+  }
+
+  /** One agent-activity frame, with the fields these tests never vary. */
+  private void report(FakePeer peer, String commandId, String state, String hookEvent) {
+    peer.ws()
+        .writeTextMessage(
+            codec.encode(
+                new AgentActivity(commandId, null, state, hookEvent, null, null, sequence++)));
+  }
+
+  private long sequence = 1L;
+
   @Test
   void disconnectEvictsTheCachedAgentActivity() throws Exception {
     FakePeer peer = connect();

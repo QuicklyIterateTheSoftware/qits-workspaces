@@ -17,6 +17,17 @@ public enum AgentActivityState {
   BUSY,
   /** The agent is blocked on the user (permission prompt / idle input). */
   WAITING,
-  /** The session is over. */
+  /**
+   * The session is over.
+   *
+   * <p><b>The host reports this one, and for a while it could not.</b> The registry used to evict a
+   * command on {@code ENDED}, so the rollup went straight from a live state to nothing — which
+   * silently deleted the workspace at the exact moment it needed the user's next prompt, and that
+   * moment is what the agent-activity bar's ordering exists for. It is kept and expires on a timer
+   * instead ({@code qits.workspace.agent-activity.ended-ttl-ms}).
+   *
+   * <p>Lowest precedence in the rollup: a workspace with one ended session and one still idling has
+   * a live conversation in it, so only an all-ended workspace reads as ended.
+   */
   ENDED
 }

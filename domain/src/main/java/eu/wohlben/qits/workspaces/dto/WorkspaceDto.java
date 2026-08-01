@@ -27,9 +27,14 @@ import java.time.Instant;
  *     socket; {@code null} when unknown — the daemon only reports while the container is RUNNING,
  *     so a STOPPED workspace (or one whose daemon hasn't reported yet) carries no clean/dirty badge
  * @param agentActivity the live coding-agent activity rollup for this workspace
- *     (BUSY/IDLE/WAITING), as last reported by {@code workspace-daemon} hearing the agent's
- *     lifecycle hooks; {@code null} when no tracked agent is running (or the container isn't
- *     RUNNING / none has reported yet) — same RUNNING-only, self-healing lifecycle as {@code clean}
+ *     (BUSY/WAITING/IDLE/ENDED, in that precedence), as last reported by {@code workspace-daemon}
+ *     hearing the agent's lifecycle hooks; {@code null} when no tracked agent is running (or the
+ *     container isn't RUNNING / none has reported yet) — same RUNNING-only, self-healing lifecycle
+ *     as {@code clean}. {@code ENDED} means every tracked session in this workspace has finished
+ *     <em>recently</em>: the host holds it for {@code qits.workspace.agent-activity.ended-ttl-ms}
+ *     and then lets it fall back to {@code null}. It is a real value and not a transient — the
+ *     agent-activity bar sorts on it, because a workspace whose agent just stopped is the one
+ *     waiting for the next prompt
  * @param preamble markdown: the reason/goal authored at creation
  * @param result markdown: the outcome authored at resolution
  * @param resolvedAt when the workspace was resolved (null while ACTIVE)

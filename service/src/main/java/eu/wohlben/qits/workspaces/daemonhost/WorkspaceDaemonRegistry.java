@@ -45,6 +45,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
+import io.quarkus.scheduler.Scheduled;
 import io.quarkus.websockets.next.WebSocketConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -53,6 +54,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -141,14 +143,39 @@ public class WorkspaceDaemonRegistry
   /**
    * Last coding-agent activity each live daemon reported ({@link AgentActivity}), keyed by {@code
    * commandId} (multiple agents can run per workspace). In-memory only — same lifecycle as {@link
-   * #gitClean}: populated while the daemon is connected, evicted on {@link #unregister} (and on an
-   * {@code ENDED} report), re-reported on reconnect. Surfaced as a per-workspace rollup through
-   * {@link WorkspaceAgentActivity#activityFor}.
+   * #gitClean}: populated while the daemon is connected, evicted on {@link #unregister},
+   * re-reported on reconnect. Surfaced as a per-workspace rollup through {@link
+   * WorkspaceAgentActivity#activityFor}.
+   *
+   * <p><b>{@code ENDED} is kept here, not evicted.</b> It used to be dropped the instant it
+   * arrived, which made {@code ENDED} a state the host could never report — and that is precisely
+   * the state the agent-activity bar is ordered around: a session that has just stopped belongs at
+   * the front, because it is the workspace waiting on your next prompt. Evicting it made that
+   * workspace vanish at exactly the moment it mattered most. It expires on {@link #endedTtlMs}
+   * instead, so the bar survives a page reload without keeping yesterday's finished run on screen.
    */
   private final ConcurrentHashMap<String, ActivityEntry> agentActivity = new ConcurrentHashMap<>();
 
-  /** One tracked agent command's activity, plus the workspace it belongs to (for the rollup). */
-  private record ActivityEntry(Long workspaceId, AgentActivityState state) {}
+  /**
+   * One tracked agent command's activity, plus the workspace it belongs to (for the rollup) and
+   * when it was recorded (only {@code ENDED} expires, but every entry carries the stamp so the
+   * check needs no second map).
+   */
+  private record ActivityEntry(Long workspaceId, AgentActivityState state, long recordedAtMillis) {}
+
+  /**
+   * How long an {@code ENDED} session stays in the rollup. Thirty minutes: long enough to survive a
+   * page reload, a tab switch and a coffee break — which is the whole point of keeping the state at
+   * all, since the alternative (deriving "recently ended" client-side from a transition to null)
+   * loses it on exactly the reload someone does after stepping away. Short enough that a workspace
+   * whose agent finished this morning is not still claiming a slot in the bar this afternoon.
+   *
+   * <p>A live report always wins: a resume writes {@code BUSY} over the {@code ENDED} entry under
+   * the same {@code commandId}, and a fresh run writes a new key. So the TTL only ever governs how
+   * long a session that stayed finished is still worth mentioning.
+   */
+  @ConfigProperty(name = "qits.workspace.agent-activity.ended-ttl-ms", defaultValue = "1800000")
+  long endedTtlMs;
 
   /** How long a {@link #readConfig} waits for the live daemon's {@link ConfigView} reply. */
   @ConfigProperty(name = "qits.workspace.config.describe-timeout-ms", defaultValue = "10000")
@@ -408,14 +435,15 @@ public class WorkspaceDaemonRegistry
    * unknown/stopped command) so an escape can't close the control socket, mirroring {@link
    * PendingBootstrap#dispatch}.
    *
-   * <p>Second sink: the in-memory rollup cache. The state is stored per {@code commandId} ({@code
-   * ENDED} evicts it), and a {@link WorkspaceChangeHint.Topic#AGENT_ACTIVITY} hint is fired only
-   * when the workspace's rollup actually flips — so a same-state re-report (reconnect replay)
-   * doesn't churn the UI. The flip fires on three channels at once, one per route that renders the
-   * agent-activity bar: the workspace channel (the open workspace detail), the repository channel
-   * {@code (repoId, null)} (the repository detail, mirroring {@code GIT_STATUS}), and the global
-   * channel {@code (null, null)} (the project detail, which spans repositories and holds ONE
-   * connection instead of one per repo).
+   * <p>Second sink: the in-memory rollup cache. The state is stored per {@code commandId} —
+   * <b>every state, {@code ENDED} included</b>; see {@link #agentActivity} for why that one used to
+   * be thrown away and why it must not be. A {@link WorkspaceChangeHint.Topic#AGENT_ACTIVITY} hint
+   * is fired only when the workspace's rollup actually flips, so a same-state re-report (reconnect
+   * replay) doesn't churn the UI. The flip fires on three channels at once, one per route that
+   * renders the agent-activity bar: the workspace channel (the open workspace detail), the
+   * repository channel {@code (repoId, null)} (the repository detail, mirroring {@code
+   * GIT_STATUS}), and the global channel {@code (null, null)} (the project detail, which spans
+   * repositories and holds ONE connection instead of one per repo).
    */
   private void onAgentActivity(
       Long workspaceId, DaemonConnection client, AgentActivity activity) {
@@ -438,27 +466,53 @@ public class WorkspaceDaemonRegistry
     if (state == null) {
       return; // unknown state string — lineage above still ran; nothing to cache/flip
     }
-    AgentActivityState before = rollup(workspaceId);
-    if (state == AgentActivityState.ENDED) {
-      agentActivity.remove(activity.commandId());
-    } else {
-      agentActivity.put(activity.commandId(), new ActivityEntry(workspaceId, state));
-    }
-    if (before != rollup(workspaceId)) {
-      changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
-      changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
-      changePublisher.fire(null, null, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+    long now = System.currentTimeMillis();
+    AgentActivityState before = rollup(workspaceId, now);
+    agentActivity.put(activity.commandId(), new ActivityEntry(workspaceId, state, now));
+    if (before != rollup(workspaceId, now)) {
+      fireActivityFlip(repoId, workspaceId);
     }
   }
 
   /**
-   * The per-workspace rollup: BUSY &gt; WAITING &gt; IDLE across its tracked commands; else null.
+   * Announce an agent-activity rollup change on all three channels that render the bar. Split out
+   * because the {@link #expireEndedSessions} sweep has to fire exactly the same set — a state that
+   * changed because a timer fired is no less a change than one a daemon reported.
+   */
+  private void fireActivityFlip(String repoId, Long workspaceId) {
+    changePublisher.fire(repoId, workspaceId, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+    changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+    changePublisher.fire(null, null, WorkspaceChangeHint.Topic.AGENT_ACTIVITY);
+  }
+
+  /**
+   * The per-workspace rollup: BUSY &gt; WAITING &gt; IDLE &gt; ENDED across its tracked commands;
+   * else null.
+   *
+   * <p>{@code ENDED} sits at the bottom on purpose. A workspace with one finished session and one
+   * still idling has a live conversation in it, so it reads as idle; only when <em>every</em>
+   * tracked command has ended does the workspace itself count as ended, which is the state the bar
+   * sorts to the front.
+   *
+   * <p><b>Expiry is evaluated here, on every read</b>, rather than only in the sweep below. That
+   * makes the answer correct the instant the TTL passes regardless of when the timer next runs — the
+   * sweep exists to <em>announce</em> the change, not to be the thing that makes it true.
    */
   private AgentActivityState rollup(Long workspaceId) {
+    return rollup(workspaceId, System.currentTimeMillis());
+  }
+
+  /**
+   * {@link #rollup(Long)} as of a given instant. The instant is a parameter so the sweep below can
+   * compare one before/after pair taken at the same moment — and so a test can travel past the TTL
+   * without a fake clock, a sleep, or a second application boot for one config value.
+   */
+  private AgentActivityState rollup(Long workspaceId, long now) {
     boolean waiting = false;
     boolean idle = false;
+    boolean ended = false;
     for (ActivityEntry entry : agentActivity.values()) {
-      if (!entry.workspaceId().equals(workspaceId)) {
+      if (!entry.workspaceId().equals(workspaceId) || hasExpired(entry, now)) {
         continue;
       }
       switch (entry.state()) {
@@ -467,15 +521,74 @@ public class WorkspaceDaemonRegistry
         }
         case WAITING -> waiting = true;
         case IDLE -> idle = true;
-        case ENDED -> {
-          /* never stored (ENDED evicts), but be exhaustive */
-        }
+        case ENDED -> ended = true;
       }
     }
     if (waiting) {
       return AgentActivityState.WAITING;
     }
-    return idle ? AgentActivityState.IDLE : null;
+    if (idle) {
+      return AgentActivityState.IDLE;
+    }
+    return ended ? AgentActivityState.ENDED : null;
+  }
+
+  /** Only {@code ENDED} ages out; a live state is current until the daemon says otherwise. */
+  private boolean hasExpired(ActivityEntry entry, long now) {
+    return entry.state() == AgentActivityState.ENDED
+        && now - entry.recordedAtMillis() >= endedTtlMs;
+  }
+
+  /**
+   * Drop timed-out {@code ENDED} entries and tell the open views about it.
+   *
+   * <p>Without this the bar would keep showing "Ended" until something unrelated nudged the client:
+   * {@link #rollup} already answers correctly, but nothing on this page polls, so an SSE hint is the
+   * only way a change reaches a browser. The cadence is a floor on how late the fade is, not the
+   * TTL — a sweep that runs a minute after the deadline still announces a state that became true at
+   * the deadline.
+   *
+   * <p>The work is in the {@code now}-taking overload so a test can drive it past the TTL directly
+   * rather than sleeping for one or booting a second application to shorten it.
+   */
+  @Scheduled(
+      every = "{qits.workspace.agent-activity.sweep-interval}",
+      concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+  void sweepEndedSessions() {
+    expireEndedSessions(System.currentTimeMillis());
+  }
+
+  /** {@link #sweepEndedSessions()} as of a given instant; returns how many entries it dropped. */
+  int expireEndedSessions(long now) {
+    // Snapshot the rollup of every workspace that holds an expiring entry BEFORE removing anything,
+    // so the comparison afterwards is against what a client was last told rather than against a
+    // half-swept map.
+    // A HashMap and containsKey rather than computeIfAbsent: a rollup of null is a real answer
+    // ("nothing tracked here") and computeIfAbsent would treat it as "not computed yet", so a
+    // workspace whose only entry is the expiring one would be skipped and its entry never removed.
+    Map<Long, AgentActivityState> before = new HashMap<>();
+    for (ActivityEntry entry : agentActivity.values()) {
+      if (hasExpired(entry, now) && !before.containsKey(entry.workspaceId())) {
+        before.put(entry.workspaceId(), rollup(entry.workspaceId(), now));
+      }
+    }
+    if (before.isEmpty()) {
+      return 0;
+    }
+    int removed = 0;
+    for (Map.Entry<String, ActivityEntry> tracked : agentActivity.entrySet()) {
+      if (hasExpired(tracked.getValue(), now)
+          && agentActivity.remove(tracked.getKey(), tracked.getValue())) {
+        removed++;
+      }
+    }
+    for (Map.Entry<Long, AgentActivityState> workspace : before.entrySet()) {
+      if (workspace.getValue() != rollup(workspace.getKey(), now)) {
+        DaemonConnection client = clients.get(workspace.getKey());
+        fireActivityFlip(client != null ? client.repoId : null, workspace.getKey());
+      }
+    }
+    return removed;
   }
 
   private static AgentActivityState parseState(String state) {

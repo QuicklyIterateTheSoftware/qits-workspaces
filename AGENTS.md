@@ -263,6 +263,31 @@ on the IO thread, so a lookup in one throws `BlockingOperationNotAllowedExceptio
 the method is `@Blocking` — see `WorkspaceEventsController`. Ordinary JAX-RS methods are dispatched
 to worker threads already and need nothing.
 
+## The agent-activity rollup, and why `ENDED` is kept
+
+`WorkspaceDaemonRegistry` caches each daemon's agent-activity reports per `commandId` and rolls them
+up per workspace: **BUSY > WAITING > IDLE > ENDED**, else null. `WorkspaceDto.agentActivity` is that
+rollup, and it is RUNNING-only and self-healing like `clean` — a disconnect drops the whole
+workspace's entries and a reconnect re-reports them.
+
+`ENDED` used to be **evicted on arrival**, which meant the host could never report it. That is not a
+missing field, it is a deleted workspace: the agent-activity bar is ordered by when a workspace's
+state last changed, so a session that has just stopped belongs at the front — it is the one waiting
+for your next prompt — and eviction made it vanish at precisely that moment. It is kept now and
+expires on `qits.workspace.agent-activity.ended-ttl-ms` (30 min: survives a reload and a coffee
+break, does not still claim a slot hours later).
+
+Two properties worth not simplifying away:
+
+- **The TTL is evaluated on every read**, not only by the sweep, so the rollup is correct the instant
+  it passes. `sweepEndedSessions` exists to *announce* the expiry — nothing on the detail page polls,
+  so an `AGENT_ACTIVITY` hint is the only way a fade reaches a browser.
+- **A live report always wins.** A resume overwrites the same `commandId`'s entry, so the TTL only
+  ever governs a session that stayed finished.
+
+`ENDED` is lowest precedence deliberately: a workspace with one finished session and one still idling
+has a live conversation in it.
+
 ## The vendored protocol module
 
 `workspace-daemon-protocol/` is a copy of the daemon repo's module, same java package, different
