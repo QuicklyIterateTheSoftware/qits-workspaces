@@ -69,6 +69,40 @@ public class WorkspaceController {
     return new ListWorkspacesRequest.Response(entries);
   }
 
+  public static record GetWorkspaceRequest() {
+    public record Response(WorkspaceDto workspace) {}
+  }
+
+  /**
+   * One workspace, by its own id — the live view the collection above serves per row, without
+   * needing to know the repository first.
+   *
+   * <p>The repository was never an identity here, only a filter, so a detail page can be opened
+   * from a bare id. It is <em>not</em> a second shape: this is the same {@link WorkspaceDto} the
+   * list and four of the mutations already return, so a client's row cache and its detail cache
+   * hold one type. {@code /history/{id}} is the other read on an id and answers a different
+   * question — the narrative record, which survives resolution and carries no branch, runtime or
+   * daemon fields.
+   *
+   * <p>ACTIVE only, and 404 otherwise. A resolved workspace has no container, no daemon and no
+   * branch to be ahead of anything, so serving one here would answer with a row whose live half is
+   * uniformly null; {@code /history/{id}} is where it is readable, and the client routes there.
+   *
+   * <p>Costs the repository's whole listing internally (ahead/behind is computed per workspace
+   * against the mirror), which is why it is a read and not a poll — the workspace's SSE channel is
+   * what says when to call it again.
+   */
+  @GET
+  @Path("/{id}")
+  @APIResponse(responseCode = "200", description = "The workspace.")
+  @APIResponse(
+      responseCode = "404",
+      description = "No such ACTIVE workspace.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  public GetWorkspaceRequest.Response get(@PathParam("id") Long id) {
+    return new GetWorkspaceRequest.Response(workspaceService.getWorkspace(id));
+  }
+
   /**
    * {@code repositoryId} rides in the body rather than the path or a query parameter: a create
    * carries its scope in the payload, and the repository is not a filter on a POST.

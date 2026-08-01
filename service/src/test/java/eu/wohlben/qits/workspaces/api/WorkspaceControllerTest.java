@@ -619,7 +619,69 @@ public class WorkspaceControllerTest {
     return "/workspaces/api/workspaces/" + workspaceIds.of(repoId, "master") + "/detection";
   }
 
+  /**
+   * The single-workspace read: the same row the collection serves, addressable without knowing the
+   * repository. That is the whole point — the detail page opens from a bare id, and the repository
+   * was only ever a filter here.
+   */
+  @Test
+  public void testGetWorkspaceServesTheSameRowAsTheCollection() {
+    String repoId = createProjectAndRepository();
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new WorkspaceController.CreateWorkspaceRequest(
+                repoId, "detail-01", "feature", "detail-work", "why this exists"))
+        .post("/workspaces/api/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+    Long id = workspaceIds.of(repoId, "detail-01");
 
+    given()
+        .get("/workspaces/api/workspaces/" + id)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("workspace.id", equalTo(id.intValue()))
+        .body("workspace.workspaceId", equalTo("detail-01"))
+        .body("workspace.branch", equalTo("detail-work"))
+        .body("workspace.parent", equalTo("feature"))
+        .body("workspace.status", equalTo("ACTIVE"))
+        .body("workspace.preamble", equalTo("why this exists"))
+        // Not a second shape: the status strip reads runtime, daemon and cleanliness off exactly
+        // the fields the list already carries, so one client cache holds both.
+        .body("workspace", hasKey("runtimeStatus"))
+        .body("workspace", hasKey("daemonVersion"))
+        .body("workspace", hasKey("agentActivity"))
+        .body("workspace", hasKey("clean"));
+  }
 
+  /**
+   * A resolved workspace is 404 here, deliberately. It has no container, no daemon and no branch to
+   * be ahead of anything, so this read would answer with a row whose live half is uniformly null;
+   * {@code /history/{id}} is where the narrative record stays readable, and the client routes there
+   * instead of rendering half a detail view.
+   */
+  @Test
+  public void testGetWorkspaceIs404ForAResolvedOneAndForAnUnknownId() {
+    String repoId = createProjectAndRepository();
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new WorkspaceController.CreateWorkspaceRequest(
+                repoId, "detail-02", "feature", "detail-gone", null))
+        .post("/workspaces/api/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+    Long id = workspaceIds.of(repoId, "detail-02");
 
+    given().get("/workspaces/api/workspaces/" + id).then().statusCode(200);
+
+    workspaceService.discardWorkspace(id, null);
+
+    given().get("/workspaces/api/workspaces/" + id).then().statusCode(404);
+    // ...and the history record still answers, which is the route the client falls back to.
+    given().get("/workspaces/api/history/" + id).then().statusCode(200);
+
+    given().get("/workspaces/api/workspaces/999999").then().statusCode(404);
+  }
 }

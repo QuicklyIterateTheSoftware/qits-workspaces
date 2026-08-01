@@ -23,9 +23,10 @@ import java.util.List;
  * ActivateRequestContext} supplies the request context those threads lack (the {@code
  * CommandLifecycleService} precedent).
  *
- * <p>{@link #listForWorkspace} currently has no caller: the host {@code /bootstrap-commands} routes
- * that read it were deleted, and nothing replaced them. See {@link BootstrapRun}'s javadoc for why
- * the table is kept anyway and what would have to happen for it to be worth keeping.
+ * <p>{@link #listForWorkspace} is read by {@code WorkspaceBootstrapRunController} ({@code GET
+ * /workspaces/{id}/bootstrap-runs}) — the reader this table went a release without. See {@link
+ * BootstrapRun}'s javadoc for why that is a read of host state rather than the deleted forwarding
+ * controller coming back.
  */
 @ApplicationScoped
 public class BootstrapRunService {

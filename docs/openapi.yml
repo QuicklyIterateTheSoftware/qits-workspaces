@@ -4,6 +4,24 @@
 openapi: 3.1.0
 components:
   schemas:
+    AddAttachmentRequest:
+      type: object
+      required:
+      - label
+      - source
+      - dataBase64
+      properties:
+        mimeType:
+          type: string
+        label:
+          type: string
+          pattern: \S
+        source:
+          type: string
+          pattern: \S
+        dataBase64:
+          type: string
+          pattern: \S
     AgentActivityState:
       type: string
       enum:
@@ -29,6 +47,28 @@ components:
           items:
             type: string
           description: The conflicted paths. Present only for CONFLICT and MERGE_CONFLICT.
+    BootstrapOutcome:
+      type: string
+      enum:
+      - SKIPPED
+      - SUCCEEDED
+      - FAILED
+    BootstrapRunDto:
+      type: object
+      properties:
+        bootstrapCommandId:
+          type: string
+        commandName:
+          type: string
+        outcome:
+          $ref: "#/components/schemas/BootstrapOutcome"
+        commandId:
+          type: string
+        exitCode:
+          type: integer
+          format: int32
+        ranAt:
+          $ref: "#/components/schemas/Instant"
     CleanupBranchRequest:
       type: object
       required:
@@ -105,6 +145,11 @@ components:
       properties:
         target:
           type: string
+    PromptAttachmentSource:
+      type: string
+      enum:
+      - SKETCH
+      - PASTE
     Reason:
       type: string
       enum:
@@ -162,33 +207,75 @@ components:
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
+        technicalProcessId:
+          type: string
     Response11:
       type: object
       properties:
-        technicalProcessId:
-          type: string
+        success:
+          type: boolean
     Response12:
       type: object
       properties:
         workspace:
-          $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
+          $ref: "#/components/schemas/WorkspaceDto"
     Response13:
+      type: object
+      properties:
+        technicalProcessId:
+          type: string
+    Response14:
+      type: object
+      properties:
+        workspace:
+          $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
+    Response15:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry1"
-    Response14:
+    Response16:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
+    Response17:
+      type: object
+      properties:
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspacePromptAttachmentDataDto"
+    Response18:
+      type: object
+      properties:
+        id:
+          type: string
+        mimeType:
+          type: string
+        label:
+          type: string
+        source:
+          $ref: "#/components/schemas/PromptAttachmentSource"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    Response19:
+      type: object
+      properties:
+        draft:
+          $ref: "#/components/schemas/WorkspacePromptDraftDto"
     Response2:
       type: object
       properties:
         success:
           type: boolean
+    Response20:
+      type: object
+      properties:
+        draft:
+          $ref: "#/components/schemas/WorkspacePromptDraftDto"
     Response3:
       type: object
       properties:
@@ -199,11 +286,18 @@ components:
     Response4:
       type: object
       properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/BootstrapRunDto"
+    Response5:
+      type: object
+      properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
         technicalProcessId:
           type: string
-    Response5:
+    Response6:
       type: object
       properties:
         commitHash:
@@ -212,14 +306,14 @@ components:
           type: boolean
         output:
           type: string
-    Response6:
+    Response7:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry"
-    Response7:
+    Response8:
       type: object
       properties:
         commitSha:
@@ -228,18 +322,20 @@ components:
           type: string
         targetBranch:
           type: string
-    Response8:
+    Response9:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
-        technicalProcessId:
-          type: string
-    Response9:
+    SavePromptDraftRequest:
       type: object
+      required:
+      - content
       properties:
-        success:
-          type: boolean
+        content:
+          type: string
+        serializedPrompt:
+          type: string
     ServiceEventDto:
       type: object
       properties:
@@ -432,6 +528,40 @@ components:
           $ref: "#/components/schemas/Instant"
         resolvedAt:
           $ref: "#/components/schemas/Instant"
+    WorkspacePromptAttachmentDataDto:
+      type: object
+      properties:
+        id:
+          type: string
+        mimeType:
+          type: string
+        label:
+          type: string
+        source:
+          $ref: "#/components/schemas/PromptAttachmentSource"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+        dataBase64:
+          type: string
+    WorkspacePromptDraftDto:
+      type: object
+      properties:
+        content:
+          type: string
+        serializedPrompt:
+          type: string
+        promptVersion:
+          type: integer
+          format: int64
+        lastRunAt:
+          $ref: "#/components/schemas/Instant"
+        lastRunPromptVersion:
+          type: integer
+          format: int64
+        lastRunCommandId:
+          type: string
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
     WorkspaceRuntimeStatus:
       type: string
       enum:
@@ -581,7 +711,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response13"
+                $ref: "#/components/schemas/Response15"
       summary: List
       tags:
       - Workspace History Controller
@@ -606,7 +736,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response12"
+                $ref: "#/components/schemas/Response14"
       summary: Update
       tags:
       - Workspace History Controller
@@ -624,7 +754,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response14"
+                $ref: "#/components/schemas/Response16"
       summary: Get
       tags:
       - Workspace History Controller
@@ -689,7 +819,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response6"
+                $ref: "#/components/schemas/Response7"
       summary: List
       tags:
       - Workspace Controller
@@ -706,10 +836,35 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response10"
+                $ref: "#/components/schemas/Response12"
         "400":
           description: Bad Request
       summary: Create
+      tags:
+      - Workspace Controller
+  /workspaces/api/workspaces/{id}:
+    get:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: The workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response9"
+        "404":
+          description: No such ACTIVE workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Get
       tags:
       - Workspace Controller
   /workspaces/api/workspaces/{id}/active-process:
@@ -727,10 +882,35 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response11"
+                $ref: "#/components/schemas/Response13"
       summary: Active Process
       tags:
       - Workspace Controller
+  /workspaces/api/workspaces/{id}/bootstrap-runs:
+    get:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: The last run of each bootstrap step.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response4"
+        "404":
+          description: No such ACTIVE workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: List
+      tags:
+      - Workspace Bootstrap Run Controller
   /workspaces/api/workspaces/{id}/delete-container:
     post:
       parameters:
@@ -771,7 +951,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response9"
+                $ref: "#/components/schemas/Response11"
         "400":
           description: Bad Request
       summary: Discard
@@ -792,7 +972,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response8"
+                $ref: "#/components/schemas/Response10"
       summary: Ensure Container
       tags:
       - Workspace Controller
@@ -817,7 +997,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response7"
+                $ref: "#/components/schemas/Response8"
         "400":
           description: "No summary, an oversized one, or a workspace with no branch\
             \ to integrate."
@@ -863,7 +1043,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response5"
+                $ref: "#/components/schemas/Response6"
         "409":
           description: The target is the repository's default branch. Use /integrate
             or /release.
@@ -882,6 +1062,186 @@ paths:
       summary: Merge
       tags:
       - Workspace Controller
+  /workspaces/api/workspaces/{id}/prompt-attachments:
+    get:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: "The attachments, oldest first."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response17"
+        "404":
+          description: No such ACTIVE workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: List
+      tags:
+      - Workspace Prompt Attachment Controller
+    post:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddAttachmentRequest"
+        required: true
+      responses:
+        "201":
+          description: Attached; the row without its bytes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response18"
+        "400":
+          description: "Not valid base64, not a PNG or JPEG, or an unknown source."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such ACTIVE workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "413":
+          description: The image exceeds the configured per-image byte cap.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Add
+      tags:
+      - Workspace Prompt Attachment Controller
+  /workspaces/api/workspaces/{id}/prompt-attachments/{attachmentId}:
+    delete:
+      parameters:
+      - name: attachmentId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "204":
+          description: Removed.
+        "404":
+          description: "No such ACTIVE workspace, or no such attachment on it."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Delete
+      tags:
+      - Workspace Prompt Attachment Controller
+  /workspaces/api/workspaces/{id}/prompt-draft:
+    put:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SavePromptDraftRequest"
+        required: true
+      responses:
+        "200":
+          description: "The persisted draft, with its fresh updatedAt."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response19"
+        "400":
+          description: The content is not a well-formed JSON document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such ACTIVE workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "413":
+          description: The draft exceeds the configured byte cap.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Save
+      tags:
+      - Workspace Prompt Draft Controller
+    get:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: The saved draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response20"
+        "404":
+          description: "No such ACTIVE workspace, or it has no saved draft."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Get
+      tags:
+      - Workspace Prompt Draft Controller
+    delete:
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "204":
+          description: There is no draft for this workspace.
+        "404":
+          description: No such ACTIVE workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Delete
+      tags:
+      - Workspace Prompt Draft Controller
   /workspaces/api/workspaces/{id}/recreate-container:
     post:
       parameters:
@@ -897,7 +1257,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response4"
+                $ref: "#/components/schemas/Response5"
       summary: Recreate Container
       tags:
       - Workspace Controller

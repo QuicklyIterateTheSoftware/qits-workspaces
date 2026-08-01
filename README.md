@@ -267,16 +267,19 @@ agents, telemetry and feature flows.
 inside the container and the host only forwarded, which is the same defect twice and the last two
 capabilities still shaped that way — everything else took its addressing into the daemon's own HTTP
 API when its execution moved. `WorkspaceServiceController` and `WorkspaceBootstrapController` are
-deleted; the daemon's `WorkspaceApi` is where the endpoints belong, once
-`migration-plan.md` §9 item 16 gives it a gateway route and an API token.
+deleted; the daemon's `WorkspaceApi` is where the endpoints belong, and it has them — reached
+through `ContainerProxyRoute`, which is the only address a daemon has and deliberately not a gateway
+route (one process per container has none to configure).
 
 **What was removed is the externally addressable surface, not the capability.** The
 provision → bootstrap → services sequence is host-orchestrated and untouched: `WorkspaceBootstrapRunner`
 still runs the chain on `WorkspaceContainerStarted` and fires `ReadyForServices`, `ServiceLifecycleCoupler`
 still auto-starts services on it, and `ServiceProxyRoute` still reads `ServiceSupervisor` state to
 resolve a port. Both host projections stay too — `service_event` with its SSE feed, and
-`workspace_bootstrap_run`, which as a result now has **no reader**; `BootstrapRun`'s javadoc records
-that and what to do about it.
+`workspace_bootstrap_run`, which spent a release with **no reader** and now has one:
+`GET /workspaces/api/workspaces/{id}/bootstrap-runs`. That is a read of a host table, not the
+forwarding controller returning — the run verbs stay on the daemon, and a client joins the two on
+`bootstrapCommandId`.
 
 Still host-side but *should* follow the file/detection work into the daemon: `containerGit` and its
 callers (`fast-forward`, `update-from-parent`, `pushBranch`, `isFullyPushed`) still shell git into

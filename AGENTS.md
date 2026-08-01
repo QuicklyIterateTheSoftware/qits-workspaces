@@ -238,11 +238,22 @@ the addressability, not the capability. **Both are now re-exposed on the daemon'
 /bootstrap-commands/[{name}/]run`) and reachable through `ContainerProxyRoute` — do not add host
 routes back — that is `migration-plan.md` §9 item 16, now closed.
 
-One consequence, recorded so it is not rediscovered: **`workspace_bootstrap_run` now has no
-reader.** `WorkspaceBootstrapRunner` writes it and nothing queries it — `WorkspaceHistoryService`
-does not. The table stays (dropping it is a data migration), but durable history nobody can query is
-not history; the workspace history surface is the obvious home for a reader. `BootstrapRun`'s
-javadoc carries the full note.
+**`workspace_bootstrap_run` spent a release with no reader and now has one**:
+`GET /workspaces/api/workspaces/{id}/bootstrap-runs` (`WorkspaceBootstrapRunController`). That is
+not the deleted controller returning — it reads a **host** table, while the run verbs stay on the
+daemon. Host-owned state gets a host route; nothing forwards. The client joins it against the
+daemon's declared `GET /bootstrap-commands` on `bootstrapCommandId`. `BootstrapRun`'s javadoc
+carries the full note.
+
+Three more host-owned surfaces landed on the same rule, all plain JAX-RS under `qits.rest.path`:
+
+- `GET /workspaces/api/workspaces/{id}` — the single-workspace read. The same `WorkspaceDto` the
+  collection serves, so a detail page opens from a bare id; ACTIVE only, 404 for a resolved one
+  (whose live half would be uniformly null — `history/{id}` is where that record stays readable).
+- `GET`/`PUT`/`DELETE /workspaces/api/workspaces/{id}/prompt-draft` — the composition the next agent
+  run is written in. Database rows, no container, so they work while the workspace is STOPPED.
+- `GET`/`POST`/`DELETE /workspaces/api/workspaces/{id}/prompt-attachments[/{attachmentId}]` — its
+  images, on their own SSE topic so a debounced text autosave does not re-download every picture.
 
 Still keyed on the label, deliberately: `service_event.workspace_id` — diagnostic history that
 outlives the row, see `V2`'s header.
