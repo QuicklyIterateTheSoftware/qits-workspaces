@@ -1432,6 +1432,82 @@ public class WorkspaceService {
   }
 
   /**
+   * The same release, keyed by <b>branch name</b> instead of by a workspace row: merge {@code
+   * branch} into the repository's default branch, stamped, as one pushed commit, with a {@code
+   * SoftwareRelease} published.
+   *
+   * <p><b>A resolver, not a second flow.</b> {@link ReleaseIntegrator} is keyed by (repository,
+   * source branch) and by nothing else — the worktree name included — so everything below the
+   * endpoint is literally the same method the workspace-keyed door calls. What this adds is the two
+   * things a branch name does not carry: which workspace, if any, claims it, and who deletes it
+   * afterwards.
+   *
+   * <p><b>A branch a workspace claims is that workspace's release.</b> The call is forwarded to
+   * {@link #releaseWorkspace}, so the row resolves to {@code INTEGRATED}, the container and the
+   * volume go, and the branch is deleted — the terminal state the workspace-keyed door leaves. The
+   * alternative (releasing the ref and walking away) would strand an ACTIVE workspace on a branch
+   * that just merged and no longer exists.
+   *
+   * <p>The caller is a pipeline step, not a person: a maintenance branch is force-pushed by a build
+   * container, so no workspace row exists or should exist for it. That is the whole reason this door
+   * is here — see {@code BranchController}'s keying rule.
+   *
+   * @throws NotFoundException when the origin has no such branch
+   * @throws BadRequestException for the default branch itself, which cannot be released into itself
+   * @throws IntegrateConflictException for every refusal a caller can act on
+   */
+  public ReleaseResult releaseBranch(String repoId, String branch, String summary) {
+    var repo = repositories.require(repoId);
+    // Blank or dash-leading names are rejected before git sees them, so a value like "-D" cannot be
+    // smuggled in as a flag. Same guard, same reason, as mergeBranch's.
+    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
+      throw new BadRequestException("Invalid branch: " + branch);
+    }
+    if (summary == null || summary.isBlank()) {
+      throw new BadRequestException("A release needs a summary for its commit");
+    }
+    String mainBranch = defaultMainBranch(repo);
+    if (branch.equals(mainBranch)) {
+      throw new BadRequestException(
+          "'"
+              + branch
+              + "' is the repository's default branch, which is what a release lands on — there is"
+              + " nothing to release it into.");
+    }
+
+    Workspace claimed =
+        QuarkusTransaction.requiringNew().call(() -> findWorkspaceByBranch(repoId, branch));
+    if (claimed != null) {
+      return releaseWorkspace(claimed.id, summary);
+    }
+
+    if (!branchExists(repoId, branch)) {
+      throw new NotFoundException("Branch '" + branch + "' not found in repository " + repoId);
+    }
+
+    ReleaseIntegrator.Landed landed =
+        landOnBranch(repo, branch, mainBranch, summary, ReleaseIntegrator.Mode.RELEASE);
+
+    QuarkusTransaction.requiringNew().run(() -> notifyIncomingMerge(repoId, mainBranch));
+    // The work is in the default branch, so the source is spent. Matching the workspace path's
+    // cleanup: it leaves no stale ref claiming something is still pending, and the next
+    // force-push of a maintenance branch is then a create, which the git host's hook allows.
+    deleteLandedBranch(repoId, branch);
+
+    return new ReleaseResult(landed.version(), landed.commitSha(), landed.branch());
+  }
+
+  /** Best-effort, as in {@code doDiscard}: the release is in and a surviving ref must not undo it. */
+  private void deleteLandedBranch(String repoId, String branch) {
+    Path originPath = Path.of(dataDir, repoId, "origin");
+    try {
+      git.exec(originPath.toFile(), "git", "branch", "-D", "--", branch);
+    } catch (Exception e) {
+      LOG.warnf(e, "failed to delete released branch '%s' of %s", branch, repoId);
+    }
+  }
+
+  /**
    * The shared body of {@link #releaseWorkspace} and {@link #integrateWorkspace}: the guards, the
    * lease, the git flow, the announcement and the resolution. Only the target and the mode differ,
    * and both are decided in the first ten lines.
@@ -1479,25 +1555,7 @@ public class WorkspaceService {
     // behind. Same guard the merge endpoints open with, for the same reason.
     requireSyncedSourceForIntegration(repoId, workspace);
 
-    String leaseToken = acquireIntegrateLease(repoId);
-
-    ReleaseIntegrator.Landed landed;
-    try {
-      landed =
-          integrator.land(
-              new ReleaseIntegrator.Run(repoId, source, target, summary, mode));
-    } finally {
-      processRegistry.releaseRepository(repoId, leaseToken);
-    }
-
-    // The SoftwareRelease seam, and the whole of it: one call, immediately after the push, with
-    // everything the publisher needs. Deliberately before the row work below — the push has already
-    // happened and cannot be taken back, so an announcement conditional on the resolution committing
-    // would be silent about a release that really did occur. A plain integrate announces nothing,
-    // because a plain integrate released nothing.
-    if (release) {
-      announceRelease(repo, landed);
-    }
+    ReleaseIntegrator.Landed landed = landOnBranch(repo, source, target, summary, mode);
 
     String subject =
         release
@@ -1521,6 +1579,36 @@ public class WorkspaceService {
                   target,
                   landed.commitSha());
             });
+    return landed;
+  }
+
+  /**
+   * The git half, under the repository lease, with the announcement that must outlive a failed
+   * transaction — everything both doors share once they know their source, their target and their
+   * mode.
+   *
+   * <p>The announcement sits here rather than with the row work, and deliberately: the push has
+   * already happened and cannot be taken back, so a statement conditional on the caller's later
+   * transaction committing would be silent about a release that really did occur. A plain integrate
+   * announces nothing, because a plain integrate released nothing.
+   */
+  private ReleaseIntegrator.Landed landOnBranch(
+      RepositoryLookup.RepositoryView repo,
+      String source,
+      String target,
+      String summary,
+      ReleaseIntegrator.Mode mode) {
+    String repoId = repo.id();
+    String leaseToken = acquireIntegrateLease(repoId);
+    ReleaseIntegrator.Landed landed;
+    try {
+      landed = integrator.land(new ReleaseIntegrator.Run(repoId, source, target, summary, mode));
+    } finally {
+      processRegistry.releaseRepository(repoId, leaseToken);
+    }
+    if (mode == ReleaseIntegrator.Mode.RELEASE) {
+      announceRelease(repo, landed);
+    }
     return landed;
   }
 

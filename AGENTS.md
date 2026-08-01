@@ -304,8 +304,32 @@ what makes "integrate is as safe as release" a fact instead of a claim. The flow
 **(repository, source branch)**, worktree name included, so a branch-keyed sibling endpoint is a thin
 resolver over the same method rather than a second copy.
 
-`WorkspaceService.landWorkspace` owns the row, the lease, the announcement and the resolution; the
-two public methods are ten lines each and differ only in the target and the mode.
+`WorkspaceService.landOnBranch` is that shared middle — the lease, `land`, the announcement;
+`landWorkspace` wraps it with the workspace's guards and its resolution, and the two public methods
+are ten lines each and differ only in the target and the mode.
+
+## The third spelling: releasing a branch by name
+
+**`POST /workspaces/api/branches/release?repositoryId=…`** `{branch, summary}` →
+`{version, commitSha, branch}`. It really is a resolver: `releaseBranch` picks the target and calls
+`landOnBranch` with the arguments the workspace path passes, so nothing about the release is
+re-implemented. It answers with the record `/workspaces/{id}/release` answers with — the *same Java
+type*, so the two cannot drift into two schemas. What a branch name adds is only what an id already
+carried: which workspace claims it, and who deletes it afterwards.
+
+- **A branch an ACTIVE workspace claims is forwarded to `releaseWorkspace`.** Not "resolved the same
+  way" — it *is* the workspace-keyed call, so the row ends `INTEGRATED` with its container and volume
+  gone. Releasing the ref and walking away would strand a workspace on a branch that just merged.
+- **The source branch is deleted on success**, matching the workspace path's cleanup. That is what
+  lets the maintenance train's next force-push be a create, which the git host's hook allows.
+- 404 for a branch the origin does not have, 400 for the default branch itself, and the 409 family
+  unchanged.
+
+The caller this exists for is a pipeline step, not a person: a `maintenance/<upstream>` ref is
+force-pushed by a build container, and a workspace is a container lifecycle plus a branch claim plus
+a resolution state machine — all wrong-shaped for a ref a pipeline overwrites at will.
+`BranchReleaseControllerTest` names its fixture branches that way, slash and all, which is also what
+proves the worktree slug survives a branch name that cannot be a directory name.
 
 **It pushes a repository this service is already holding, and that is the point.** The bare origin
 is on our own disk, so `main` could be advanced by writing the ref — which is exactly what

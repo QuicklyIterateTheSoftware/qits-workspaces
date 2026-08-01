@@ -4,6 +4,7 @@ import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -15,14 +16,15 @@ import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 
 /**
- * Branch-level integration and cleanup: the two operations the branch list offers on a row that is
- * not (or no longer) a workspace of its own.
+ * Branch-level release, integration and cleanup: the operations the branch list offers on a row that
+ * is not (or no longer) a workspace of its own.
  *
  * <p>These sit under {@code /branches} rather than under {@code /workspaces/{id}} because they are
  * keyed by <em>branch name</em>: the source of an integration needs no workspace of its own (a plain
  * branch is merged from its origin ref), and a cleanup target may have outlived the workspace that
  * created it. That is what separates them from {@link WorkspaceController}'s {@code merge}/{@code
- * discard}, which address a workspace by id.
+ * discard}, which address a workspace by id — and it is why {@code /branches/release} is here while
+ * {@code /workspaces/{id}/release} is there: one flow, two keys, and the key decides the home.
  *
  * <p>The repository is <em>scope</em>, in the query string, for the same reason it is on {@link
  * WorkspaceController}'s collection: this context does not own repositories — it holds a repository
@@ -82,6 +84,61 @@ public class BranchController {
         workspaceService.mergeBranch(repoId, request.source(), request.target(), request.result());
     return new MergeBranchRequest.Response(
         result.commitHash(), result.hasConflicts(), result.output(), result.cleanedUp());
+  }
+
+  /**
+   * @param branch the branch to release, which needs no workspace of its own
+   * @param summary the commit's subject after the {@code release(<version>)} scope, capped exactly
+   *     as the workspace-keyed door caps it
+   */
+  public static record ReleaseBranchRequest(
+      @NotBlank String branch, @NotBlank @Size(max = 100) String summary) {
+    // The response is WorkspaceController.ReleaseRequest.Response, reused rather than copied: the
+    // two doors answer with one record, so they cannot drift into answering differently.
+  }
+
+  /**
+   * Release a branch by name: merge it into the repository's default branch, stamped with a fresh
+   * {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>): <summary>} —
+   * pushed with {@code -o qits.release}, with a {@code SoftwareRelease} published.
+   *
+   * <p><b>The branch-keyed sibling of {@code /workspaces/{id}/release}</b>, and a thin resolver over
+   * it rather than a second implementation: the flow is keyed by (repository, source branch)
+   * internally, so a branch name is all it ever needed. Same 409 family, same summary cap, same
+   * response record.
+   *
+   * <p>It exists for the caller that has a branch and no workspace: a maintenance branch is
+   * force-pushed by a build container, and a workspace is a container lifecycle with a branch claim
+   * and a resolution state machine — all wrong-shaped for a ref a pipeline overwrites at will.
+   *
+   * <p>A branch an ACTIVE workspace <em>does</em> claim is that workspace's release: the row
+   * resolves to {@code INTEGRATED} exactly as the workspace-keyed door leaves it, because this door
+   * must not strand a workspace on a branch that just merged. Either way the source branch is
+   * deleted afterwards.
+   */
+  @POST
+  @Path("/release")
+  @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "A blank, dash-leading or oversized field — or the default branch itself, which a release"
+              + " lands on and cannot be released into.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such repository, or the origin has no such branch.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Nothing was released and the default branch is unchanged. `reason` says which refusal.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  public WorkspaceController.ReleaseRequest.Response releaseBranch(
+      @QueryParam("repositoryId") String repoId, @Valid ReleaseBranchRequest request) {
+    var result = workspaceService.releaseBranch(repoId, request.branch(), request.summary());
+    return new WorkspaceController.ReleaseRequest.Response(
+        result.version(), result.commitSha(), result.branch());
   }
 
   public static record CleanupBranchRequest(@NotBlank String branch, String result) {
