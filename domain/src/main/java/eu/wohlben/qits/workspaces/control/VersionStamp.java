@@ -34,7 +34,7 @@ import java.time.ZoneOffset;
  * suffix would mean <i>prerelease</i> to npm (sorting <i>before</i> the release) and <i>unknown
  * qualifier</i> to Maven (sorting <i>after</i> it) — one string, two opposite meanings. Both
  * comparators were run against both shapes before this was ruled; the measurements are in the
- * release-flow plan.
+ * superproject's docs/release-flow-notes.md.
  *
  * <p><b>UTC, pinned.</b> The rendering is the UTC wall clock of the instant. The version is a
  * platform-wide identity that has to be reproducible from the commit alone, and a host-local zone

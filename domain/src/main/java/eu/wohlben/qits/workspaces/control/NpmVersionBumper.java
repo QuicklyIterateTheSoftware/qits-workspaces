@@ -39,7 +39,7 @@ import java.util.stream.Stream;
  *
  * The Angular library convention, and for the two publishable library repositories here that inner
  * manifest is the <i>published</i> one — the real release gate. It is bumped like everything else:
- * one scheme, no exceptions (settled decision 2 of the release-flow plan). {@code pnpm-lock.yaml}
+ * one scheme, no exceptions (settled, superproject docs/release-flow-notes.md). {@code pnpm-lock.yaml}
  * carries no version field to mirror and is left byte-identical.
  *
  * <h2>Absent fields are loud</h2>

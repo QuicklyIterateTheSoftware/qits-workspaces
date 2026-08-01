@@ -31,11 +31,10 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * <b>The gate for the workspace-daemon's HTTP API</b>
- * (final-workspaces-and-agent-communication-migration-plan.md §5 step 6): a real container, a real
- * native daemon, a real bearer, and a browser-equivalent client doing what a user does — list files,
- * read one, launch a command, terminate it, and attach a terminal that <em>survives a client
- * reconnect</em>.
+ * <b>The gate for the workspace-daemon's HTTP API</b> (AGENTS.md, "Where this service answers"):
+ * a real container, a real native daemon, a real bearer, and a browser-equivalent client doing what
+ * a user does — list files, read one, launch a command, terminate it, and attach a terminal that
+ * <em>survives a client reconnect</em>.
  *
  * <p><b>Why a `@QuarkusIntegrationTest` would not have been enough.</b> The interesting failures are
  * in another process: whether the injected token actually reaches the daemon's config, whether

@@ -562,7 +562,7 @@ happened" unlistenable, which is the one thing this event exists to be.
 that statement is qits-ci's own `SoftwareRelease`, published once per artifact when a repository's
 release pipeline goes green, and the gap between the two is a whole build. The event here was called
 `SoftwareRelease` until 2026-08-01 and was read as a statement about a package, which worked by
-timing rather than by design — see the superproject's `scm-release-split-plan.md`. **The wire name is
+timing rather than by design — see the superproject's `docs/scm-release-split-notes.md`. **The wire name is
 the class name** (`QitsEvent.signature()` returns the simple class name), so the class rename was the
 wire rename; the payload's four fields did not change.
 
@@ -678,5 +678,10 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   back with the old one must reproduce the original file exactly.
 - The `Fake*` doubles are duplicated between `domain/src/test` and `service/src/test`. That is
   deliberate and matches the monorepo — the two modules do not share a test classpath.
-- Integration tests needing real docker, a built `qits/workspace` image and the daemon binary are
-  not in this repo. `skipITs=true` is the default; keep `mvn verify` runnable anywhere.
+- Integration tests needing real docker, a built `qits/workspace` image and the daemon binary **are**
+  in this repo — `Daemon*IT`, tagged `extended`, `DaemonApiGateIT` the largest of them. They
+  self-skip (`assumeTrue`) when docker or the image is absent, and `skipITs=true` is the default
+  anyway, so a clone-alone `mvn verify` never reaches them. Run them with
+  `./mvnw verify -DskipITs=false`. Keep both properties: the default keeps `mvn verify` runnable
+  anywhere, and the self-skip keeps a deliberate `-DskipITs=false` from failing on a machine that
+  simply has no image.

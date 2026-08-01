@@ -96,14 +96,17 @@ public class GitExecutor {
 
   /**
    * {@link #execAllowNonZero(java.io.File, Map, Consumer, String...)} with a wall-clock <b>bound</b>
-   * — the overload the integrate flow's push uses, and the only one that has one.
+   * — the only overload here that has one, and <b>nothing in this repository calls it any more</b>.
+   * Every wire call moved into {@code gitmirror}, which passes its own timeout straight to {@link
+   * eu.wohlben.qits.workspaces.gitmirror.GitCli}; this overload is what that arrangement grew out
+   * of. It is kept because the bound is the thing worth keeping, and the next caller that shells
+   * git at a network host from this side should reach for it rather than the unbounded siblings.
    *
    * <p>Every other call here runs {@code p.waitFor()} with no timeout at all, which is survivable
    * for a local filesystem operation (git either finishes or the disk is gone) and is <b>not</b>
-   * survivable for a network push: a wedged git host would pin a request thread forever, and this
-   * service answers integrate synchronously. So the push gets a deadline and nothing else changes;
-   * widening the bound to the local calls would turn a slow clone into a spurious failure for no
-   * gain.
+   * survivable for anything over a wire: a wedged git host would pin a request thread forever, and
+   * this service answers integrate synchronously. Widening the bound to the local calls would turn
+   * a slow clone into a spurious failure for no gain.
    *
    * <p>The bound covers the <b>whole</b> invocation rather than only the exit status. A transport
    * that accepts the connection and then says nothing blocks in {@code readLine()}, never in {@code
