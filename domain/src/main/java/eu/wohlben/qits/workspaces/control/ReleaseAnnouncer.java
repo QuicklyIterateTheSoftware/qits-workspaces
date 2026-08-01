@@ -4,10 +4,10 @@ import java.time.Instant;
 
 /**
  * The port a release is announced to the <b>platform at large</b> through — the seam the {@code
- * SoftwareRelease} event will hang off, and the only reason it exists today.
+ * SCMRelease} event will hang off, and the only reason it exists today.
  *
- * <p>{@code bus/SoftwareReleaseAnnouncer} in the deployable is the implementation, and it publishes
- * {@code SoftwareRelease {projectId, repository, branch, version}}. The split is the {@code
+ * <p>{@code bus/SCMReleaseAnnouncer} in the deployable is the implementation, and it publishes
+ * {@code SCMRelease {projectId, repository, branch, version}}. The split is the {@code
  * RunAnnouncer} precedent from qits-ci, down to being declared in the domain module and implemented
  * in the deployable so the domain stays free of the bus and its transport.
  *

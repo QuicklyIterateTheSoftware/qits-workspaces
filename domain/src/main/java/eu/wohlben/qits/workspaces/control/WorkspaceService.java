@@ -180,7 +180,7 @@ public class WorkspaceService {
   @Inject TechnicalProcessRegistry processRegistry;
 
   /**
-   * The {@code SoftwareRelease} seam — see {@link ReleaseAnnouncer}. Nothing implements it yet, and
+   * The {@code SCMRelease} seam — see {@link ReleaseAnnouncer}. Nothing implements it yet, and
    * that is the intended state: this feature keeps the publish point clean and the event feature
    * fills it. {@code Instance<>} so absent stays a supported configuration afterwards too.
    */
@@ -1420,7 +1420,7 @@ public class WorkspaceService {
    * <p>The workspace resolves exactly as a release resolves it: the work is in the parent, so the
    * container, the volume, the branch and the ACTIVE row all go. What is missing compared with a
    * release is the version, the manifest bump, the {@code qits.release} push option and the {@code
-   * SoftwareRelease} event — none of which a merge between two working branches has any business
+   * SCMRelease} event — none of which a merge between two working branches has any business
    * producing.
    *
    * @throws eu.wohlben.qits.workspaces.error.IntegrateConflictException for every refusal the caller
@@ -1434,7 +1434,7 @@ public class WorkspaceService {
   /**
    * The same release, keyed by <b>branch name</b> instead of by a workspace row: merge {@code
    * branch} into the repository's default branch, stamped, as one pushed commit, with a {@code
-   * SoftwareRelease} published.
+   * SCMRelease} published.
    *
    * <p><b>A resolver, not a second flow.</b> {@link ReleaseIntegrator} is keyed by (repository,
    * source branch) and by nothing else — the worktree name included — so everything below the

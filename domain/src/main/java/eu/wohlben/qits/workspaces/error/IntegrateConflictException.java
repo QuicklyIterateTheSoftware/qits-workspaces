@@ -30,8 +30,8 @@ public class IntegrateConflictException extends ConflictException {
    * the right treatment.
    *
    * <p><b>The set is additive and stays that way.</b> {@link #RELEASE_REQUIRED} joined when the two
-   * doors split, and it is the enum's whole purpose working: a new refusal is a new value, never a
-   * new envelope.
+   * doors split and {@link #VERSION_ALREADY_RELEASED} when the release grew a tag, which is the
+   * enum's whole purpose working: a new refusal is a new value, never a new envelope.
    */
   public enum Reason {
     /** The preflight three-way merge conflicts. Nothing was attempted; no ref moved. */
@@ -44,6 +44,19 @@ public class IntegrateConflictException extends ConflictException {
     ALREADY_INTEGRATED,
     /** The git host refused the push. {@code message} is the host's own words. Not retryable. */
     PUSH_REJECTED,
+    /**
+     * The version this release stamped is already a tag in the repository, so the release was
+     * refused whole — no commit landed and the default branch did not move.
+     *
+     * <p>The stamp has one-second resolution, so two releases of one repository in the same second
+     * would otherwise both land and claim one version. The tag is what makes that impossible: a
+     * non-forced push cannot overwrite an existing tag ref, and the release push is atomic, so the
+     * branch update goes down with it.
+     *
+     * <p><b>Retryable, unlike {@link #PUSH_REJECTED}</b>, which is why it is not that value: the
+     * next attempt stamps a different second and simply works. A client can offer the button again.
+     */
+    VERSION_ALREADY_RELEASED,
     /**
      * The wrong door: this merge or integrate would land on the repository's default branch, which
      * only a release writes. Nothing was attempted. The caller wants {@code

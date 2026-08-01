@@ -100,7 +100,7 @@ public class BranchController {
   /**
    * Release a branch by name: merge it into the repository's default branch, stamped with a fresh
    * {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>): <summary>} —
-   * pushed with {@code -o qits.release}, with a {@code SoftwareRelease} published.
+   * pushed with {@code -o qits.release}, with a {@code SCMRelease} published.
    *
    * <p><b>The branch-keyed sibling of {@code /workspaces/{id}/release}</b>, and a thin resolver over
    * it rather than a second implementation: the flow is keyed by (repository, source branch)

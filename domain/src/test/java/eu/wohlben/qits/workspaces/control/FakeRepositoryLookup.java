@@ -18,7 +18,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
 
   /**
    * The project every fake repository belongs to. One constant rather than a second map: no test
-   * asserts on more than one project, and {@code SoftwareRelease} only needs the field to be
+   * asserts on more than one project, and {@code SCMRelease} only needs the field to be
    * carried rather than to vary.
    */
   public static final String PROJECT_ID = "test-project";

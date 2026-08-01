@@ -42,11 +42,22 @@ import java.time.ZoneOffset;
  * format but names no zone; UTC is that choice, made here once and asserted by the tests rather than
  * left to {@code ZoneId.systemDefault()}.
  *
- * <p><b>One-second resolution.</b> Two stamps taken in the same second are equal. That is not a
- * collision in practice — the integrate flow serializes per repository and its push is a
- * fast-forward compare-and-swap, so a genuine tie is rejected rather than silently accepted — but
- * it is why the stamp is taken <i>once</i> at the start of an integrate and threaded through, never
- * recomputed per file.
+ * <p><b>One-second resolution, and the tag is what makes a tie safe.</b> Two stamps taken in the
+ * same second are equal, and nothing about the stamp prevents that. This comment used to say the
+ * fast-forward push rejected such a tie; <b>it does not</b>. The repository lease is held across the
+ * whole land operation including the push, so two releases are sequential: the second builds its
+ * worktree from the first's commit and its push is a clean fast-forward. The compare-and-swap never
+ * fires, and two commits would carry one version.
+ *
+ * <p>What does reject it is the <b>release tag</b>, which is this string exactly. A non-forced push
+ * cannot overwrite an existing tag ref and the release push is atomic, so the second release is
+ * refused whole and lands nothing — see {@code ReleaseIntegrator} and {@code
+ * IntegrateConflictException.Reason.VERSION_ALREADY_RELEASED}. Reachability is very low (a release
+ * is comfortably over a second of work), but it is a guarantee now rather than an assumption.
+ *
+ * <p>None of that changes why the stamp is taken <i>once</i> at the start of an integrate and
+ * threaded through rather than recomputed per file: a slow bump would otherwise write two versions
+ * into one commit.
  */
 public final class VersionStamp {
 

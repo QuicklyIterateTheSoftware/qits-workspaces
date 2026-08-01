@@ -23,7 +23,7 @@ public interface RepositoryLookup {
   /**
    * The repository facts this context reads.
    *
-   * <p>{@code projectId} is here for one caller and one reason: {@code SoftwareRelease} names the
+   * <p>{@code projectId} is here for one caller and one reason: {@code SCMRelease} names the
    * project a release belongs to, and the flow that publishes it holds a repository id and nothing
    * else. It is nullable — a registry that does not answer with one costs the event a field, never
    * the release.

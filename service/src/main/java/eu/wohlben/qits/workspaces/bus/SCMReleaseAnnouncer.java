@@ -2,15 +2,20 @@ package eu.wohlben.qits.workspaces.bus;
 
 import eu.wohlben.qits.eventstream.QitsEventBus;
 import eu.wohlben.qits.workspaces.control.ReleaseAnnouncer;
-import eu.wohlben.qits.workspaces.events.SoftwareRelease;
+import eu.wohlben.qits.workspaces.events.SCMRelease;
 import io.quarkus.arc.DefaultBean;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 
 /**
- * Turns an accepted release push into the platform's {@code SoftwareRelease} event and hands it to
- * the bus. The whole of this service's event-bus wiring — it publishes and listens for nothing.
+ * Turns an accepted release push into the platform's {@code SCMRelease} event and hands it to the
+ * bus. The whole of this service's event-bus wiring — it publishes and listens for nothing.
+ *
+ * <p>{@code SCMRelease} says <b>source control has this release</b> and nothing more. The event
+ * announcing that an artifact exists is qits-ci's {@code SoftwareRelease}, published when a release
+ * pipeline goes green — this class must never grow into publishing that one, because the moment it
+ * would publish it at is a whole build too early.
  *
  * <p>It lives in {@code service/} because the {@code domain} module knows nothing of the bus; the
  * seam it implements is {@link ReleaseAnnouncer} in {@code domain/control}, and zero implementations
@@ -34,7 +39,7 @@ import java.time.Instant;
  */
 @ApplicationScoped
 @DefaultBean
-public class SoftwareReleaseAnnouncer implements ReleaseAnnouncer {
+public class SCMReleaseAnnouncer implements ReleaseAnnouncer {
 
   @Inject QitsEventBus bus;
 
@@ -48,6 +53,6 @@ public class SoftwareReleaseAnnouncer implements ReleaseAnnouncer {
       Instant publishedAt) {
     // commitSha is not in the payload: the platform specified four fields, and a consumer that wants
     // the commit has BuildSuccessful, which carries one for the build this release triggers.
-    bus.publish(new SoftwareRelease(projectId, repoId, branch, version, publishedAt));
+    bus.publish(new SCMRelease(projectId, repoId, branch, version, publishedAt));
   }
 }

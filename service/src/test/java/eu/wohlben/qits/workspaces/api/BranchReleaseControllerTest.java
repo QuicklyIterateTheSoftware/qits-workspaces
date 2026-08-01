@@ -146,7 +146,7 @@ public class BranchReleaseControllerTest {
   /**
    * The case the maintenance hop is: a branch with <b>no workspace at all</b> becomes a release —
    * one commit, two parents, the bumped manifest inside it, the source branch gone, and a {@code
-   * SoftwareRelease} announced. A full release by every measure, reached through a name.
+   * SCMRelease} announced. A full release by every measure, reached through a name.
    */
   @Test
   public void aPlainBranchWithNoWorkspaceIsReleasedLikeAnyOther() throws Exception {
@@ -187,6 +187,12 @@ public class BranchReleaseControllerTest {
     assertFalse(
         originBranches(repoId).contains(MAINTENANCE),
         "a released branch is deleted, leaving no ref claiming work is still pending");
+
+    // Tagged like any other release: same flow, so the same annotated tag on the same commit.
+    assertEquals(version, inOrigin(repoId, "git", "tag", "-l"));
+    assertEquals(
+        "tag", inOrigin(repoId, "git", "cat-file", "-t", inOrigin(repoId, "git", "rev-parse", version)));
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", version + "^{commit}"));
 
     assertEquals(1, announcer.announced().size(), "a release announces, whichever door it came in");
     FakeReleaseAnnouncer.Announced announced = announcer.announced().get(0);

@@ -113,6 +113,7 @@ components:
       - NOT_FAST_FORWARD
       - ALREADY_INTEGRATED
       - PUSH_REJECTED
+      - VERSION_ALREADY_RELEASED
       - RELEASE_REQUIRED
     ReleaseBranchRequest:
       type: object

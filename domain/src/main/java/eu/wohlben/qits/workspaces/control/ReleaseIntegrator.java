@@ -51,11 +51,29 @@ import org.jboss.logging.Logger;
  *
  * <h2>Why nothing needs unwinding</h2>
  *
- * The worktree is created <b>detached</b>, so steps 2–6 move no ref anywhere: the merge, the bump
- * and the commit all happen against a {@code HEAD} that is not a branch. A conflict, a bump failure
- * or a crash leaves the default branch byte-identical, and the only cleanup a failure needs is
- * removing the worktree — which happens in a {@code finally}. The commit a failed push leaves
- * behind is unreferenced and is git's to collect.
+ * The worktree is created <b>detached</b>, so nothing before the push moves a ref that outlives the
+ * run: the merge, the bump and the commit all happen against a {@code HEAD} that is not a branch. A
+ * conflict, a bump failure or a crash leaves the default branch byte-identical, and the only cleanup
+ * a failure needs is removing the worktree — which happens in a {@code finally}. The commit a failed
+ * push leaves behind is unreferenced and is git's to collect.
+ *
+ * <p><b>The tag is the one exception, and it is why the dance below exists.</b> {@code git tag -a}
+ * <i>does</i> write a ref, and it writes it into the served bare rather than into the worktree — a
+ * linked worktree shares the common ref store, and this worktree's common dir is the origin
+ * qits-artifacts serves. So step 7 creates the tag, reads the tag <b>object's</b> sha, and deletes
+ * the ref again: the object survives with nothing pointing at it, and the ref store is back to
+ * holding nothing new before the push. That restores the property for the tag too — between the
+ * commit and the push, this run has moved no ref anywhere — and it is also what makes the tag reach
+ * the git host at all, since a ref already present in the bare is nothing for a push to report.
+ *
+ * <h2>Why the tag rides the same push</h2>
+ *
+ * One {@code git push --atomic} carrying both {@code HEAD:refs/heads/<main>} and {@code
+ * <tagobj>:refs/tags/<version>} is one receive-pack, so both commands ride one pre-receive and one
+ * post-receive, and either both land or neither does. That is what turns the tag into the version
+ * <b>uniqueness</b> guarantee the platform never had: a non-forced push over an existing tag ref is
+ * refused, and under {@code --atomic} that refusal takes the branch update with it. Two releases
+ * that stamped the same second cannot both land, and the loser lands nothing at all.
  *
  * <h2>Why the push is the compare-and-swap</h2>
  *
@@ -65,6 +83,11 @@ import org.jboss.logging.Logger;
  * branch in a correct state either way. That is git's own atomic ref update doing the work, which
  * is why this feature needs no distributed lock — the in-process repository lease upstream only
  * turns the common case from "one fails" into "one waits".
+ *
+ * <p><b>What it does not settle:</b> two releases of this flow. The lease is held across the whole
+ * operation, push included, so they are sequential — the second builds on the first's commit and its
+ * push is a clean fast-forward. The compare-and-swap decides a race against a writer <i>outside</i>
+ * this flow; the tag is what decides two releases that stamped one version.
  *
  * <p>A plain integrate sends <b>no push option</b>, and that is not an oversight: the hook guards
  * the default branch and nothing else, so a task branch landing on its parent is an ordinary push.
@@ -145,7 +168,7 @@ public class ReleaseIntegrator {
       String repoId, String sourceBranch, String targetBranch, String summary, Mode mode) {}
 
   /**
-   * What one run produced, and the record the {@code SoftwareRelease} publisher is handed.
+   * What one run produced, and the record the {@code SCMRelease} publisher is handed.
    *
    * @param version the stamp, taken once at step 4 and threaded through — <b>null for {@link
    *     Mode#PLAIN}</b>, which stamps nothing
@@ -183,6 +206,11 @@ public class ReleaseIntegrator {
 
     // [2] a DETACHED worktree: the property that makes "no partial state" true rather than hoped.
     Path worktree = prepareWorktree(originPath, repoId, targetBranch, sourceBranch);
+    // Declared out here because the finally needs both: which tag name to clean up, and whether
+    // this run is the one holding it. `tagRefHeld` is true only between `tag -a` and `tag -d`, so a
+    // tag that was already there and a tag the push has just created are both left alone.
+    String version = null;
+    boolean tagRefHeld = false;
     try {
       // [3] the merge, staged but NOT committed — MERGE_HEAD stays set and the index stays open,
       // which is what lets the bump write into the same index and produce ONE commit.
@@ -190,7 +218,7 @@ public class ReleaseIntegrator {
 
       // [4] the stamp, taken ONCE. Recomputing it per file would let a slow bump write two versions
       // into one commit. A plain integrate is not a release and takes none.
-      String version = run.mode() == Mode.RELEASE ? VersionStamp.of(Instant.now()) : null;
+      version = run.mode() == Mode.RELEASE ? VersionStamp.of(Instant.now()) : null;
 
       // [5] the bump, into the open index. Nothing to render without a version.
       if (version != null) {
@@ -198,10 +226,23 @@ public class ReleaseIntegrator {
       }
 
       // [6] one commit: two parents (the merge) plus, for a release, the version change.
-      String commitSha = commit(worktree, run, version);
+      String subject = subjectOf(run, version);
+      String commitSha = commit(worktree, run, version, subject);
 
-      // [7] the push, which is the compare-and-swap.
-      Instant publishedAt = push(worktree, repoId, targetBranch, run.mode());
+      // [7] the tag, made and then unreferenced — see "why nothing needs unwinding". A release
+      // only; a plain integrate tags nothing, because a tag names a version and it has none.
+      String tagObject = null;
+      if (version != null) {
+        createTagRef(worktree, version, subject);
+        tagRefHeld = true;
+        tagObject = tagObjectSha(worktree, version);
+        deleteTagRef(worktree, version);
+        tagRefHeld = false;
+      }
+
+      // [8] the push, which is the compare-and-swap — and, with the tag riding along, the
+      // uniqueness check too.
+      Instant publishedAt = push(worktree, repoId, targetBranch, run.mode(), version, tagObject);
 
       LOG.infof(
           "landed %s on %s of %s%s (%s)",
@@ -209,7 +250,11 @@ public class ReleaseIntegrator {
       return new Landed(version, commitSha, sourceBranch, targetBranch, publishedAt);
     } finally {
       // [9] cleanup. In a finally because every failure above leaves the worktree behind and the
-      // NEXT run is what pays for it.
+      // NEXT run is what pays for it — and, if the run died mid-dance, a tag ref in the served bare
+      // that would refuse this repository's next release of that version.
+      if (tagRefHeld) {
+        deleteLeftoverTagRef(originPath, version);
+      }
       removeWorktree(originPath, worktree);
     }
   }
@@ -423,20 +468,29 @@ public class ReleaseIntegrator {
   }
 
   /**
-   * The one commit, and the two subjects.
+   * The two subjects.
    *
    * <p>The scope says which process this was, so a reader of {@code git log} never has to infer it:
    * {@code release(<version>)} carries the stamp a release produced, {@code integrate(<source>)}
-   * carries the branch a plain merge landed. The body names both branches — the merge's parents
-   * record the graph, but the branch <em>names</em> do not survive the merge otherwise, and they are
-   * what a human reads.
+   * carries the branch a plain merge landed.
+   *
+   * <p>It is its own method because a release's tag message is this same line — one release, one
+   * sentence, whether it is read off the commit or off the tag.
    */
-  private String commit(Path worktree, Run run, String version) {
+  private static String subjectOf(Run run, String version) {
+    return version != null
+        ? "release(" + version + "): " + run.summary()
+        : "integrate(" + run.sourceBranch() + "): " + run.summary();
+  }
+
+  /**
+   * The one commit.
+   *
+   * <p>The body names both branches — the merge's parents record the graph, but the branch
+   * <em>names</em> do not survive the merge otherwise, and they are what a human reads.
+   */
+  private String commit(Path worktree, Run run, String version, String subject) {
     boolean release = version != null;
-    String subject =
-        release
-            ? "release(" + version + "): " + run.summary()
-            : "integrate(" + run.sourceBranch() + "): " + run.summary();
     String body =
         release
             ? "Integrates workspace branch `" + run.sourceBranch() + "`."
@@ -457,10 +511,88 @@ public class ReleaseIntegrator {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // [7] the push
+  // [7] the tag
   // ---------------------------------------------------------------------------------------------
 
-  private Instant push(Path worktree, String repoId, String target, Mode mode) {
+  /**
+   * {@code git tag -a <version> -m <subject> HEAD}, with the release commit's own identity as the
+   * tagger — one release, one name on it.
+   *
+   * <p>The tag name is the version string exactly: {@code 2026.801.63140}, no {@code v} prefix. It
+   * is the same string the manifests, the event and the image tags carry, and a prefix here would
+   * be a second spelling of one identity.
+   *
+   * <p><b>A name that already exists is the uniqueness guarantee firing.</b> This worktree shares
+   * the served bare's ref store, so an existing {@code refs/tags/<version>} is seen right here and
+   * git refuses — before any ref of ours has moved, which is exactly where a refusal is cheapest.
+   * The push carries the same guarantee for the case where another writer gets there later.
+   */
+  private void createTagRef(Path worktree, String version, String subject) {
+    List<String> argv = new ArrayList<>(List.of("git"));
+    argv.addAll(gitIdentity.inlineArgs());
+    argv.addAll(List.of("tag", "-a", version, "-m", subject, "HEAD"));
+    GitExecutor.ExecResult result;
+    try {
+      result =
+          git.execAllowNonZero(
+              worktree.toFile(), gitIdentity.envMap(), null, argv.toArray(String[]::new));
+    } catch (Exception e) {
+      throw new InternalServerErrorException("Failed to tag the release: " + e.getMessage());
+    }
+    if (result.exitCode() == 0) {
+      return;
+    }
+    if (alreadyExists(result.output())) {
+      throw versionAlreadyReleased(version);
+    }
+    throw new InternalServerErrorException(
+        "Failed to tag the release [" + result.exitCode() + "]: " + result.output());
+  }
+
+  /** The tag <b>object's</b> sha — what the push sends, and what outlives {@code tag -d}. */
+  private String tagObjectSha(Path worktree, String version) {
+    try {
+      return git.exec(worktree.toFile(), "git", "rev-parse", "refs/tags/" + version).trim();
+    } catch (Exception e) {
+      throw new InternalServerErrorException(
+          "Failed to read the release tag's object: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Drops the ref again, leaving the object. Without this the tag is already in the served bare and
+   * the push has nothing to report — {@code [up to date]}, zero receive commands, no post-receive,
+   * and a ref this run moved that a failure would leave behind.
+   */
+  private void deleteTagRef(Path worktree, String version) {
+    try {
+      git.exec(worktree.toFile(), "git", "tag", "-d", version);
+    } catch (Exception e) {
+      throw new InternalServerErrorException(
+          "Failed to unreference the release tag: " + e.getMessage());
+    }
+  }
+
+  /**
+   * The {@code finally}'s half of the dance: a run that died between {@code tag -a} and {@code tag
+   * -d} left a ref in the served bare, and the repository's next release of that version would be
+   * refused by a tag no release ever pushed. Only ever called while this run holds the ref — a tag
+   * the push created is the release's and must survive.
+   */
+  private void deleteLeftoverTagRef(Path originPath, String version) {
+    try {
+      git.execAllowNonZero(originPath.toFile(), "git", "tag", "-d", version);
+    } catch (Exception e) {
+      LOG.warnf(e, "failed to remove the leftover release tag %s", version);
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // [8] the push
+  // ---------------------------------------------------------------------------------------------
+
+  private Instant push(
+      Path worktree, String repoId, String target, Mode mode, String version, String tagObject) {
     String remote = gitHost.pushUrl(repoId);
     List<String> argv = new ArrayList<>(List.of("git", "push", "--porcelain"));
     // Only a release needs the option: the git host's hook guards the default branch and nothing
@@ -468,8 +600,17 @@ public class ReleaseIntegrator {
     if (mode == Mode.RELEASE) {
       argv.add("--push-option=" + RELEASE_PUSH_OPTION);
     }
+    if (tagObject != null) {
+      // All or nothing. A refused tag must not leave the branch advanced, and a refused branch must
+      // not leave a tag naming a release that did not happen.
+      argv.add("--atomic");
+    }
     argv.add(remote);
     argv.add("HEAD:refs/heads/" + target);
+    if (tagObject != null) {
+      // By sha, not by name: the local ref is gone by now and the object is what remains.
+      argv.add(tagObject + ":refs/tags/" + version);
+    }
     GitExecutor.ExecResult result;
     try {
       result =
@@ -488,18 +629,24 @@ public class ReleaseIntegrator {
     if (result.exitCode() == 0) {
       return Instant.now();
     }
-    throw classifyPushFailure(result.output(), target);
+    throw classifyPushFailure(result.output(), target, version);
   }
 
   /**
    * Reads a rejected push for what it was.
    *
-   * <p>Order matters: a hook refusal and a non-fast-forward are both "[…rejected]" lines and only
-   * the {@code remote} marker tells them apart, so the remote one is matched first. A push the git
-   * host's protection hook declined must surface as a <b>4xx carrying the hook's own message</b> —
-   * never a 500 — because that message is the only thing on screen that says what to do instead.
+   * <p>Order matters twice. The tag refusal is read first because it is the only one whose cause is
+   * not the branch at all, and under {@code --atomic} it also renders the branch as rejected — read
+   * the other way round, a duplicate version would report itself as a lost race. After that, a hook
+   * refusal and a non-fast-forward are both "[…rejected]" lines and only the {@code remote} marker
+   * tells them apart, so the remote one comes next. A push the git host's protection hook declined
+   * must surface as a <b>4xx carrying the hook's own message</b> — never a 500 — because that
+   * message is the only thing on screen that says what to do instead.
    */
-  private RuntimeException classifyPushFailure(String output, String target) {
+  private RuntimeException classifyPushFailure(String output, String target, String version) {
+    if (version != null && alreadyExists(output)) {
+      return versionAlreadyReleased(version);
+    }
     String remoteRefusal = remoteRejection(output);
     if (remoteRefusal != null) {
       return new IntegrateConflictException(
@@ -525,6 +672,28 @@ public class ReleaseIntegrator {
    * reason in trailing parentheses; the whole line is the fallback, because a refusal a human cannot
    * read is worse than a verbose one.
    */
+  /**
+   * The one refusal a version stamp can produce, in the one wording both halves of the dance use.
+   *
+   * <p>It is <b>retryable</b>, and that is the whole reason it is not {@link Reason#PUSH_REJECTED}:
+   * the next stamp is a different second, so pressing the button again is the right thing to do,
+   * where a hook refusal means it never will be.
+   */
+  private static IntegrateConflictException versionAlreadyReleased(String version) {
+    return new IntegrateConflictException(
+        Reason.VERSION_ALREADY_RELEASED,
+        "Version "
+            + version
+            + " is already tagged in this repository, so this release was refused whole: nothing"
+            + " landed and the default branch is unchanged. Try again — a release a second later"
+            + " stamps a different version.");
+  }
+
+  /** Git's wording for a tag ref that is already there, from either half of the dance. */
+  private static boolean alreadyExists(String output) {
+    return output != null && output.toLowerCase().contains("already exists");
+  }
+
   private static String remoteRejection(String output) {
     if (output == null) {
       return null;

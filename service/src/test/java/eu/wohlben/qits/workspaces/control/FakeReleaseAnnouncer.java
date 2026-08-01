@@ -8,7 +8,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 /**
  * The test-side {@link ReleaseAnnouncer}: it records what it was told and does nothing else.
  *
- * <p>It wins over the production {@code bus/SoftwareReleaseAnnouncer}, which is a {@code
+ * <p>It wins over the production {@code bus/SCMReleaseAnnouncer}, which is a {@code
  * @DefaultBean} for exactly that reason — the suite must not publish to a real qits-events, and two
  * unqualified beans of one type are an ambiguous dependency that fails the whole build at {@code
  * ArcProcessor#validate}. What this double holds is the shape of the statement and the fact that

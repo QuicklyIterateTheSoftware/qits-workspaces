@@ -1,7 +1,7 @@
 package eu.wohlben.qits.workspaces.bus;
 
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
-import eu.wohlben.qits.workspaces.events.SoftwareRelease;
+import eu.wohlben.qits.workspaces.events.SCMRelease;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
@@ -34,18 +34,18 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * above all — out of a payload, and Jackson finds its {@code @JsonIgnore}s by calling {@code
  * getDeclaredMethods()} on it, which is reflection like any other. Without the entry the payload
  * silently gained {@code eventId}: no crash, no log, and a <b>wire contract violation</b>, since
- * identity is supposed to travel only in the envelope. For {@link SoftwareRelease} it would leak
+ * identity is supposed to travel only in the envelope. For {@link SCMRelease} it would leak
  * {@code occurredAt} into the payload too, past the four fields the platform froze. It is named as a
  * string because it is private and stays private — a build concern is not a reason to widen a
  * library's encapsulation.
  *
  * <p><b>Why these two types and no third.</b> They are the whole of what crosses the wire here:
- * {@link SoftwareRelease} is serialized on the way out, {@link EventEnvelope} is the PUT body. This
+ * {@link SCMRelease} is serialized on the way out, {@link EventEnvelope} is the PUT body. This
  * service subscribes to nothing, so no {@code EventFrame} ever arrives — the day it listens for
  * something, that class and the event's own join this list.
  */
 @RegisterForReflection(
-    targets = {SoftwareRelease.class, EventEnvelope.class},
+    targets = {SCMRelease.class, EventEnvelope.class},
     classNames = "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin")
 public final class EventWireReflection {
 

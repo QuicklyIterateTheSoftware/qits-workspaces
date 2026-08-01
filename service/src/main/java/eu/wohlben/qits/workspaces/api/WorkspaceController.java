@@ -257,7 +257,7 @@ public class WorkspaceController {
    * Release this workspace: merge its branch into the repository's default branch, stamped with a
    * fresh {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>):
    * <summary>} — which is then pushed through the ordinary git host, where the ordinary
-   * post-receive fires and the ordinary pipeline builds it. A {@code SoftwareRelease} event is
+   * post-receive fires and the ordinary pipeline builds it. A {@code SCMRelease} event is
    * published the instant the push is accepted.
    *
    * <p><b>The one door into the default branch</b>, and the target is not a parameter: it is always
@@ -304,7 +304,7 @@ public class WorkspaceController {
    * epic/…} it forked from, as one pushed merge commit — {@code integrate(<branch>): <summary>}.
    *
    * <p><b>No version, and that is the difference.</b> This stamps nothing, bumps no manifest, sends
-   * no {@code qits.release} push option and publishes no {@code SoftwareRelease}; the response
+   * no {@code qits.release} push option and publishes no {@code SCMRelease}; the response
    * carries no {@code version} field for the same reason. Releasing is what the epic then does with
    * {@code /release}. A workspace forked straight off the default branch is refused with a 409
    * naming that endpoint, because its parent is the branch only a release may write.

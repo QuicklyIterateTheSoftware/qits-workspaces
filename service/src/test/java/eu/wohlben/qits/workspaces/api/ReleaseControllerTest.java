@@ -11,6 +11,7 @@ import eu.wohlben.qits.workspaces.control.FakeReleaseAnnouncer;
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
 import eu.wohlben.qits.workspaces.control.GitExecutor;
 import eu.wohlben.qits.workspaces.control.TestOrigin;
+import eu.wohlben.qits.workspaces.control.VersionStamp;
 import eu.wohlben.qits.workspaces.control.WorkspaceIds;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
@@ -18,6 +19,7 @@ import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -105,6 +107,31 @@ public class ReleaseControllerTest {
     return git.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
   }
 
+  /** Every tag the origin holds, one per line and empty when there are none. */
+  private String tagsInOrigin(String repoId) throws Exception {
+    return inOrigin(repoId, "git", "tag", "-l");
+  }
+
+  /**
+   * Pre-create the tag for every version a release starting now could stamp, so "this version is
+   * already released" is a fact of the fixture rather than a race the test hopes to win.
+   *
+   * <p>The stamp is taken from the clock inside the flow and no seam hands a test that clock, so the
+   * same-second collision is simulated by covering the whole window the run can land in. The refs
+   * are written as loose ref files rather than through {@code git tag}, which would be one process
+   * per second of window; a loose ref is exactly what git would have written.
+   */
+  private void tagEveryVersionForTheNextTwoMinutes(String repoId) throws Exception {
+    String sha = inOrigin(repoId, "git", "rev-parse", "master");
+    Path tags = Path.of(dataDir, repoId, "origin", "refs", "tags");
+    java.nio.file.Files.createDirectories(tags);
+    Instant from = Instant.now();
+    for (int second = 0; second < 120; second++) {
+      java.nio.file.Files.writeString(
+          tags.resolve(VersionStamp.of(from.plusSeconds(second))), sha + "\n");
+    }
+  }
+
   private List<String> activeLabels(String repoId) {
     return given()
         .when()
@@ -189,10 +216,25 @@ public class ReleaseControllerTest {
             .anyMatch("pom.xml"::equals),
         "the bump must be reachable from the merge commit, not from a follow-up one");
 
+    // The tag is on the origin, and it is ANNOTATED — a tag object of its own, peeling to the
+    // release commit. Annotated because it carries a message and a tagger; the release is a fact
+    // with an author, and a lightweight tag is only a second name for a sha.
+    assertEquals(version, tagsInOrigin(repoId), "a release tags the version and nothing else");
+    String tagSha = inOrigin(repoId, "git", "rev-parse", version);
+    assertEquals("tag", inOrigin(repoId, "git", "cat-file", "-t", tagSha));
+    assertEquals(
+        commitSha,
+        inOrigin(repoId, "git", "rev-parse", version + "^{commit}"),
+        "the tag peels to the release commit, which is what a release pipeline checks out");
+    assertEquals(
+        "release(" + version + "): teach the explorer to group runs by repository",
+        inOrigin(repoId, "git", "tag", "-l", "--format=%(contents:subject)", version),
+        "the tag message is the release commit's subject");
+
     // The workspace resolved, so the ACTIVE-only listing no longer answers it.
     assertTrue(!activeLabels(repoId).contains("work"), "a released workspace leaves the listing");
 
-    // The SoftwareRelease seam: exactly one statement, with everything the publisher needs.
+    // The SCMRelease seam: exactly one statement, with everything the publisher needs.
     assertEquals(1, announcer.announced().size());
     FakeReleaseAnnouncer.Announced announced = announcer.announced().get(0);
     assertEquals(FakeRepositoryLookup.PROJECT_ID, announced.projectId());
@@ -323,50 +365,170 @@ public class ReleaseControllerTest {
         otherWriter,
         inOrigin(repoId, "git", "rev-parse", "master"),
         "the default branch holds the winner's commit exactly, never a mix of the two");
+    assertEquals(
+        "",
+        tagsInOrigin(repoId),
+        "the push was atomic and the tag ref was unreferenced before it, so a refused branch leaves"
+            + " no tag naming a release that did not happen");
     assertTrue(activeLabels(repoId).contains("loser"), "the loser resolved nothing");
     assertEquals(List.of(), announcer.announced());
   }
 
   /**
-   * Two releases of one repository at once. The repository lease is not what makes this safe — the
-   * push already is — but it is what turns "one of them fails" into "one of them waits", and this is
-   * the test that says so: <b>both</b> come back 200. Without the wait the second would be refused
-   * as busy; without any lease at all it would find the first one's worktree still checked out.
+   * The version-uniqueness guarantee, at the point it actually fires: this worktree shares the
+   * served bare's ref store, so an existing {@code refs/tags/<version>} refuses the release before
+   * the flow has moved anything at all.
+   *
+   * <p>Nothing enforced version uniqueness before the tag existed, and the flow's own comment said
+   * the fast-forward push did — it does not, because the repository lease makes two releases
+   * sequential and the second's push is a clean fast-forward. This is the guarantee that replaced
+   * that assumption.
    */
   @Test
-  public void twoConcurrentReleasesAreSerializedAndBothLand() throws Exception {
+  public void aVersionAlreadyTaggedIsRefusedAndReleasesNothing() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "dup", "dup-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "dup-b", "again.txt", "again\n", "the work");
+
+    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+    tagEveryVersionForTheNextTwoMinutes(repoId);
+
+    release(repoId, "dup", "the same second, twice")
+        .then()
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("reason", equalTo("VERSION_ALREADY_RELEASED"))
+        .body("message", containsString("already tagged"));
+
+    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
+    assertTrue(activeLabels(repoId).contains("dup"), "a refused release resolves nothing");
+    assertEquals(List.of(), announcer.announced());
+    assertEquals(
+        masterBefore,
+        inOrigin(repoId, "git", "rev-parse", VersionStamp.of(Instant.now()) + "^{commit}"),
+        "a tag the flow did not create is not the flow's to delete");
+  }
+
+  /**
+   * The same refusal from the other end: the tag appears between this flow's {@code tag -d} and its
+   * push, so the git host is what says no. What the assertion is really about is {@code --atomic} —
+   * one receive-pack, both commands, and a refused tag takes the branch update down with it.
+   *
+   * <p>Without it the branch would advance and the release would be untagged: a version on the
+   * default branch that source control cannot name, and no refusal anyone would see.
+   */
+  @Test
+  public void aTagThatAppearsBeforeThePushRefusesTheWholeAtomicPush() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "raced", "raced-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "raced-b", "mine.txt", "mine\n", "my work");
+
+    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+    String otherWriter = inOrigin(repoId, "git", "rev-parse", "feature");
+    // A second writer tags the very version this run stamped, at the one instant it is unreferenced.
+    // The version is read off the commit the flow has already built, which is where it exists.
+    gitHost.beforeNextPush(
+        () -> {
+          try {
+            Path worktree = Path.of(dataDir, repoId, "workspaces", ".tmp-integrate-raced-b");
+            String subject = git.exec(worktree.toFile(), "git", "log", "-1", "--format=%s").trim();
+            String version = subject.substring(subject.indexOf('(') + 1, subject.indexOf(')'));
+            inOrigin(repoId, "git", "tag", version, otherWriter);
+          } catch (Exception e) {
+            throw new IllegalStateException(e);
+          }
+        });
+
+    release(repoId, "raced", "the loser of a tag race")
+        .then()
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("reason", equalTo("VERSION_ALREADY_RELEASED"));
+
+    assertEquals(
+        masterBefore,
+        inOrigin(repoId, "git", "rev-parse", "master"),
+        "the tag was refused, so under --atomic the branch did not move either");
+    assertEquals(
+        otherWriter,
+        inOrigin(repoId, "git", "rev-parse", tagsInOrigin(repoId)),
+        "the other writer's tag is untouched — this run's finally cleans up only its own");
+    assertTrue(activeLabels(repoId).contains("raced"), "a refused release resolves nothing");
+    assertEquals(List.of(), announcer.announced());
+  }
+
+  /**
+   * Two releases of one repository at once, and the two answers a serialized pair may give.
+   *
+   * <p>The lease is what turns "one of them fails as busy" into "one of them waits" — without it the
+   * second would find the first's worktree still checked out — and <b>that</b> is what this asserts:
+   * neither answer is a busy 409. What it can no longer assert is that both land. The lease runs
+   * them back to back and a release of a small repository is well under a second, so the two often
+   * stamp <em>one</em> version, and the tag refuses the second whole. That is the version-uniqueness
+   * guarantee doing its job, in the direction the design chose: a retryable refusal rather than two
+   * commits claiming one version, which is what happened before the tag existed.
+   *
+   * <p>So the shape of the assertion is: at least one lands, anything refused is refused as {@code
+   * VERSION_ALREADY_RELEASED}, and the tags, the announcements and the release commits all count the
+   * same as the releases that landed.
+   */
+  @Test
+  public void twoConcurrentReleasesAreSerializedAndOnlyTheClockCanRefuseOne() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "first", "first-b");
     createWorkspace(repoId, "second", "second-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "first-b", "one.txt", "one\n", "first work");
     TestOrigin.commitOnBranch(dataDir, repoId, "second-b", "two.txt", "two\n", "second work");
 
+    List<io.restassured.response.Response> answers;
     ExecutorService pool = Executors.newFixedThreadPool(2);
     try {
-      List<Callable<Integer>> calls =
+      List<Callable<io.restassured.response.Response>> calls =
           List.of(
-              () -> release(repoId, "first", "one of two").statusCode(),
-              () -> release(repoId, "second", "two of two").statusCode());
-      List<Future<Integer>> results = pool.invokeAll(calls);
-      for (Future<Integer> result : results) {
-        assertEquals(200, result.get(), "the lease serializes; neither release should be refused");
+              () -> release(repoId, "first", "one of two"),
+              () -> release(repoId, "second", "two of two"));
+      answers = new java.util.ArrayList<>();
+      for (Future<io.restassured.response.Response> result : pool.invokeAll(calls)) {
+        answers.add(result.get());
       }
     } finally {
       pool.shutdownNow();
     }
 
-    // Both releases are in, each as its own merge commit, and both files are on the branch.
-    assertEquals("one", inOrigin(repoId, "git", "show", "master:one.txt"));
-    assertEquals("two", inOrigin(repoId, "git", "show", "master:two.txt"));
+    long landed = answers.stream().filter(answer -> answer.statusCode() == 200).count();
+    assertTrue(landed >= 1, "the two are serialized, so the first of them always lands");
+    for (var answer : answers) {
+      if (answer.statusCode() == 200) {
+        continue;
+      }
+      assertEquals(
+          Response.Status.CONFLICT.getStatusCode(),
+          answer.statusCode(),
+          "the only refusal a serialized pair can produce is the version one");
+      assertEquals(
+          "VERSION_ALREADY_RELEASED",
+          answer.path("reason"),
+          "never 'repository is busy' — that is the lease's whole purpose");
+    }
+
+    // Whatever landed is fully in: its file, its release commit, its tag, its announcement.
+    for (var answer : answers) {
+      if (answer.statusCode() != 200) {
+        continue;
+      }
+      String file = "first-b".equals(answer.path("branch")) ? "one.txt" : "two.txt";
+      assertEquals(
+          file.startsWith("one") ? "one" : "two", inOrigin(repoId, "git", "show", "master:" + file));
+    }
     assertEquals(
-        2,
+        landed,
         inOrigin(repoId, "git", "log", "--format=%s", "master").lines()
             .filter(subject -> subject.startsWith("release("))
             .count());
-    assertEquals(2, announcer.announced().size());
-    assertTrue(
-        !activeLabels(repoId).contains("first") && !activeLabels(repoId).contains("second"),
-        "both workspaces resolved");
+    assertEquals(landed, announcer.announced().size());
+    assertEquals(landed, tagsInOrigin(repoId).lines().filter(tag -> !tag.isBlank()).count());
+    assertEquals(
+        2 - landed,
+        activeLabels(repoId).stream().filter(List.of("first", "second")::contains).count(),
+        "a released workspace resolves and a refused one does not");
   }
 
   // -----------------------------------------------------------------------------------------

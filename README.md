@@ -19,7 +19,7 @@ the boundary. Everything that runs *inside* the container belongs to
 | `domain/` | `eu.wohlben.qits.workspaces.*` — entity, persistence, dto, mapper, control, and the framework-free SPIs the daemon implements. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
-| `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SoftwareRelease`. Plain records; a consumer depends on this jar and gets no domain. |
+| `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SCMRelease`. Plain records; a consumer depends on this jar and gets no domain. |
 | `eventstream/` | The platform event bus client — a **submodule**, [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), built in place as a reactor module. |
 | `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/workspaces`. |
 
@@ -146,7 +146,7 @@ monorepo this lived in `auth/core`'s `PublicPaths`; under the gateway it is `Pub
 And `qits.repositories.data-dir` is a shared on-disk contract: qits-projects clones into the same
 tree and qits-artifacts serves it over git smart-HTTP, so all three must resolve it to one volume.
 
-**The event bus needs nothing.** A release publishes `SoftwareRelease` through the `qits-eventstream`
+**The event bus needs nothing.** A release publishes `SCMRelease` through the `qits-eventstream`
 jar, which ships every key it needs as a default: `qits.events.url` is the qits-net alias, and
 `docker/Dockerfile` names the outbox's database (`/data/eventstream`) because the jar's own
 `${user.home}` default has nowhere to land in an image with no passwd entry. So the image boots

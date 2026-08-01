@@ -88,7 +88,7 @@ public class HttpRepositoryLookupTest {
     assertTrue(found.isPresent());
     assertEquals("repo-1", found.get().id());
     assertEquals("main", found.get().mainBranch());
-    assertEquals("p-1", found.get().projectId(), "SoftwareRelease names the project");
+    assertEquals("p-1", found.get().projectId(), "SCMRelease names the project");
   }
 
   /**

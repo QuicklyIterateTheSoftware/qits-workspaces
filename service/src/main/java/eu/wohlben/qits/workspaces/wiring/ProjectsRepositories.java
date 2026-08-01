@@ -47,7 +47,7 @@ public interface ProjectsRepositories {
    * {@code url} and {@code archetype}; not binding to them is what keeps that service free to change
    * them, and {@code ignoreUnknown} is what makes that true rather than aspirational.
    *
-   * <p>{@code projectId} joined when {@code SoftwareRelease} landed: the event names the project a
+   * <p>{@code projectId} joined when {@code SCMRelease} landed: the event names the project a
    * release belongs to, and this is the only place the workspaces context can learn it.
    */
   @JsonIgnoreProperties(ignoreUnknown = true)

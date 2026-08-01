@@ -289,16 +289,17 @@ release whose artifacts still carry the previous version, and that is discovered
 **`POST /workspaces/api/workspaces/{id}/release`** is **the one door into a repository's default
 branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
 version into the same index, commits both as **one** commit — `release(<version>): <summary>` —
-**pushes** it, and publishes `SoftwareRelease`.
+**pushes** it — together with an annotated **tag** named the version — and publishes `SCMRelease`.
 
 **`POST /workspaces/api/workspaces/{id}/integrate`** lands a workspace on **its parent branch** — a
 `task/…` on the `epic/…` it forked from — as one pushed commit `integrate(<source>): <summary>`. No
-stamp, no bump, no `qits.release` push option, no event, and no `version` in the response. A
-workspace whose parent *is* the default branch is refused with `RELEASE_REQUIRED` and sent to
-`/release`, because that is the only door that may write it.
+stamp, no bump, no `qits.release` push option, **no tag**, no event, and no `version` in the
+response. A workspace whose parent *is* the default branch is refused with `RELEASE_REQUIRED` and
+sent to `/release`, because that is the only door that may write it.
 
 **They are two processes and one method.** `ReleaseIntegrator.land(Run)` takes a `Mode`, and the
-mode is the whole difference: stamp-and-bump, the commit subject, the push option. Everything below
+mode is the whole difference: stamp-and-bump, the commit subject, the push option, the tag.
+Everything below
 is shared by construction rather than by two implementations agreeing to keep matching — which is
 what makes "integrate is as safe as release" a fact instead of a claim. The flow is keyed by
 **(repository, source branch)**, worktree name included, so a branch-keyed sibling endpoint is a thin
@@ -339,7 +340,7 @@ receive-pack the sole writer of the default branch, so the protection hook sees 
 the existing post-receive → qits-ci → build chain happens for the ordinary reason. Nothing
 downstream learns a new trick. The address is `qits.artifacts.url` behind the `GitHostAddress` port.
 
-Four properties, each of which is why a step is where it is:
+Five properties, each of which is why a step is where it is:
 
 - **`git worktree add --detach` is what makes "no partial state" true.** The merge, the bump and the
   commit all happen against a `HEAD` that is not a branch, so a conflict, a bump failure or a crash
@@ -353,18 +354,23 @@ Four properties, each of which is why a step is where it is:
   racing cannot both win. The loser is rejected as non-fast-forward and told to retry. That is why no
   distributed lock exists here. An integrate sends no option and is no less safe: the hook guards the
   default branch alone, and fast-forward-only is receive-pack's property rather than the option's.
+  What the compare-and-swap does **not** settle is two releases of this flow: the lease holds across
+  the push, so they are sequential and the second is a clean fast-forward. The tag settles those.
+- **The tag is the version-uniqueness guarantee**, and it rides the same push — see below.
 - **The stamp is taken once**, at step 4, and threaded through. Recomputed per file, a slow bump
   would write two versions into one commit. A plain integrate takes none at all, which is what makes
   "no version" a fact about the flow rather than a field the controller drops.
 
 **The 409s carry a `reason`, and it is additive.** The envelope is still `{"message": …}`; an
 `IntegrateConflictException` adds `reason` ∈ `CONFLICT` / `MERGE_CONFLICT` / `NOT_FAST_FORWARD` /
-`ALREADY_INTEGRATED` / `PUSH_REJECTED` / `RELEASE_REQUIRED`, plus `conflicts` (the conflicted paths)
-for the two conflict modes. `WorkspacesExceptionMapper` is where that happens and it is the only type
-it special-cases. `PUSH_REJECTED` is the git host's protection hook refusing: **that must surface as
-a 4xx carrying the hook's own message, never a 500**, because the message is the only thing on screen
-that says what to do instead — and it is **not retryable**, which is how the client treats it, so
-never reuse the value for a race. `RELEASE_REQUIRED` is the wrong-door refusal and the only one where
+`ALREADY_INTEGRATED` / `PUSH_REJECTED` / `VERSION_ALREADY_RELEASED` / `RELEASE_REQUIRED`, plus
+`conflicts` (the conflicted paths) for the two conflict modes. `WorkspacesExceptionMapper` is where
+that happens and it is the only type it special-cases. `PUSH_REJECTED` is the git host's protection
+hook refusing: **that must surface as a 4xx carrying the hook's own message, never a 500**, because
+the message is the only thing on screen that says what to do instead — and it is **not retryable**,
+which is how the client treats it, so never reuse the value for a race. `VERSION_ALREADY_RELEASED`
+is the opposite case and is why it is not that value: the version's tag already exists, and a retry
+a second later simply works. `RELEASE_REQUIRED` is the wrong-door refusal and the only one where
 nothing was attempted.
 
 The enum reaches `docs/openapi.yml` through `api/ApiError`, a schema-only record declared on the
@@ -408,13 +414,68 @@ are all real, which is what lets `ReleaseControllerTest` assert the compare-and-
 `beforeNextPush` hook moves the default branch at the one instant a race is about; staged rather
 than raced, because a real race is nondeterministic about which side loses.
 
-## The SoftwareRelease event
+## The release tag, and the dance it needs
 
-A **release** publishes `SoftwareRelease {projectId, repository, branch, version}` the instant the
-push is accepted. A plain integrate publishes nothing — an event that fired for both would make "a
-release happened" unlistenable, which is the one thing this event exists to be.
+A release pushes **two** refs: `HEAD:refs/heads/<main>` and an annotated tag named the version
+exactly — `2026.801.63140`, **no `v` prefix**, because it is the same string the manifests, the event
+and the image tags carry. The tagger is the release commit's own identity and the tag message is the
+release commit's subject line. A plain integrate tags nothing; it stamps no version, so there is no
+name for a tag to be.
 
-`ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SoftwareReleaseAnnouncer` is
+**The obvious way to create it silently does nothing.** `prepareWorktree` adds its worktree **on the
+bare origin**, and a linked worktree shares the common ref store — which here is the bare
+qits-artifacts serves off the same volume. So `git tag -a` writes `refs/tags/<version>` straight into
+the served repository with no push at all, the push then reports `[up to date]` with **zero receive
+commands**, and nothing downstream ever sees the tag. It also breaks the flow's "no ref moves before
+the push" property, because a failed push now leaves the tag behind.
+
+The dance that works, and the order is the whole of it:
+
+    git tag -a <version> -m <subject> HEAD
+    git rev-parse refs/tags/<version>      # the TAG OBJECT's sha
+    git tag -d <version>                   # the ref goes, the object stays
+    git push --atomic --porcelain -o qits.release <remote> \
+        HEAD:refs/heads/<main> <tagobj>:refs/tags/<version>
+
+**One push, `--atomic`, never `--force`.** One push is one receive-pack, so both commands ride one
+pre-receive and one post-receive. Atomic is what makes the pair all-or-nothing: a refused branch (the
+default branch moved) leaves no tag, and a refused tag takes the branch update down with it. Without
+`--atomic` the tag lands even when the branch is refused — measured.
+
+**That refusal is the version-uniqueness guarantee** (`VERSION_ALREADY_RELEASED`). Nothing checked
+version uniqueness before, and `VersionStamp` used to claim the fast-forward push rejected a
+same-second tie — it does not, because the lease serializes releases and the second one's push is a
+clean fast-forward. A non-forced push cannot overwrite an existing tag ref, so the tag turns the
+missing constraint into a property of the SCM. It fires from either end: the shared ref store means
+`git tag -a` itself refuses a name that is already there, before this flow has moved anything at all;
+the push covers a writer that gets there later.
+
+It is **reachable**, not theoretical. `ReleaseControllerTest`'s two concurrent releases collide most
+runs — the lease runs them back to back and a release of a small repository is well under a second,
+so both stamp one version and the second is refused. That test asserts the pair of outcomes rather
+than "both land", which it did before the tag existed.
+
+**The `finally` cleans up only its own tag ref.** A run that died between `tag -a` and `tag -d` left
+a ref in the served bare that would refuse the repository's next release of that version, so it is
+removed — guarded by a flag that is true only between those two calls. A tag that was already there
+is not ours, and neither is the one the push just created: deleting the latter would erase the
+release's own tag from the repository it just landed in.
+
+## The SCMRelease event
+
+A **release** publishes `SCMRelease {projectId, repository, branch, version}` the instant the push is
+accepted. A plain integrate publishes nothing — an event that fired for both would make "a release
+happened" unlistenable, which is the one thing this event exists to be.
+
+**It means source control has this release, and nothing more.** It does not mean an artifact exists:
+that statement is qits-ci's own `SoftwareRelease`, published once per artifact when a repository's
+release pipeline goes green, and the gap between the two is a whole build. The event here was called
+`SoftwareRelease` until 2026-08-01 and was read as a statement about a package, which worked by
+timing rather than by design — see the superproject's `scm-release-split-plan.md`. **The wire name is
+the class name** (`QitsEvent.signature()` returns the simple class name), so the class rename was the
+wire rename; the payload's four fields did not change.
+
+`ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SCMReleaseAnnouncer` is
 the implementation, so the domain module stays free of the bus and its transport (the `RunAnnouncer`
 precedent in qits-ci, copied down to the package name). It is announced **after the push and before
 the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
@@ -422,7 +483,7 @@ statement conditional on the transaction would be silent about a release that re
 
 Four things about it are easy to undo by accident:
 
-- **`SoftwareReleaseAnnouncer` is a `@DefaultBean`.** The suite's `FakeReleaseAnnouncer` must win,
+- **`SCMReleaseAnnouncer` is a `@DefaultBean`.** The suite's `FakeReleaseAnnouncer` must win,
   and two unqualified beans of one type fail the build at `ArcProcessor#validate` — for every test at
   once, not at runtime. Same annotation and same reason as `HttpRepositoryLookup`.
 - **`bus/EventWireReflection` is what makes the publish work in a native image.** `CanonicalJson`
@@ -432,7 +493,7 @@ Four things about it are easy to undo by accident:
   mix-in `classNames` entry the payload silently gains `eventId`. A JVM suite cannot see either.
 - **The payload is four fields and stays four.** `eventId` and `occurredAt` are record components
   and are excluded by the library's mix-in, which is why they can be components at all;
-  `SoftwareReleaseTest` asserts the exact canonical string.
+  `SCMReleaseTest` asserts the exact canonical string.
 - **`RepositoryLookup.RepositoryView` widened to `(id, projectId, mainBranch)`** for this and for
   nothing else. `projectId` is nullable: a registry that does not answer with one costs the event a
   field, never the release.

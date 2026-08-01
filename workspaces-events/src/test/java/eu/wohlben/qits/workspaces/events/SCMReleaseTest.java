@@ -22,21 +22,27 @@ import org.junit.jupiter.api.Test;
  * <p>These assertions are the contract qits-events and every release-train trigger were written
  * against, so a change here that is not also a change there is a cross-repo break rather than a
  * refactor. The payload's four keys are the frozen shape.
+ *
+ * <p><b>The wire name is the class name</b> — {@code QitsEvent.signature()} returns the simple class
+ * name — so this class renaming from {@code SoftwareRelease} to {@code SCMRelease} <i>is</i> the wire
+ * rename, and the assertion below is the whole of it. The payload did not change; only the meaning
+ * the name carries did, and qits-ci's new {@code SoftwareRelease} is what now says "an artifact
+ * exists".
  */
-class SoftwareReleaseTest {
+class SCMReleaseTest {
 
   private static final Instant PUSHED = Instant.parse("2026-08-01T12:46:03Z");
 
-  private static SoftwareRelease anEvent() {
-    return new SoftwareRelease("qits", "qits-workspaces", "release-flow", "2026.801.124603", PUSHED);
+  private static SCMRelease anEvent() {
+    return new SCMRelease("qits", "qits-workspaces", "release-flow", "2026.801.124603", PUSHED);
   }
 
   @Test
   void theSignatureIsTheClassNameAndTheNameFollowsIt() {
-    SoftwareRelease event = anEvent();
+    SCMRelease event = anEvent();
 
-    assertEquals("SoftwareRelease", event.signature());
-    assertEquals("SoftwareRelease", event.name());
+    assertEquals("SCMRelease", event.signature());
+    assertEquals("SCMRelease", event.name());
   }
 
   @Test
@@ -46,7 +52,7 @@ class SoftwareReleaseTest {
 
   @Test
   void theEventIdIsAV4GeneratedOnceAndStableThereafter() {
-    SoftwareRelease event = anEvent();
+    SCMRelease event = anEvent();
 
     UUID first = event.eventId();
     assertEquals(4, first.version(), "the idempotency key must be random, not derived");
@@ -63,7 +69,7 @@ class SoftwareReleaseTest {
     assertEquals(
         List.of("description", "name", "occurredAt", "parentId", "payload"),
         json.properties().stream().map(Map.Entry::getKey).toList());
-    assertEquals("SoftwareRelease", json.get("name").asText());
+    assertEquals("SCMRelease", json.get("name").asText());
     assertEquals("2026-08-01T12:46:03Z", json.get("occurredAt").asText());
     assertEquals(
         "{\"branch\":\"release-flow\",\"projectId\":\"qits\","
@@ -75,7 +81,7 @@ class SoftwareReleaseTest {
 
   @Test
   void theIdentityAndTheClockTravelInTheEnvelopeAndNeverInThePayload() {
-    SoftwareRelease event = anEvent();
+    SCMRelease event = anEvent();
 
     String payload = CanonicalJson.payload(event);
 
@@ -87,10 +93,10 @@ class SoftwareReleaseTest {
 
   @Test
   void aSubscriberReadsTheFourPayloadFieldsBack() {
-    SoftwareRelease published = anEvent();
+    SCMRelease published = anEvent();
 
-    SoftwareRelease received =
-        CanonicalJson.payloadTo(CanonicalJson.payload(published), SoftwareRelease.class);
+    SCMRelease received =
+        CanonicalJson.payloadTo(CanonicalJson.payload(published), SCMRelease.class);
 
     assertEquals(published.projectId(), received.projectId());
     assertEquals(published.repository(), received.repository());

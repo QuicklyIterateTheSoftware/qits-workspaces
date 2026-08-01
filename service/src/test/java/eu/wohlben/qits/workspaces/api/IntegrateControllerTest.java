@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
  * <p>An integrate lands a workspace on <b>its parent</b>: a task branch on the epic it forked from,
  * which the epic later releases. So the fixture every case here builds is a two-level stack, and the
  * assertions that carry the suite are the two things an integrate is <em>not</em>: no version
- * anywhere near the commit, and no {@code SoftwareRelease}. Everything it <em>is</em> — the detached
+ * anywhere near the commit, and no {@code SCMRelease}. Everything it <em>is</em> — the detached
  * worktree, the single two-parent commit, the real push, the 409 family — it shares with the release
  * flow by construction, because {@code ReleaseIntegrator} is one method told which mode it is in.
  * {@code ReleaseControllerTest} is where those shared properties are proven hardest.
@@ -199,7 +199,11 @@ public class IntegrateControllerTest {
     assertEquals(
         List.of(),
         announcer.announced(),
-        "a plain integrate is not a release and must publish no SoftwareRelease");
+        "a plain integrate is not a release and must publish no SCMRelease");
+    assertEquals(
+        "",
+        inOrigin(repoId, "git", "tag", "-l"),
+        "a plain integrate stamps no version, so there is nothing for a tag to name");
   }
 
   /**
@@ -234,7 +238,11 @@ public class IntegrateControllerTest {
         inOrigin(repoId, "git", "show", "master:pom.xml")
             .contains("<version>" + version + "</version>"),
         "the release is where the bump happens, and it happens once for the whole stack");
-    assertEquals(1, announcer.announced().size(), "one release, one SoftwareRelease");
+    assertEquals(1, announcer.announced().size(), "one release, one SCMRelease");
+    assertEquals(
+        version,
+        inOrigin(repoId, "git", "tag", "-l"),
+        "one tag for the stack too — the integrate on the way in tagged nothing");
   }
 
   // -----------------------------------------------------------------------------------------
