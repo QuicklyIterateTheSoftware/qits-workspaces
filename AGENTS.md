@@ -104,11 +104,16 @@ datasource. Never touch the monorepo's `db/migration` — that is a different da
 
 The lineage is `V1` (workspace, workspace_event), `V2` (service_event, workspace_bootstrap_run,
 workspace_prompt_draft, workspace_prompt_attachment), `V3` (one active workspace per branch),
-then `V4` (service_event.workspace_row_id).
+then `V4` (service_event.workspace_row_id), `V5` (no more CHECK constraints — see below).
 `V1`'s header says the `V2` tables were deliberately left out; that was true when it was written and
 is not any more — `V2`'s header explains why. Likewise `V1`'s "no unique constraint" note is
 superseded by `V3` for the branch. Extend, never renumber, and never edit an applied file's body:
 Flyway checksums it.
+
+**No CHECK constraints on enum columns** — the enum is the domain boundary and the database keeps
+no second copy. V5 dropped the whole class: H2 2.4.240 evaluates a check's compiled IN-set against
+the session that compiled it, so a pool rotation turns every insert into 23514 until a restart
+(h2database#4063/#4291, seen live on the V4 boot).
 
 **H2 has no partial indexes.** `create unique index … where …` is a syntax error, so a rule that
 only applies to some rows carries its predicate in a generated column instead and relies on unique
