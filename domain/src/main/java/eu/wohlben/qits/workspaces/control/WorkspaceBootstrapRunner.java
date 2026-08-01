@@ -146,7 +146,14 @@ public class WorkspaceBootstrapRunner {
                 // container, not via a host Command row.
                 Integer recordedExit = resolved == BootstrapOutcome.SKIPPED ? null : exitCode;
                 bootstrapRunService.recordOutcome(
-                    repoId, workspaceId, rowId, stepName, stepName, resolved, null, recordedExit);
+                    repoId,
+                    workspaceId,
+                    rowId,
+                    resolveDeclaredId(rowId, stepName),
+                    stepName,
+                    resolved,
+                    null,
+                    recordedExit);
               } catch (RuntimeException e) {
                 // A workspace deleted mid-chain (NotFound) or an unknown outcome string must not
                 // escape into the dispatcher — a dropped row is diagnostic loss, not a failure.
@@ -287,6 +294,33 @@ public class WorkspaceBootstrapRunner {
                                 "Bootstrap step not declared in the workspace qits config: "
                                     + stepId)))
         .orElse(stepId);
+  }
+
+  /**
+   * Maps a daemon-reported step name back to its config-declared {@code id:} — the inverse of
+   * {@link #resolveStepName}, and what {@code workspace_bootstrap_run.bootstrapCommandId} stores.
+   * The daemon's protocol {@code BootstrapOutcome} frame carries the
+   * NAME only, while the panel joins runs against the declared chain on the ID; recording the name
+   * here is what rendered a step with {@code id: greet} / {@code name: say-hello} as never-run.
+   * Falls back to the name when no config is readable (no daemon live, or the read timed out) —
+   * ids default to names, so the fallback is exact for every step that declares no {@code id:}.
+   * Safe to call from the sink-dispatch thread: the {@code ConfigView} reply completes on the
+   * socket thread, never through the sink dispatcher.
+   */
+  private String resolveDeclaredId(Long workspaceRowId, String stepName) {
+    if (configReader.isUnsatisfied()) {
+      return stepName;
+    }
+    return configReader
+        .get()
+        .readConfig(workspaceRowId)
+        .flatMap(
+            view ->
+                view.config().bootstrap().stream()
+                    .filter(decl -> decl.name().equals(stepName))
+                    .findFirst()
+                    .map(QitsConfig.BootstrapDecl::id))
+        .orElse(stepName);
   }
 
   /** Enter the in-flight guard and hand the work to the manual-run executor. */

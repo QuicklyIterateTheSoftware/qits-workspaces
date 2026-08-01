@@ -1,0 +1,14 @@
+-- service_event gains the workspace ROW id. V2 kept only the string label on purpose (an event
+-- outlives its workspace row, so no FK) -- but the label is branch-derived and RECYCLABLE, so the
+-- label alone cannot say which workspace an event belonged to. The publish path has carried
+-- `workspaceRowId` in ServiceEventDto all along; the persister dropped it because this column did
+-- not exist, every row read back `workspaceRowId: null`, and the SPA's recycled-label guard
+-- (service-events-feed.ts, which filters on the row id for exactly this reason) then disowned the
+-- workspace's OWN events -- the feed rendered empty.
+--
+-- Nullable, and still no FK: same reasoning as V2's header, the feed is diagnostic history and the
+-- row id is identity metadata on it, not a relation. Existing rows are NOT backfilled -- the label
+-- does not determine the row id (that is the recycling problem itself), and these rows are
+-- short-lived diagnostics; the guard drops the pre-migration remainder, which is the correct
+-- reading of "provenance unknown".
+alter table service_event add column workspace_row_id bigint;

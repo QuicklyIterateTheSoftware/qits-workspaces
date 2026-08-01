@@ -87,6 +87,10 @@ public class ServiceEventControllerTest {
         .body("events[0].source", equalTo("logs/app.log"))
         .body("events[0].anchorFrom", equalTo(12))
         .body("events[0].anchorTo", equalTo(14))
+        // The row id must survive the DB round trip: the SPA's recycled-label guard filters on it,
+        // so a null here makes the feed disown the workspace's own events.
+        .body("events[0].workspaceRowId", equalTo(1))
+        .body("events[1].workspaceRowId", equalTo(1))
         .body("events[1].summary", equalTo("ready (pattern matched)"));
 
     given()

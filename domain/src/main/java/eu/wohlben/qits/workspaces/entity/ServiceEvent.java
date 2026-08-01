@@ -32,6 +32,15 @@ public class ServiceEvent extends PanacheEntityBase {
   @Column(name = "workspace_id", nullable = false)
   public String workspaceId;
 
+  /**
+   * The workspace table's surrogate key. {@code workspaceId} above is a recyclable branch-derived
+   * label, so this is what says <em>which</em> workspace the event belonged to — the SPA's
+   * recycled-label guard filters on it. Nullable (rows written before V4 have none) and no FK: the
+   * event outlives the row, see V2's header.
+   */
+  @Column(name = "workspace_row_id")
+  public Long workspaceRowId;
+
   @Column(name = "service_id", nullable = false)
   public String serviceId;
 

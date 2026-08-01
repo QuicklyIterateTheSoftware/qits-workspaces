@@ -28,6 +28,7 @@ public class ServiceEventPersister {
     entity.id = UUID.randomUUID().toString();
     entity.repoId = event.repoId();
     entity.workspaceId = event.workspaceId();
+    entity.workspaceRowId = event.workspaceRowId();
     entity.serviceId = event.serviceId();
     entity.serviceName = event.serviceName();
     entity.kind = event.kind();

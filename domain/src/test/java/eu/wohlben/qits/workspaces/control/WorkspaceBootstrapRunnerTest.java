@@ -40,7 +40,9 @@ import org.junit.jupiter.api.Test;
  * workspace is forked (so the provision-triggered — asynchronous — chain sees it deterministically;
  * a file written into the checkout afterwards would race the async observer). Auto-start services
  * are config-declared too, staged into the {@link FakeWorkspaceConfigReader}. {@code BootstrapRun}
- * rows are keyed by the step NAME, so {@code bootstrapCommandId} equals the step name throughout.
+ * rows are keyed by the config-declared step {@code id:} (which defaults to the name) — most tests
+ * here declare no {@code id:}, so {@code bootstrapCommandId} equals the step name for them; the
+ * declared-id test stages a config where the two differ.
  *
  * <p>Two cross-test hygiene rules this class follows because the app (and the fakes) are shared
  * across its methods: (1) every staged service id is unique per test — {@code FakeContainerRuntime}
@@ -391,6 +393,31 @@ public class WorkspaceBootstrapRunnerTest {
     BootstrapRunDto run = awaitOutcome(repoId, "own-run", BootstrapOutcome.SUCCEEDED);
     assertEquals(0, run.exitCode());
     assertNull(run.commandId(), "an in-container step leaves no host Command audit row");
+  }
+
+  @Test
+  public void recorderPersistsTheDeclaredIdNotTheStepName() throws Exception {
+    // The daemon's BootstrapOutcome frame carries the step NAME only ("say-hello"); the declared
+    // chain — and the panel's join — is keyed by the config-declared id ("greet"). The recorder
+    // resolves the name back to the id through the workspace config. Recording the raw name here
+    // (measured live, N2) made the join miss and rendered a green step as never-run.
+    String repoId = repoWithWorkspace("Bootstrap Declared Id", null);
+    Long rowId = workspaceIds.of(repoId, "work");
+    configReader.setConfig(
+        rowId,
+        new QitsConfig(
+            null,
+            null,
+            null,
+            null,
+            List.of(
+                new QitsConfig.BootstrapDecl("greet", "say-hello", null, "echo hi", null, null))));
+
+    bootstrapDriver.reportUnawaitedOutcome(repoId, "work", rowId, "say-hello", "SUCCEEDED", 0);
+
+    BootstrapRunDto run = awaitOutcome(repoId, "greet", BootstrapOutcome.SUCCEEDED);
+    assertEquals("say-hello", run.commandName(), "the name stays readable beside the id");
+    assertNull(lastRun(repoId, "say-hello"), "no second row keyed by the raw step name");
   }
 
   // DROPPED IN EXTRACTION: repositoryWithRecordedBootstrapRunDeletesCleanly.

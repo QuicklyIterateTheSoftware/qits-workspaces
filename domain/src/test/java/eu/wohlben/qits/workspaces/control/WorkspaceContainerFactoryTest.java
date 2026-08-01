@@ -123,6 +123,10 @@ class WorkspaceContainerFactoryTest {
     // ContainerProxyPath.base: the daemon in the other repo matches this string, so a test that
     // computed it the same way the production code does would rename itself along with the bug.
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_API_BASE_PATH=/workspaces/container/1/");
+    // The per-workspace half of QITS_PUBLIC_BASE, which the daemon completes with the declared
+    // service id (+ web-view base-path) at every spawn. Literal for the same cross-repo reason as
+    // above: ServiceProxyRoute's verbatim proxy answers under exactly this prefix.
+    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE=/workspaces/service/1");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=work");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
     assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");

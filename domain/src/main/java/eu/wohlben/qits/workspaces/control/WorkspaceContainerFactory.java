@@ -346,6 +346,13 @@ public class WorkspaceContainerFactory {
     // and the reason neither hop has to rewrite anything. Injected from ContainerProxyPath so the
     // literal is spelled once: the route and the container's idea of the route cannot drift.
     container.env("QITS_WORKSPACE_DAEMON_API_BASE_PATH", ContainerProxyPath.base(rowId));
+    // The per-workspace half of every web-viewable service's public base. The daemon spawns the
+    // dev servers, so it is the daemon that must bake QITS_PUBLIC_BASE (= this base + the declared
+    // service id + the declared web-view base-path) into each service's environment — on every
+    // spawn, crash-restart included (N3: nothing told the respawned dev server its base, and the
+    // verbatim service proxy 404'd the framed view). Same told-never-derived arrangement as the
+    // API base path above.
+    container.env("QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE", ServiceProxyPath.PREFIX + rowId);
     container.env("QITS_WORKSPACE_DAEMON_WORKSPACE_ID", workspaceId);
     container.env("QITS_WORKSPACE_DAEMON_REPOSITORY_ID", repoId);
     container.env("QITS_WORKSPACE_DAEMON_BRANCH", branch == null ? "" : branch);

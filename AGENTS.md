@@ -103,7 +103,8 @@ id; the two are in different databases and a foreign key cannot span them.
 datasource. Never touch the monorepo's `db/migration` — that is a different database.
 
 The lineage is `V1` (workspace, workspace_event), `V2` (service_event, workspace_bootstrap_run,
-workspace_prompt_draft, workspace_prompt_attachment) then `V3` (one active workspace per branch).
+workspace_prompt_draft, workspace_prompt_attachment), `V3` (one active workspace per branch),
+then `V4` (service_event.workspace_row_id).
 `V1`'s header says the `V2` tables were deliberately left out; that was true when it was written and
 is not any more — `V2`'s header explains why. Likewise `V1`'s "no unique constraint" note is
 superseded by `V3` for the branch. Extend, never renumber, and never edit an applied file's body:
