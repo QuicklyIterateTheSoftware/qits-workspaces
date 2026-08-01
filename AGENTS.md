@@ -66,6 +66,14 @@ keep reading `quarkus.http.root-path`.
 `eu.wohlben.qits.workspaces.*`, split across maven modules with disjoint sub-packages so there is no
 split package:
 
+- `gitmirror/` — `gitmirror`, and nothing else. **The git substrate**, and the one module here with
+  no Quarkus in it at all: no CDI, no MicroProfile config, no Jackson. It owns the local mirror per
+  repository, the worktrees a merge is built in, and the push primitives — and it takes its
+  collaborators as constructor arguments, so its tests run offline against throwaway local bares
+  with no container, no database and no augmentation. `domain` builds it from config in exactly one
+  bean (`GitMirrorRegistry`) and calls it through a handful of records. The boundary is deliberate:
+  the same machinery could move into a daemon of its own, or into qits-artifacts as in-process JGit,
+  without the release flow noticing.
 - `domain/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the
   sense that matters: no JAX-RS, no websockets. Entities are Panache active-record with public
   fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
@@ -284,6 +292,33 @@ bumped too — for the publishable library repos that inner manifest is the rele
 A missing or unparseable manifest **fails loudly**. A bump that silently skips a file ships a
 release whose artifacts still carry the previous version, and that is discovered much later.
 
+## The mirror, and what it replaced
+
+Nothing here opens `qits.repositories.data-dir` any more. Each repository is **mirrored** under
+`qits.workspaces.data-dir` (`mirrors/<repoId>.git`, worktrees beside it), filled by `git clone
+--mirror` and kept current by `git fetch --prune` — qits-ci's own cache pattern, one size larger
+because this service has to merge and not only read config.
+
+Three kinds of git call, and the distinction decides correctness:
+
+- **Wire reads** (`ls-remote`) answer *does this branch exist* and *what sha does the host hold*.
+  Authoritative, and deliberately not cached: `ensureContainer` **abandons a workspace** on that
+  answer, and a mirror one fetch behind would report a live branch as gone. An unreachable host
+  **throws** rather than answering "gone", because "I could not ask" and "it is not there" were one
+  value while the origin was a directory and must not be over the wire.
+- **Local reads** (`rev-list`, `merge-tree`, `merge-base`) need objects, so they run in the mirror
+  and the caller refreshes first. `qits.workspace.git.mirror-freshness-ms` bounds how stale one may
+  be; it is 5 s because the workspace listing computes ahead/behind per workspace and a browser
+  polls it. Nothing that *decides* anything reads through the window — `canCleanupBranch` forces a
+  refresh, and a refresh that fails leaves the counts UNKNOWN, which refuses.
+- **Writes** are pushes. All of them. `createBranch` is `push <from>:refs/heads/<new>`, cleanup and
+  discard are `push :refs/heads/<branch>`, a merge is a worktree on the mirror plus
+  `push HEAD:refs/heads/<target>`, a release is that plus the tag. There is no other door, which is
+  the property the whole change exists to establish.
+
+Only the default branch's push carries `-o qits.release`; nothing else writes the default branch, so
+nothing else needs an option. The mirror is a **cache**: delete it and the next request re-clones.
+
 ## The two doors: release and integrate
 
 **`POST /workspaces/api/workspaces/{id}/release`** is **the one door into a repository's default
@@ -332,20 +367,22 @@ a resolution state machine — all wrong-shaped for a ref a pipeline overwrites 
 `BranchReleaseControllerTest` names its fixture branches that way, slash and all, which is also what
 proves the worktree slug survives a branch name that cannot be a directory name.
 
-**It pushes a repository this service is already holding, and that is the point.** The bare origin
-is on our own disk, so `main` could be advanced by writing the ref — which is exactly what
-`mergeIntoTarget` does, and it is why **no merge this service ever performed produced a CI run**: a
-filesystem ref update fires no `post-receive`. Pushing over HTTP through qits-artifacts makes
-receive-pack the sole writer of the default branch, so the protection hook sees every release and
-the existing post-receive → qits-ci → build chain happens for the ordinary reason. Nothing
-downstream learns a new trick. The address is `qits.artifacts.url` behind the `GitHostAddress` port.
+**Every ref this service moves is moved by a push, and that is the point.** The bare origins used to
+be on our own disk, on the volume qits-artifacts serves, so a branch could be created, merged or
+deleted by writing the ref — which is exactly what this service did, and it is why **no branch
+creation, no merge and no cleanup it ever performed produced a CI run**: a filesystem ref update
+fires no `post-receive`. Pushing over HTTP through qits-artifacts makes receive-pack the sole writer
+of every ref, so the protection hook sees every release and the existing post-receive → qits-ci →
+build chain happens for the ordinary reason. Nothing downstream learns a new trick. The address is
+`qits.artifacts.url` behind the `GitHostAddress` port.
 
 Five properties, each of which is why a step is where it is:
 
-- **`git worktree add --detach` is what makes "no partial state" true.** The merge, the bump and the
-  commit all happen against a `HEAD` that is not a branch, so a conflict, a bump failure or a crash
-  leaves the target branch **byte-identical**. A failed run needs no unwind — only a worktree
-  removal, which is in a `finally`. The orphaned commit is git's to collect.
+- **`git worktree add --detach` on the MIRROR is what makes "no partial state" true.** The merge,
+  the bump, the commit and the tag all happen against a `HEAD` that is not a branch, in a repository
+  nobody serves, so a conflict, a bump failure or a crash leaves the target branch
+  **byte-identical**. A failed run needs no unwind — only a worktree removal, which `MirrorWorktree`
+  does on close. The orphaned commit is git's to collect.
 - **`git merge --no-ff --no-commit` is what makes bump-and-merge one commit.** `MERGE_HEAD` stays
   set and the index stays staged; the bump writes into that same index; the single `git commit` that
   follows is a two-parent merge that also carries the version change. No amend, no second commit.
@@ -398,23 +435,32 @@ platform-wide:
 - **`.tmp-merge-<System.currentTimeMillis()>` collides** within a millisecond. The flow's worktree
   is `.tmp-integrate-<slugged source branch>`, unique per repository by construction and the reason
   the flow is keyed by branch rather than by a workspace row.
-- **`GitExecutor` had no timeout at all.** The push is this service's first *network* git call and
-  the flow answers synchronously, so it is the one invocation with a deadline
-  (`qits.workspace.integrate.push-timeout-ms`). The bound covers the whole call, not just
-  `waitFor` — a transport that connects and then says nothing blocks in `readLine()`, so the drain
-  runs on its own thread and `destroyForcibly` is what unblocks it. Local filesystem git keeps its
-  unbounded wait, where a bound would only turn slow into broken.
+- **`GitExecutor` had no timeout at all.** Every git call that talks to the git host — the mirror's
+  clone and fetch, `ls-remote`, and every push — now carries one
+  (`qits.workspace.git.network-timeout-ms`, which widened and replaced
+  `qits.workspace.integrate.push-timeout-ms` when the push stopped being the only network call).
+  The bound covers the whole call, not just `waitFor` — a transport that connects and then says
+  nothing blocks in `readLine()`, so the drain runs on its own thread and `destroyForcibly` is what
+  unblocks it. Local git **inside the mirror** keeps its unbounded wait, where a bound would only
+  turn slow into broken. The machinery lives in `gitmirror`'s `GitCli`; `GitExecutor` delegates to
+  it rather than carrying a second copy.
 
 **`TestOrigin` sets `receive.advertisePushOptions`**, and it is load-bearing rather than tidy. JGit
 advertises push options in production; a local `receive-pack` does **not** by default, and `git push
 --push-option` fails outright against a server that did not advertise them. Without that line the
-fixture would refuse the exact argv that ships. `FakeGitHostAddress` points the push at the local
-bare and replaces the **transport only** — the push, the ref negotiation and the fast-forward check
-are all real, which is what lets `ReleaseControllerTest` assert the compare-and-swap. Its
-`beforeNextPush` hook moves the default branch at the one instant a race is about; staged rather
-than raced, because a real race is nondeterministic about which side loses.
+fixture would refuse the exact argv that ships. `FakeGitHostAddress` points the mirror at the local
+bare and replaces the **transport only** — the clone, the fetch, the `ls-remote`, the push, the ref
+negotiation and the fast-forward check are all real, which is what lets `ReleaseControllerTest`
+assert the compare-and-swap.
 
-## The release tag, and the dance it needs
+**`GitHostAddress` has two methods returning one string, and the split is why.** `fetchUrl` is asked
+by every read; `pushUrl` is asked once, immediately before a push. `FakeGitHostAddress.beforeNextPush`
+hangs its staged second writer on the second of those, so it fires at the one instant a race is about
+rather than on the mirror's first fetch. A deployment returns the same value from both
+(`ConfiguredGitHostAddress` literally does). Staged rather than raced, because a real race is
+nondeterministic about which side loses.
+
+## The release tag
 
 A release pushes **two** refs: `HEAD:refs/heads/<main>` and an annotated tag named the version
 exactly — `2026.801.63140`, **no `v` prefix**, because it is the same string the manifests, the event
@@ -422,20 +468,20 @@ and the image tags carry. The tagger is the release commit's own identity and th
 release commit's subject line. A plain integrate tags nothing; it stamps no version, so there is no
 name for a tag to be.
 
-**The obvious way to create it silently does nothing.** `prepareWorktree` adds its worktree **on the
-bare origin**, and a linked worktree shares the common ref store — which here is the bare
-qits-artifacts serves off the same volume. So `git tag -a` writes `refs/tags/<version>` straight into
-the served repository with no push at all, the push then reports `[up to date]` with **zero receive
-commands**, and nothing downstream ever sees the tag. It also breaks the flow's "no ref moves before
-the push" property, because a failed push now leaves the tag behind.
+**It used to need a dance, and it does not any more.** `prepareWorktree` added its worktree **on the
+bare origin**, and a linked worktree shares the common ref store — which there was the bare
+qits-artifacts serves off the same volume. So `git tag -a` wrote `refs/tags/<version>` straight into
+the served repository with no push at all, the push then reported `[up to date]` with **zero receive
+commands**, and a failed run left the tag behind in a repository other people read. The workaround
+was `tag -a` → `rev-parse` the tag **object** → `tag -d` → push by sha, plus a `finally` that swept
+up the ref when a run died mid-dance.
 
-The dance that works, and the order is the whole of it:
+The worktree is on a **mirror** now, which nobody serves, so all three reasons are gone and so are
+all three steps:
 
     git tag -a <version> -m <subject> HEAD
-    git rev-parse refs/tags/<version>      # the TAG OBJECT's sha
-    git tag -d <version>                   # the ref goes, the object stays
     git push --atomic --porcelain -o qits.release <remote> \
-        HEAD:refs/heads/<main> <tagobj>:refs/tags/<version>
+        HEAD:refs/heads/<main> refs/tags/<version>:refs/tags/<version>
 
 **One push, `--atomic`, never `--force`.** One push is one receive-pack, so both commands ride one
 pre-receive and one post-receive. Atomic is what makes the pair all-or-nothing: a refused branch (the
@@ -446,20 +492,21 @@ default branch moved) leaves no tag, and a refused tag takes the branch update d
 version uniqueness before, and `VersionStamp` used to claim the fast-forward push rejected a
 same-second tie — it does not, because the lease serializes releases and the second one's push is a
 clean fast-forward. A non-forced push cannot overwrite an existing tag ref, so the tag turns the
-missing constraint into a property of the SCM. It fires from either end: the shared ref store means
-`git tag -a` itself refuses a name that is already there, before this flow has moved anything at all;
-the push covers a writer that gets there later.
+missing constraint into a property of the SCM. It still fires from **both** ends: the mirror is
+refreshed from the git host at step 0, so its tags are the host's tags and `git tag -a` refuses a
+name already released before this flow has pushed anything; the push covers a writer who gets there
+later.
 
 It is **reachable**, not theoretical. `ReleaseControllerTest`'s two concurrent releases collide most
 runs — the lease runs them back to back and a release of a small repository is well under a second,
 so both stamp one version and the second is refused. That test asserts the pair of outcomes rather
 than "both land", which it did before the tag existed.
 
-**The `finally` cleans up only its own tag ref.** A run that died between `tag -a` and `tag -d` left
-a ref in the served bare that would refuse the repository's next release of that version, so it is
-removed — guarded by a flag that is true only between those two calls. A tag that was already there
-is not ours, and neither is the one the push just created: deleting the latter would erase the
-release's own tag from the repository it just landed in.
+**What the `finally` sweeps now is cache hygiene, not a ref.** A run that tagged and then failed to
+push leaves the tag in the mirror, where it names nothing anybody can see — but it would refuse this
+repository's next attempt at the same version out of a local leftover, so it is dropped. It cannot
+erase a real release tag, because a real release tag is on the git host and this deletes only the
+copy.
 
 ## The SCMRelease event
 
@@ -569,7 +616,15 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first,
   or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
-  returns a repo id; pair it with `FakeRepositoryLookup.register`.
+  returns a repo id; pair it with `FakeRepositoryLookup.register`. The suite sets
+  `qits.workspaces.data-dir` to a **different** directory from `qits.repositories.data-dir` on
+  purpose: that separation is the change under test, and a suite pointing both at one tree would
+  prove nothing. It also sets `qits.workspace.git.mirror-freshness-ms=0`, because a fixture that
+  changes between two assertions must never be served from a window.
+- `gitmirror/`'s own suite (`RepoMirrorTest`) is the one that proves the substrate: clone, fetch,
+  prune, `ls-remote` answering while the mirror is stale, a branch create and delete arriving as
+  pushes, the worktree merge/commit/tag/atomic-push sequence, and a leftover worktree being pruned
+  rather than inherited. No Quarkus, no database — 14 cases, about a second.
 - `domain/src/test/resources/version-fixtures/` holds **copies of real manifests** — qits-ci's
   five-module reactor verbatim, comments and all, plus an SPA's `package.json` with a trimmed lock
   and a pnpm library repo. That is a deliberate exception to "tests build their own": the bump

@@ -3,7 +3,9 @@ package eu.wohlben.qits.workspaces.control;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
- * The workspace sidecar written beside the bare origin by {@link WorkspaceMetadataStore}.
+ * The workspace sidecar written under this service's own data tree by {@link
+ * WorkspaceMetadataStore}. It used to sit beside the bare origin, on the shared repositories volume;
+ * it is not git and nothing else read it, so it moved.
  *
  * <p>Registered for reflection because {@code WorkspaceMetadataStore} serializes it with an
  * <strong>injected {@code ObjectMapper}</strong> rather than through JAX-RS. Quarkus registers the

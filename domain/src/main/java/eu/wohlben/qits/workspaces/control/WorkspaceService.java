@@ -11,6 +11,12 @@ import eu.wohlben.qits.workspaces.entity.WorkspaceEvent;
 import eu.wohlben.qits.workspaces.entity.WorkspaceEventType;
 import eu.wohlben.qits.workspaces.entity.WorkspaceRuntimeStatus;
 import eu.wohlben.qits.workspaces.entity.WorkspaceStatus;
+import eu.wohlben.qits.workspaces.gitmirror.GitMirrorException;
+import eu.wohlben.qits.workspaces.gitmirror.MergeOutcome;
+import eu.wohlben.qits.workspaces.gitmirror.MirrorWorktree;
+import eu.wohlben.qits.workspaces.gitmirror.PushOutcome;
+import eu.wohlben.qits.workspaces.gitmirror.PushSpec;
+import eu.wohlben.qits.workspaces.gitmirror.RepoMirror;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceEventRepository;
 import eu.wohlben.qits.workspaces.persistence.WorkspaceRepository;
 import io.quarkus.narayana.jta.QuarkusTransaction;
@@ -20,11 +26,9 @@ import jakarta.enterprise.event.Event;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
@@ -56,8 +60,6 @@ public class WorkspaceService {
    * across and hard-deleted prompt drafts and attachments itself.
    */
   @Inject Event<WorkspaceResolved> workspaceResolvedEvent;
-
-  @Inject GitExecutor git;
 
   @Inject ContainerRuntime containers;
 
@@ -156,8 +158,16 @@ public class WorkspaceService {
     processExecutor.shutdownNow();
   }
 
-  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
-  String dataDir;
+  /**
+   * The git substrate: a mirror per repository, the worktrees a merge runs in, and the pushes that
+   * are now the only way a ref of a served repository moves.
+   *
+   * <p>Nothing in this class opens {@code qits.repositories.data-dir} any more. Every branch create,
+   * every branch delete and every merge used to write a ref there directly, and every one of them
+   * fired no {@code post-receive} — so a workspace created, integrated or cleaned up produced no CI
+   * run and no event. They are pushes now, and the chain downstream happens for the ordinary reason.
+   */
+  @Inject GitMirrorRegistry mirrors;
 
   /** How long an integrate waits for a busy repository before refusing — see {@link #acquireIntegrateLease}. */
   @ConfigProperty(name = "qits.workspace.integrate.lease-wait-ms", defaultValue = "60000")
@@ -187,45 +197,31 @@ public class WorkspaceService {
   @Inject Instance<ReleaseAnnouncer> releaseAnnouncer;
 
   /**
-   * Creates {@code branch} from {@code parentBranch} host-side in the bare origin.
+   * Creates {@code branch} from {@code parentBranch} — <b>as a push</b>, through the git host.
+   *
+   * <p>This was {@code git branch} in the bare origin on the shared volume, and it is the plainest
+   * example of what that cost: a filesystem ref update fires no {@code post-receive}, so <b>no
+   * workspace anyone has ever created produced a CI run</b>. A push does, because it is a push.
    *
    * <p>An existing ref is a <em>client</em> error, not a server one: this is the normal-path guard
    * for "each workspace gets its own branch", and asking for a branch that is already there is a
    * 409 the caller can act on — a typo'd "branch off" name, or a branch created outside qits that
-   * the caller meant to adopt. It is checked up front rather than inferred from git's exit status,
-   * which cannot distinguish "ref exists" from a genuinely broken origin; the latter still 500s.
+   * the caller meant to adopt. It is checked up front rather than inferred from the push's refusal,
+   * which cannot distinguish "ref exists" from a genuinely unreachable host; the latter still 500s.
    */
-  private void createBranchRefOnOrigin(Path originPath, String branch, String parentBranch) {
-    if (branchExistsOnOrigin(originPath, branch)) {
+  private void createBranchOnHost(RepoMirror mirror, String branch, String parentBranch) {
+    if (mirror.remoteHasBranch(branch)) {
       throw new ConflictException("Branch already exists: " + branch);
     }
+    mirror.refreshNow();
+    PushOutcome pushed;
     try {
-      git.exec(originPath.toFile(), "git", "branch", "--end-of-options", branch, parentBranch);
-    } catch (Exception e) {
+      pushed = mirror.createBranch(branch, parentBranch);
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Failed to create branch: " + e.getMessage());
     }
-  }
-
-  /**
-   * Whether {@code branch} already exists as a local ref in the bare origin. Uses {@code show-ref
-   * --verify --quiet}, whose non-zero exit (ref absent) is the answer, not a failure — so {@code
-   * execAllowNonZero} rather than {@code exec}. Backs workspace adoption of a pre-existing branch
-   * (see {@link #createWorkspace}).
-   */
-  private boolean branchExistsOnOrigin(Path originPath, String branch) {
-    try {
-      return git.execAllowNonZero(
-                  originPath.toFile(),
-                  "git",
-                  "show-ref",
-                  "--verify",
-                  "--quiet",
-                  "--end-of-options",
-                  "refs/heads/" + branch)
-              .exitCode()
-          == 0;
-    } catch (Exception e) {
-      return false;
+    if (!pushed.accepted()) {
+      throw new InternalServerErrorException("Failed to create branch: " + pushed.output());
     }
   }
 
@@ -344,7 +340,10 @@ public class WorkspaceService {
   public List<WorkspaceDto> listWorkspaces(String repoId) {
     repositories.require(repoId);
 
-    Path originPath = Path.of(dataDir, repoId, "origin");
+    // One refresh for the whole listing, and a failure only costs the ahead/behind numbers: the
+    // browser polls this route, so a git host that is briefly away must not 500 the page it is on.
+    RepoMirror mirror = mirrors.of(repoId);
+    refreshQuietly(mirror);
     // Live container set (one docker ps), so RUNNING stays accurate even when docker state changed
     // out-of-band; the persisted column carries the STOPPED/PROVISIONING/FAILED signal otherwise.
     Set<String> runningIds =
@@ -365,7 +364,7 @@ public class WorkspaceService {
         .map(
             wt -> {
               String branch = wt.branch;
-              AheadBehind ab = aheadBehind(originPath, wt.parent, branch);
+              AheadBehind ab = aheadBehind(mirror, wt.parent, branch);
               // Only diverged branches (both ahead and behind) can't fast-forward and so risk a
               // conflict; everything else integrates cleanly, so skip the extra merge-tree probe.
               boolean conflicts =
@@ -373,7 +372,7 @@ public class WorkspaceService {
                       && ab.behind() != null
                       && ab.ahead() > 0
                       && ab.behind() > 0
-                      && wouldConflict(originPath, wt.parent, branch);
+                      && wouldConflict(mirror, wt.parent, branch);
               WorkspaceRuntimeStatus runtime =
                   runningIds.contains(wt.workspaceId)
                       ? WorkspaceRuntimeStatus.RUNNING
@@ -484,8 +483,7 @@ public class WorkspaceService {
    * fork point. This is the single criterion the UI, the cleanup endpoint and post-integrate
    * cleanup all use.
    */
-  public boolean canCleanupBranch(
-      String repoId, Path originPath, String branch, String mainBranch) {
+  public boolean canCleanupBranch(String repoId, String branch, String mainBranch) {
     if (branch == null || branch.isBlank() || branch.startsWith("-")) {
       return false;
     }
@@ -497,8 +495,14 @@ public class WorkspaceService {
     if (parent == null || parent.isBlank() || parent.equals(branch)) {
       return false;
     }
+    RepoMirror mirror = mirrors.of(repoId);
+    // Forced, not the freshness window: this decides whether a branch is deleted, and an
+    // ahead/behind computed against a mirror that missed the last push would delete unmerged work.
+    // A refresh that fails leaves the counts UNKNOWN, and unknown refuses — which is the direction
+    // this question has to fail in.
+    refreshNowQuietly(mirror);
     // ahead == null means git couldn't compare; ahead > 0 means commits not yet in the parent.
-    Integer ahead = aheadBehind(originPath, parent, branch).ahead();
+    Integer ahead = aheadBehind(mirror, parent, branch).ahead();
     if (ahead == null || ahead != 0) {
       return false;
     }
@@ -506,7 +510,7 @@ public class WorkspaceService {
       // The working tree lives in the container; a dirty tree or unpushed commits (which the
       // origin-side ahead/behind above cannot see) both mean cleanup could destroy work.
       if (!isWorkspaceClean(repoId, wt)
-          || !isFullyPushed(repoId, originPath, wt.workspaceId, wt.id, wt.branch)) {
+          || !isFullyPushed(repoId, mirror, wt.workspaceId, wt.id, wt.branch)) {
         return false;
       }
     }
@@ -520,7 +524,7 @@ public class WorkspaceService {
    * nothing is left to lose, so treat it as pushed.
    */
   boolean isFullyPushed(
-      String repoId, Path originPath, String workspaceId, Long rowId, String branch) {
+      String repoId, RepoMirror mirror, String workspaceId, Long rowId, String branch) {
     String container = containers.containerName(workspaceId, repoId);
     if (!containers.exists(container)) {
       return true;
@@ -538,10 +542,13 @@ public class WorkspaceService {
       return false;
     }
     try {
-      String originSha =
-          git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/" + branch).trim();
-      return reportedHead.get().trim().equals(originSha);
-    } catch (Exception e) {
+      // ls-remote, not the mirror: this compares a container's HEAD against what the git host holds
+      // right now, and a cached answer here would call unpushed work pushed.
+      return mirror
+          .remoteBranchSha(branch)
+          .map(sha -> reportedHead.get().trim().equals(sha))
+          .orElse(false);
+    } catch (GitMirrorException e) {
       return false;
     }
   }
@@ -556,7 +563,7 @@ public class WorkspaceService {
    * Used to drive the branch tree's ahead/behind connector and commits popover for every branch,
    * including those without a workspace.
    */
-  public BranchSummary summarize(String repoId, Path originPath, String branch, String mainBranch) {
+  public BranchSummary summarize(String repoId, String branch, String mainBranch) {
     if (branch == null || branch.isBlank() || branch.startsWith("-")) {
       return new BranchSummary(null, 0, 0);
     }
@@ -566,7 +573,9 @@ public class WorkspaceService {
     if (parent == null || parent.isBlank() || parent.equals(branch)) {
       return new BranchSummary(null, 0, 0);
     }
-    AheadBehind ab = aheadBehind(originPath, parent, branch);
+    RepoMirror mirror = mirrors.of(repoId);
+    refreshQuietly(mirror);
+    AheadBehind ab = aheadBehind(mirror, parent, branch);
     return new BranchSummary(parent, ab.ahead(), ab.behind());
   }
 
@@ -695,35 +704,23 @@ public class WorkspaceService {
 
   /**
    * Counts how far {@code branch} is ahead of and behind its {@code parent} branch. Runs in the
-   * bare origin, which holds every workspace branch as a ref. Returns {@code (0, 0)} when the two
-   * names are the same or either is missing, and {@code (null, null)} if git can't resolve a ref.
+   * <b>mirror</b>, which holds every branch of the repository as a ref because it is a mirror.
+   * Returns {@code (0, 0)} when the two names are the same or either is missing, and {@code (null,
+   * null)} if git can't resolve a ref there — the caller refreshes first, so an unresolvable ref
+   * means the git host does not have it either.
    */
-  private AheadBehind aheadBehind(Path originPath, String parent, String branch) {
+  private AheadBehind aheadBehind(RepoMirror mirror, String parent, String branch) {
     if (parent == null
         || branch == null
         || parent.isBlank()
         || branch.isBlank()
-        || parent.equals(branch)
-        || !Files.exists(originPath)) {
+        || parent.equals(branch)) {
       return new AheadBehind(0, 0);
     }
     try {
-      // `--left-right --count A...B` prints "<behind>\t<ahead>": commits in A not B, then B not A.
-      String out =
-          git.exec(
-                  originPath.toFile(),
-                  "git",
-                  "rev-list",
-                  "--left-right",
-                  "--count",
-                  parent + "..." + branch)
-              .trim();
-      String[] parts = out.split("\\s+");
-      if (parts.length != 2) {
-        return new AheadBehind(null, null);
-      }
-      return new AheadBehind(Integer.parseInt(parts[1]), Integer.parseInt(parts[0]));
-    } catch (Exception e) {
+      var counts = mirror.aheadBehind("refs/heads/" + parent, "refs/heads/" + branch);
+      return new AheadBehind(counts.ahead(), counts.behind());
+    } catch (GitMirrorException e) {
       return new AheadBehind(null, null);
     }
   }
@@ -732,29 +729,46 @@ public class WorkspaceService {
 
   /**
    * Whether merging {@code parent} into {@code branch} would produce conflicts, decided by a real
-   * three-way merge in the object store via {@code git merge-tree --write-tree} (no working tree
-   * touched). It exits 0 when the merge is clean and 1 when it conflicts; any other outcome (error,
-   * unresolvable ref) is treated as "no conflict" so we never raise a false warning. Runs in the
-   * bare origin, which holds every branch ref.
+   * three-way merge in the mirror's object store via {@code git merge-tree --write-tree} (no working
+   * tree touched). An unresolvable ref or any other error is treated as "no conflict" so we never
+   * raise a false warning.
    */
-  private boolean wouldConflict(Path originPath, String parent, String branch) {
+  private boolean wouldConflict(RepoMirror mirror, String parent, String branch) {
     if (parent == null
         || branch == null
         || parent.isBlank()
         || branch.isBlank()
         || parent.equals(branch)
         || parent.startsWith("-")
-        || branch.startsWith("-")
-        || !Files.exists(originPath)) {
+        || branch.startsWith("-")) {
       return false;
     }
     try {
-      GitExecutor.ExecResult result =
-          git.execAllowNonZero(
-              originPath.toFile(), "git", "merge-tree", "--write-tree", branch, parent);
-      return result.exitCode() == 1;
-    } catch (Exception e) {
+      return !mirror.previewMerge("refs/heads/" + branch, "refs/heads/" + parent).clean();
+    } catch (GitMirrorException e) {
       return false;
+    }
+  }
+
+  /**
+   * Refresh a mirror inside the freshness window, and treat a git host that is briefly away as a
+   * slightly stale number rather than as an error. Every caller of this reads counts for a screen;
+   * nothing that <i>decides</i> anything comes through here.
+   */
+  private void refreshQuietly(RepoMirror mirror) {
+    try {
+      mirror.refresh();
+    } catch (GitMirrorException e) {
+      LOG.debugf(e, "could not refresh the mirror of %s", mirror.repoId());
+    }
+  }
+
+  /** {@link #refreshQuietly} ignoring the freshness window — for the decisions, not the screens. */
+  private void refreshNowQuietly(RepoMirror mirror) {
+    try {
+      mirror.refreshNow();
+    } catch (GitMirrorException e) {
+      LOG.debugf(e, "could not refresh the mirror of %s", mirror.repoId());
     }
   }
 
@@ -793,10 +807,7 @@ public class WorkspaceService {
       throw new BadRequestException("Invalid workspace id: " + workspaceId);
     }
 
-    Path originPath = Path.of(dataDir, repoId, "origin");
-    if (!Files.exists(originPath)) {
-      throw new NotFoundException("Repository origin not found on disk");
-    }
+    RepoMirror mirror = mirrors.of(repoId);
 
     // Resolved rows linger (soft delete), so only an ACTIVE workspace blocks the id — a resolved
     // one
@@ -826,18 +837,18 @@ public class WorkspaceService {
       throw new ConflictException("Branch already has an active workspace: " + newBranch);
     }
 
-    // Only the durable state is created here: the branch ref host-side in the bare origin (so
-    // ahead/behind and the merge-tree conflict probe, both origin-side, work from the first
-    // second) plus the row below. No container, no clone — provisioning is lazy: first use goes
-    // through ensureContainer, which materializes the container from this branch ref. That keeps
-    // creation free of docker and the running git server (the cli seeds depend on this).
+    // Only the durable state is created here: the branch, PUSHED to the git host (so ahead/behind
+    // and the merge-tree conflict probe both have a ref to read, and so the ordinary post-receive
+    // fires for it like every other push) plus the row below. No container, no clone — provisioning
+    // is lazy: first use goes through ensureContainer, which materializes the container from this
+    // branch. That keeps creation free of docker.
     //
     // Adoption: when asked to adopt and the branch already exists (e.g. a branch pushed or created
-    // outside qits), skip the ref creation and record the workspace over the existing branch. The
-    // normal path still creates the ref — and errors loudly if it already exists — so a typo'd
+    // outside qits), skip the creation and record the workspace over the existing branch. The
+    // normal path still creates it — and errors loudly if it is already there — so a typo'd
     // "branch off" name is never silently swallowed.
-    if (!(adoptExisting && branchExistsOnOrigin(originPath, newBranch))) {
-      createBranchRefOnOrigin(originPath, newBranch, parentBranch);
+    if (!(adoptExisting && mirror.remoteHasBranch(newBranch))) {
+      createBranchOnHost(mirror, newBranch, parentBranch);
     }
 
     Workspace workspace = new Workspace();
@@ -877,10 +888,6 @@ public class WorkspaceService {
     }
     String workspaceId = toWorkspaceSlug(branch);
 
-    Path originPath = Path.of(dataDir, repoId, "origin");
-    if (!Files.exists(originPath)) {
-      throw new NotFoundException("Repository origin not found on disk");
-    }
     // Idempotent on the BRANCH, not on the derived id: the branch is what this workspace claims, so
     // "main is already workable" is answered by whoever owns the main branch — whatever it happens
     // to be called. Keying the check on the id instead made a workspace that merely *slugged* to
@@ -1167,10 +1174,9 @@ public class WorkspaceService {
       }
     }
 
-    Path originPath = Path.of(dataDir, repoId, "origin");
     if (snapshot.branch() == null
         || snapshot.branch().isBlank()
-        || !branchExists(originPath, snapshot.branch())) {
+        || !branchExists(repoId, snapshot.branch())) {
       // The durable branch is gone: this is genuine death, so abandon (persisted before we throw).
       QuarkusTransaction.requiringNew()
           .run(
@@ -1260,28 +1266,29 @@ public class WorkspaceService {
     return s.length() <= 2000 ? s : s.substring(0, 2000);
   }
 
-  /** Whether {@code branch} still exists as a ref in the given repo's bare origin. */
+  /**
+   * Whether {@code branch} still exists in the repository — asked of the <b>git host</b>, with
+   * {@code ls-remote}, never of the mirror.
+   *
+   * <p>That distinction is load-bearing rather than tidy. This answer is what {@link
+   * #ensureContainer} abandons a workspace on, and a cache that is one fetch behind would report a
+   * live branch as gone and destroy a workspace over it. A read against the repository of record
+   * costs one round trip and cannot be wrong.
+   *
+   * <p>An unreachable git host <b>throws</b> rather than answering "gone", for the same reason: "I
+   * could not ask" and "it is not there" were one value while the origin was a local directory, and
+   * over the wire they must not be. Abandoning a workspace because a service was restarting would be
+   * the worst possible reading of a transient failure.
+   */
   public boolean branchExists(String repoId, String branch) {
-    return branchExists(Path.of(dataDir, repoId, "origin"), branch);
-  }
-
-  /** Whether {@code branch} still exists as a ref in the bare origin at {@code originPath}. */
-  private boolean branchExists(Path originPath, String branch) {
-    if (branch == null || branch.isBlank() || branch.startsWith("-") || !Files.exists(originPath)) {
+    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
       return false;
     }
     try {
-      GitExecutor.ExecResult r =
-          git.execAllowNonZero(
-              originPath.toFile(),
-              "git",
-              "rev-parse",
-              "--verify",
-              "--quiet",
-              "refs/heads/" + branch);
-      return r.exitCode() == 0;
-    } catch (Exception e) {
-      return false;
+      return mirrors.of(repoId).remoteHasBranch(branch);
+    } catch (GitMirrorException e) {
+      throw new InternalServerErrorException(
+          "Could not ask the git host about '" + branch + "': " + e.getMessage());
     }
   }
 
@@ -1499,10 +1506,14 @@ public class WorkspaceService {
 
   /** Best-effort, as in {@code doDiscard}: the release is in and a surviving ref must not undo it. */
   private void deleteLandedBranch(String repoId, String branch) {
-    Path originPath = Path.of(dataDir, repoId, "origin");
     try {
-      git.exec(originPath.toFile(), "git", "branch", "-D", "--", branch);
-    } catch (Exception e) {
+      PushOutcome deleted = mirrors.of(repoId).deleteBranch(branch);
+      if (!deleted.accepted()) {
+        LOG.warnf(
+            "the git host refused the deletion of released branch '%s' of %s: %s",
+            branch, repoId, deleted.output());
+      }
+    } catch (GitMirrorException e) {
       LOG.warnf(e, "failed to delete released branch '%s' of %s", branch, repoId);
     }
   }
@@ -1762,8 +1773,7 @@ public class WorkspaceService {
       // The integration advanced the target's origin ref; if a live workspace owns it, pull it in
       // now (before any source cleanup — target and source are distinct branches).
       notifyIncomingMerge(repoId, resolvedTarget);
-      Path originPath = Path.of(dataDir, repoId, "origin");
-      if (canCleanupBranch(repoId, originPath, source, repo.mainBranch())) {
+      if (canCleanupBranch(repoId, source, repo.mainBranch())) {
         doCleanupBranch(repoId, source, result);
         cleanedUp = true;
       }
@@ -1786,8 +1796,7 @@ public class WorkspaceService {
   public void cleanupBranch(String repoId, String branch, String result) {
     var repo = repositories.require(repoId);
 
-    Path originPath = Path.of(dataDir, repoId, "origin");
-    if (!canCleanupBranch(repoId, originPath, branch, repo.mainBranch())) {
+    if (!canCleanupBranch(repoId, branch, repo.mainBranch())) {
       throw new BadRequestException(
           "Branch '"
               + branch
@@ -1800,7 +1809,7 @@ public class WorkspaceService {
 
   /**
    * Deletes a branch: resolves its workspace as INTEGRATED when one is checked out (reusing the
-   * discard mechanics), otherwise just deletes the bare branch ref. Callers gate on {@link
+   * discard mechanics), otherwise pushes the deletion to the git host. Callers gate on {@link
    * #canCleanupBranch}.
    */
   private void doCleanupBranch(String repoId, String branch, String result) {
@@ -1809,75 +1818,65 @@ public class WorkspaceService {
       doDiscard(repoId, wt, WorkspaceStatus.INTEGRATED, result);
       return;
     }
-    Path originPath = Path.of(dataDir, repoId, "origin");
     try {
-      git.exec(originPath.toFile(), "git", "branch", "-D", branch);
-    } catch (Exception e) {
+      PushOutcome deleted = mirrors.of(repoId).deleteBranch(branch);
+      if (!deleted.accepted()) {
+        throw new InternalServerErrorException(
+            "Failed to delete branch '" + branch + "': " + deleted.output());
+      }
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException(
           "Failed to delete branch '" + branch + "': " + e.getMessage());
     }
   }
 
   /**
-   * Merges {@code sourceBranch} into {@code resolvedTarget}: runs {@code git merge} inside the
-   * target branch's workspace, creating (and afterwards removing) a temporary workspace when the
-   * target isn't already checked out. Shared by workspace and branch integration.
+   * Merges {@code sourceBranch} into {@code resolvedTarget}, in a detached worktree on the
+   * repository's <b>mirror</b>, and <b>pushes</b> the result.
+   *
+   * <p>This is the call site the whole de-filesystem change is about. It used to add a worktree on
+   * the bare origin qits-artifacts serves and let the merge advance the target's ref there, with no
+   * push — which is why <b>no merge this service ever performed produced a CI run</b>. Nothing about
+   * the merge changed; where it happens and how the result arrives did.
+   *
+   * <p>No push option: {@code refuseMainAsMergeTarget} has already established that the target is
+   * not the default branch, so this is an ordinary push through an unguarded ref. It is still a
+   * compare-and-swap — fast-forward-only belongs to receive-pack, not to an option.
    */
   private MergeResult mergeIntoTarget(String repoId, String sourceBranch, String resolvedTarget) {
-    Path originPath = Path.of(dataDir, repoId, "origin");
-
-    // Find existing workspace for target branch or create a temp one
-    Path mergeCwd = findWorkspacePathForBranch(repoId, resolvedTarget);
-    boolean isTemp = false;
-    if (mergeCwd == null) {
-      mergeCwd =
-          Path.of(dataDir, repoId, "workspaces", ".tmp-merge-" + System.currentTimeMillis())
-              .toAbsolutePath();
-      try {
-        // The workspaces dir no longer holds host checkouts (they are containers now); ensure it
-        // exists so the throwaway merge workspace can be created under it.
-        Files.createDirectories(mergeCwd.getParent());
-        // Prune first. A crashed merge leaves its worktree registered in the bare and the NEXT
-        // merge then fails with "already checked out" — a failure that outlives the process that
-        // caused it and that nothing here used to clear. Same fix the integrate flow carries.
-        git.exec(originPath.toFile(), "git", "worktree", "prune");
-        git.exec(
-            originPath.toFile(), "git", "worktree", "add", mergeCwd.toString(), resolvedTarget);
-      } catch (Exception e) {
-        throw new InternalServerErrorException(
-            "Failed to create merge workspace: " + e.getMessage());
-      }
-      isTemp = true;
-    }
-
+    RepoMirror mirror = mirrors.of(repoId);
     try {
-      // The one host-spawned synthetic commit. Identity is delivered both as -c (explicit at the
-      // call site) AND as GIT_AUTHOR_*/GIT_COMMITTER_* env scoped to this invocation — the env form
-      // is what actually guarantees attribution, because an ambient identity env inherited from the
-      // host would otherwise outrank the -c config. The env is per-invocation, so it doesn't leak
-      // into other host git calls.
-      List<String> merge = new ArrayList<>(List.of("git"));
-      merge.addAll(gitIdentity.inlineArgs());
-      merge.addAll(
-          List.of(
-              "merge", sourceBranch, "-m", "Merge " + sourceBranch + " into " + resolvedTarget));
-      String output =
-          git.exec(mergeCwd.toFile(), gitIdentity.envMap(), merge.toArray(String[]::new));
-      String commitHash = git.exec(mergeCwd.toFile(), "git", "rev-parse", "HEAD").trim();
-      boolean hasConflicts = output.toLowerCase().contains("conflict");
-      if (isTemp) {
-        git.exec(originPath.toFile(), "git", "worktree", "remove", mergeCwd.toString());
+      mirror.refreshNow();
+    } catch (GitMirrorException e) {
+      throw new InternalServerErrorException(
+          "Could not read the repository from the git host: " + e.getMessage());
+    }
+    // Named after the source branch, which is unique per repository by construction — the
+    // `.tmp-merge-<currentTimeMillis>` this replaces collided within a millisecond.
+    try (MirrorWorktree worktree =
+        mirror.worktree(sourceBranch, "refs/heads/" + resolvedTarget)) {
+      // The one host-spawned synthetic commit. Identity is delivered both as -c (explicit in the
+      // argv) AND as GIT_AUTHOR_*/GIT_COMMITTER_* env scoped to this invocation — the env form is
+      // what actually guarantees attribution, because an ambient identity env inherited from the
+      // host would otherwise outrank the -c config.
+      MergeOutcome merged =
+          worktree.mergeAndCommit(
+              "refs/heads/" + sourceBranch,
+              "Merge " + sourceBranch + " into " + resolvedTarget,
+              gitIdentity.forMirror());
+      if (!merged.clean()) {
+        // Answered rather than thrown, which is this surface's whole difference from /integrate.
+        return new MergeResult(null, true, merged.output(), false);
       }
-      return new MergeResult(commitHash, hasConflicts, output, false);
-    } catch (InternalServerErrorException e) {
-      throw e;
-    } catch (Exception e) {
-      if (isTemp) {
-        try {
-          git.exec(originPath.toFile(), "git", "worktree", "remove", "-f", mergeCwd.toString());
-        } catch (Exception ignored) {
-        }
+      String commitHash = worktree.headSha();
+      PushOutcome pushed =
+          worktree.push(PushSpec.of(PushSpec.Ref.branch("HEAD", resolvedTarget)));
+      if (!pushed.accepted()) {
+        throw new InternalServerErrorException(
+            "The merge was built but the push was refused: " + pushed.output());
       }
+      return new MergeResult(commitHash, false, merged.output(), false);
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Git merge failed: " + e.getMessage());
     }
   }
@@ -1922,8 +1921,6 @@ public class WorkspaceService {
       String result,
       String target,
       String commit) {
-    Path originPath = Path.of(dataDir, repoId, "origin");
-
     try {
       String branch = workspace.branch;
 
@@ -1941,9 +1938,9 @@ public class WorkspaceService {
 
       if (branch != null && !branch.isBlank()) {
         try {
-          git.exec(originPath.toFile(), "git", "branch", "-D", "--", branch);
-        } catch (Exception ignored) {
-          // branch may already be gone
+          mirrors.of(repoId).deleteBranch(branch);
+        } catch (GitMirrorException ignored) {
+          // the branch may already be gone, and the resolution is not conditional on the ref
         }
       }
 
@@ -1980,14 +1977,6 @@ public class WorkspaceService {
    */
   private WorkspaceProcessTracker.Handle tracker(String repoId, String workspaceId, Long rowId) {
     return processes.isResolvable() ? processes.get().begin(repoId, workspaceId, rowId) : null;
-  }
-
-  private Path findWorkspacePathForBranch(String repoId, String branch) {
-    // With workspace containers no branch has a host checkout the merge can run in, so integration
-    // always spins up a throwaway host workspace in the bare origin ({@link #mergeIntoTarget}).
-    // (Returning null unconditionally — rather than scanning the workspaces dir — also avoids
-    // matching an unrelated on-disk checkout that shares the path.)
-    return null;
   }
 
   public record MergeResult(

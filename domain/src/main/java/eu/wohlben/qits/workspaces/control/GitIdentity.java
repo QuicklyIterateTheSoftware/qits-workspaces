@@ -54,4 +54,13 @@ public class GitIdentity {
   public List<String> inlineArgs() {
     return List.of("-c", "user.email=" + email, "-c", "user.name=" + name);
   }
+
+  /**
+   * The same identity as the gitmirror module's own record. That module is framework-free and cannot
+   * read config, so it takes the pair as a value; this is the one conversion, and it is here so the
+   * configured identity stays the single source both delivery forms come from.
+   */
+  public eu.wohlben.qits.workspaces.gitmirror.CommitIdentity forMirror() {
+    return new eu.wohlben.qits.workspaces.gitmirror.CommitIdentity(name, email);
+  }
 }

@@ -60,6 +60,10 @@ public class ReleaseControllerTest {
   @ConfigProperty(name = "qits.repositories.data-dir")
   String dataDir;
 
+  /** This service's own tree — where the mirrors and their worktrees live now. */
+  @ConfigProperty(name = "qits.workspaces.data-dir")
+  String ownDataDir;
+
   @Inject FakeRepositoryLookup repositories;
   @Inject FakeGitHostAddress gitHost;
   @Inject FakeReleaseAnnouncer announcer;
@@ -368,16 +372,16 @@ public class ReleaseControllerTest {
     assertEquals(
         "",
         tagsInOrigin(repoId),
-        "the push was atomic and the tag ref was unreferenced before it, so a refused branch leaves"
-            + " no tag naming a release that did not happen");
+        "the push was atomic and the tag lived only in this service's mirror, so a refused branch"
+            + " leaves no tag naming a release that did not happen");
     assertTrue(activeLabels(repoId).contains("loser"), "the loser resolved nothing");
     assertEquals(List.of(), announcer.announced());
   }
 
   /**
-   * The version-uniqueness guarantee, at the point it actually fires: this worktree shares the
-   * served bare's ref store, so an existing {@code refs/tags/<version>} refuses the release before
-   * the flow has moved anything at all.
+   * The version-uniqueness guarantee, at the point it actually fires: the mirror is refreshed from
+   * the git host at the top of the flow, so its tags are the host's tags and an existing {@code
+   * refs/tags/<version>} refuses the release before the flow has pushed anything at all.
    *
    * <p>Nothing enforced version uniqueness before the tag existed, and the flow's own comment said
    * the fast-forward push did — it does not, because the repository lease makes two releases
@@ -405,12 +409,12 @@ public class ReleaseControllerTest {
     assertEquals(
         masterBefore,
         inOrigin(repoId, "git", "rev-parse", VersionStamp.of(Instant.now()) + "^{commit}"),
-        "a tag the flow did not create is not the flow's to delete");
+        "the host's tags are untouched — a refused release pushes nothing, in either direction");
   }
 
   /**
-   * The same refusal from the other end: the tag appears between this flow's {@code tag -d} and its
-   * push, so the git host is what says no. What the assertion is really about is {@code --atomic} —
+   * The same refusal from the other end: the tag appears on the git host after the flow made its
+   * own, so receive-pack is what says no. What the assertion is really about is {@code --atomic} —
    * one receive-pack, both commands, and a refused tag takes the branch update down with it.
    *
    * <p>Without it the branch would advance and the release would be untagged: a version on the
@@ -424,12 +428,13 @@ public class ReleaseControllerTest {
 
     String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
     String otherWriter = inOrigin(repoId, "git", "rev-parse", "feature");
-    // A second writer tags the very version this run stamped, at the one instant it is unreferenced.
-    // The version is read off the commit the flow has already built, which is where it exists.
+    // A second writer tags the very version this run stamped, at the one instant that can still
+    // matter: after the flow's own tag exists in its mirror and before the push carries it. The
+    // version is read off the commit the flow has already built, in the worktree on that mirror.
     gitHost.beforeNextPush(
         () -> {
           try {
-            Path worktree = Path.of(dataDir, repoId, "workspaces", ".tmp-integrate-raced-b");
+            Path worktree = Path.of(ownDataDir, "worktrees", repoId, "raced-b");
             String subject = git.exec(worktree.toFile(), "git", "log", "-1", "--format=%s").trim();
             String version = subject.substring(subject.indexOf('(') + 1, subject.indexOf(')'));
             inOrigin(repoId, "git", "tag", version, otherWriter);

@@ -10,27 +10,37 @@ import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * The on-disk sidecar for a workspace: {@code <dataDir>/<repoId>/metadata/workspace_<id>.json},
+ * The on-disk sidecar for a workspace: {@code <workspaces-data-dir>/metadata/<repoId>/workspace_<id>.json},
  * holding the workspace id and its parent branch.
  *
- * <p>Carved out of the monorepo's {@code MetadataService}, which also owns repository-level
- * metadata and therefore stays with the repositories context. Only the two workspace verbs it
- * actually used are here, and the <strong>file layout and JSON shape are deliberately unchanged</strong>
- * — the sidecars are a shared on-disk contract, and an application running both this jar and the
- * repositories context must keep reading each other's files.
+ * <p><b>It moved off the shared volume.</b> It used to live at {@code
+ * <repositories-data-dir>/<repoId>/metadata/workspace_<id>.json} — inside the tree of bare
+ * repositories that qits-artifacts serves and qits-projects clones into — for the historical reason
+ * that this code was carved out of the monorepo's {@code MetadataService} and inherited its path. It
+ * is not git, nothing else reads it, and a private file of one service has no business in another
+ * service's storage. It is here now, beside this service's own database and event outbox.
+ *
+ * <p>{@link #read} still looks at the old location when the new one has nothing, so a deployment
+ * upgrading across this change keeps answering for workspaces created before it, and {@link #delete}
+ * removes both. Nothing writes to the old path again. When no workspace created before this change
+ * can still be ACTIVE, the fallback and its config key can go.
  */
 @ApplicationScoped
 public class WorkspaceMetadataStore {
 
   @Inject ObjectMapper objectMapper;
 
+  /** This service's own data tree — where the sidecars live now. */
+  @ConfigProperty(name = "qits.workspaces.data-dir", defaultValue = "data/workspaces")
+  String dataDir;
+
   /**
-   * The repositories data dir, not a workspaces-specific one: the sidecars sit beside the bare
-   * origins that {@code WorkspaceService} already reads from the same key, and both contexts must
-   * agree on the path. A second key that had to equal this one would only be a way to get it wrong.
+   * The shared repositories volume, read-only and only for sidecars written before the move. Keep
+   * the key spelled as the repositories one: it names the same tree the other two services mount,
+   * and a second key that had to equal it would only be a way to get it wrong.
    */
   @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
-  String dataDir;
+  String legacyDataDir;
 
   /** Write (or overwrite) the sidecar, creating the metadata dir on first use. */
   public void write(String repoId, WorkspaceMetadata metadata) {
@@ -50,6 +60,9 @@ public class WorkspaceMetadataStore {
   public Optional<WorkspaceMetadata> read(String repoId, String workspaceId) {
     Path file = fileFor(metadataDir(repoId), workspaceId);
     if (!Files.exists(file)) {
+      file = fileFor(legacyMetadataDir(repoId), workspaceId);
+    }
+    if (!Files.exists(file)) {
       return Optional.empty();
     }
     try {
@@ -60,10 +73,11 @@ public class WorkspaceMetadataStore {
     }
   }
 
-  /** Remove the sidecar; a missing file is not an error (discard is idempotent). */
+  /** Remove the sidecar from both locations; a missing file is not an error (discard is idempotent). */
   public void delete(String repoId, String workspaceId) {
     try {
       Files.deleteIfExists(fileFor(metadataDir(repoId), workspaceId));
+      Files.deleteIfExists(fileFor(legacyMetadataDir(repoId), workspaceId));
     } catch (IOException e) {
       throw new RuntimeException(
           "Failed to delete workspace metadata for " + repoId + "/" + workspaceId, e);
@@ -71,7 +85,11 @@ public class WorkspaceMetadataStore {
   }
 
   private Path metadataDir(String repoId) {
-    return Path.of(dataDir, repoId, "metadata");
+    return Path.of(dataDir, "metadata", repoId);
+  }
+
+  private Path legacyMetadataDir(String repoId) {
+    return Path.of(legacyDataDir, repoId, "metadata");
   }
 
   private static Path fileFor(Path metadataDir, String workspaceId) {

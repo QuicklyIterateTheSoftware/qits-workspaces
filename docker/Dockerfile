@@ -27,10 +27,12 @@
 # here, for two reasons that are about this service rather than about images:
 #
 #   The data is not this service's own. `qits.repositories.data-dir` is a three-way on-disk contract
-#   — qits-projects clones the bare origins into it, qits-artifacts serves them over git smart-HTTP,
-#   and this service branches from and merges into them. All three must resolve it to the SAME
-#   volume. A container that came up healthy on an ephemeral private copy is the failure that hides;
-#   one that refuses to start is the failure you see.
+#   — qits-projects clones the bare origins into it and qits-artifacts serves them over git
+#   smart-HTTP. This service NO LONGER WRITES THERE. Every branch create, branch delete, merge and
+#   release is a push to the git host over HTTP now, because a filesystem ref update fires no
+#   post-receive and so produced no CI run and no event for any of them. The volume stays mounted
+#   for two shrinking reasons: a rollback to a previous image needs it, and the workspace metadata
+#   sidecars written before they moved are still read from it. Neither will be true forever.
 #
 #   The H2-on-local-disk arrangement is a prototype, not a decided data architecture. An image that
 #   boots out of the box and starts writing a database bakes that prototype in and makes it look
@@ -44,6 +46,12 @@
 #                     shared: qits-artifacts and qits-projects ship the identical path, so one
 #                     mounted volume satisfies the three-way contract without a deployment having to
 #                     get the same string right three times.
+#
+#   this service's    the git mirrors (one bare per repository, plus the worktrees a merge runs in)
+#   own tree          and the workspace metadata sidecars. Named here too —
+#                     QITS_WORKSPACES_DATA_DIR=/data/workspaces — because it is a private cache on
+#                     the volume this image already owns, with no contract to agree with anybody
+#                     about. It is rebuildable: delete it and the next request re-clones.
 #
 #   the H2 database   is the prototype, so it is deliberately NOT named here and the service will
 #                     not start until a deployment says where it goes.
@@ -93,11 +101,13 @@
 #           Only docker's CLI is here. `qits.workspace.container-runtime` names the binary, so
 #           pointing it at `podman` makes supplying that CLI the deployment's problem.
 #
-#   git     `GitExecutor` and `WorkspaceService` fork real git against the per-repo bare origin —
-#           `branch`, `worktree add/remove`, `merge`, `merge-tree --write-tree`, `show`, `rev-parse`,
-#           `branch -D`. That is the whole branch lifecycle, not an optional feature: absent, creating
-#           a workspace fails at the first `git branch`. Installed below from the image's own UBI
-#           repositories.
+#   git     the gitmirror module forks real git against this service's own mirror of each repository
+#           and against the git host over HTTP — `clone --mirror`, `fetch --prune`, `ls-remote`,
+#           `worktree add/remove`, `merge`, `merge-tree --write-tree`, `rev-list`, `tag`, and `push`.
+#           That is the whole branch lifecycle, not an optional feature: absent, creating a workspace
+#           fails at its first `ls-remote`. Installed below from the image's own UBI repositories.
+#           Note what it now needs that it did not before: outbound HTTP to `qits.artifacts.url`. A
+#           git host this service cannot reach is no longer a one-endpoint problem.
 #
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
@@ -199,9 +209,9 @@ RUN d=service/src/main/webui/dist/qits-spa-workspaces/browser; \
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6
 WORKDIR /work
 
-# git-core rather than git: this service runs plumbing and branch commands against a bare origin and
-# nothing that needs perl, the remote helpers or the docs — see the header for why neither package is
-# optional. The docker CLI comes from Docker's own repository because no UBI repository carries a
+# git-core rather than git: this service runs plumbing, branch and transport commands against its own
+# mirrors and the git host, and nothing that needs perl, the extra remote helpers or the docs — see
+# the header for why neither package is optional. The docker CLI comes from Docker's own repository because no UBI repository carries a
 # docker-compatible client at all; the repo definition is removed again afterwards so the shipped
 # image does not carry a third-party package source it has no reason to consult.
 RUN printf '[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=https://download.docker.com/linux/centos/9/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/centos/gpg\n' \
@@ -238,6 +248,14 @@ RUN mkdir -p /data/repositories && chown -R 1001:root /data && chmod -R 775 /dat
 # Note what is NOT set beside it: no QUARKUS_DATASOURCE_WORKSPACES_JDBC_URL default. That asymmetry
 # is the whole point — the git tree works out of the box, the prototype database refuses to.
 ENV QITS_REPOSITORIES_DATA_DIR=/data/repositories
+
+# This service's OWN tree, on the volume mounted at /data: the per-repository git mirrors, the
+# worktrees a merge is built in, and the workspace metadata sidecars. Private, rebuildable, and
+# deliberately not the tree above — that separation is what makes receive-pack the sole writer of
+# every ref in a served repository. Not in the RUN mkdir above for the same reason the H2 directory
+# is not: a named volume mounted at /data masks whatever the image put there, so the code creates
+# it on first use.
+ENV QITS_WORKSPACES_DATA_DIR=/data/workspaces
 
 # The event outbox's database, and it IS named here, which looks like the opposite of the line above
 # until you ask whose data it is. It is not this service's: it is the qits-eventstream library's

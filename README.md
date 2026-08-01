@@ -1,12 +1,13 @@
 # qits-workspaces
 
 The **host side** of qits workspaces: the workspace entity and its lifecycle, container
-orchestration, host-side git against the bare origin, the workspace-daemon registry, dev-server
+orchestration, host-side git through a mirror of each repository, the workspace-daemon registry, dev-server
 supervision, the bootstrap-chain runner, the technical-process framework, prompt composition,
 feature capture, and the routes over all of it — at `/workspaces`, its gateway segment.
 
-A workspace is a branch ref in a repository's bare origin **plus** a per-workspace container that
-clones that branch into `/workspace`. This repo owns everything about that from the host's side of
+A workspace is a branch of a repository **plus** a per-workspace container that clones that branch
+into `/workspace`. This service creates, merges, releases and deletes that branch the same way
+anything else does: by pushing to the git host. This repo owns everything about that from the host's side of
 the boundary. Everything that runs *inside* the container belongs to
 [qits-workspace-daemon](https://github.com/QuicklyIterateTheSoftware/qits-workspace-daemon).
 
@@ -16,6 +17,7 @@ the boundary. Everything that runs *inside* the container belongs to
 
 | Module | What |
 |---|---|
+| `gitmirror/` | `eu.wohlben.qits.workspaces.gitmirror` — the git substrate: a local mirror per repository, the worktrees a merge runs in, and the pushes that are the only way a ref moves. Framework-free; its tests run offline against throwaway bares. |
 | `domain/` | `eu.wohlben.qits.workspaces.*` — entity, persistence, dto, mapper, control, and the framework-free SPIs the daemon implements. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
@@ -127,9 +129,13 @@ carries a matching example putting it on :8090, so the pair starts side by side 
 at all.
 
 The url carries no path because qits-projects serves its own `/projects/api` segment, so the same
-base address works whether the call goes direct or through the gateway. Both services must also
-resolve `qits.repositories.data-dir` to the same tree — running them under one `$HOME` does that for
-free; containers need the same volume.
+base address works whether the call goes direct or through the gateway.
+
+`qits.artifacts.url` matters more than it used to: it is where every ref read and every ref write
+goes. This service holds a **mirror** of each repository under `qits.workspaces.data-dir` (its own
+tree, rebuildable — delete it and the next request re-clones), does its merges in a worktree on that
+mirror, and reaches the served repository only by pushing. An unreachable git host is no longer a
+one-endpoint problem.
 
 One behaviour worth knowing before you debug it: **a missing repository and an unreachable
 qits-projects are different answers.** Only a 404 becomes "no such repository" (and then a 404 from
@@ -143,8 +149,9 @@ it explains why each line is load-bearing.
 Beyond that, a deployment must allow-list `/workspaces/daemon/` for unauthenticated access — that is
 the daemon's dial-home control socket, and it authenticates by workspace id, not by session. In the
 monorepo this lived in `auth/core`'s `PublicPaths`; under the gateway it is `PublicPaths` there.
-And `qits.repositories.data-dir` is a shared on-disk contract: qits-projects clones into the same
-tree and qits-artifacts serves it over git smart-HTTP, so all three must resolve it to one volume.
+`qits.repositories.data-dir` is still mounted and is **almost unused**: nothing here writes to it,
+and the only thing that reads it is the fallback for workspace metadata sidecars written before they
+moved to this service's own tree. It stays for the rollback, and for that fallback.
 
 **The event bus needs nothing.** A release publishes `SCMRelease` through the `qits-eventstream`
 jar, which ships every key it needs as a default: `qits.events.url` is the qits-net alias, and

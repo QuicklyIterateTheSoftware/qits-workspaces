@@ -198,9 +198,8 @@ public class WorkspaceContainerLifecycleServiceTest {
 
     // A fresh fork has nothing to lose: no container means no dirty tree and no unpushed commits,
     // so cleanup must be offered exactly as for a provisioned-but-level workspace.
-    Path originPath = Path.of(dataDir, repoId, "origin");
     assertTrue(
-        workspaceService.canCleanupBranch(repoId, originPath, "feat", "master"),
+        workspaceService.canCleanupBranch(repoId, "feat", "master"),
         "a never-provisioned fresh fork is cleanable");
   }
 

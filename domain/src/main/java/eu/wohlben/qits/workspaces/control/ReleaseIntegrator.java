@@ -4,19 +4,17 @@ import eu.wohlben.qits.workspaces.error.IntegrateConflictException;
 import eu.wohlben.qits.workspaces.error.IntegrateConflictException.Reason;
 import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
+import eu.wohlben.qits.workspaces.gitmirror.GitMirrorException;
+import eu.wohlben.qits.workspaces.gitmirror.MergeOutcome;
+import eu.wohlben.qits.workspaces.gitmirror.MirrorWorktree;
+import eu.wohlben.qits.workspaces.gitmirror.PushOutcome;
+import eu.wohlben.qits.workspaces.gitmirror.PushSpec;
+import eu.wohlben.qits.workspaces.gitmirror.RepoMirror;
+import eu.wohlben.qits.workspaces.gitmirror.TagOutcome;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeoutException;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -24,7 +22,9 @@ import org.jboss.logging.Logger;
  * index, commit it once, and <b>push</b>.
  *
  * <p>Pure mechanics — it owns no row, fires no event and resolves no workspace. {@link
- * WorkspaceService} owns all of that and calls this for the steps that are about git and files.
+ * WorkspaceService} owns all of that and calls this for the steps that are about git and files. The
+ * git itself is {@code qits-workspaces-gitmirror}'s: this class decides the <i>order</i>, and the
+ * order is the flow.
  *
  * <h2>One method, two spellings</h2>
  *
@@ -39,41 +39,51 @@ import org.jboss.logging.Logger;
  * is derived from the source branch, not from a workspace row — so a branch-keyed caller is a thin
  * resolver over this same method rather than a second copy of it.
  *
- * <h2>Why it pushes a repository it is already holding</h2>
+ * <h2>Where the merge happens, and why it is not the served repository any more</h2>
  *
- * The bare origin is on this service's own disk, so advancing {@code main} could be one {@code git
- * merge} inside it — which is precisely what {@code WorkspaceService.mergeIntoTarget} does, and it
- * is why <b>no merge this service has ever performed produced a CI run</b>: a filesystem ref update
- * fires no {@code post-receive}. Pushing over HTTP to the ordinary git host makes receive-pack the
- * sole writer of the default branch, so the protection hook sees every release and the existing
- * post-receive → qits-ci → build chain happens for the ordinary reason. The release is a push like
- * any other push, and nothing downstream learns a new trick.
+ * It used to be a worktree <b>on the bare origin qits-artifacts serves</b>, on a volume this service
+ * and that one both mount. Fast, and the source of a whole family of defects: a linked worktree
+ * shares its repository's ref store, so anything this flow created was published with no push, no
+ * {@code post-receive} and no CI run — and a failure left it behind in a repository other people
+ * read.
+ *
+ * <p>Now the worktree is on a <b>mirror</b> of that repository, private to this service, refreshed
+ * from the git host at step 0. Nothing outside this process sees anything this flow does until
+ * receive-pack accepts the push. That makes the release a push like any other push, and nothing
+ * downstream learns a new trick.
  *
  * <h2>Why nothing needs unwinding</h2>
  *
  * The worktree is created <b>detached</b>, so nothing before the push moves a ref that outlives the
- * run: the merge, the bump and the commit all happen against a {@code HEAD} that is not a branch. A
- * conflict, a bump failure or a crash leaves the default branch byte-identical, and the only cleanup
- * a failure needs is removing the worktree — which happens in a {@code finally}. The commit a failed
- * push leaves behind is unreferenced and is git's to collect.
+ * run: the merge, the bump, the commit and now the tag all happen against a {@code HEAD} that is not
+ * a branch, in a repository nobody serves. A conflict, a bump failure or a crash leaves the default
+ * branch byte-identical, and the only cleanup a failure needs is removing the worktree — which
+ * {@link MirrorWorktree} does on close, on every path.
  *
- * <p><b>The tag is the one exception, and it is why the dance below exists.</b> {@code git tag -a}
- * <i>does</i> write a ref, and it writes it into the served bare rather than into the worktree — a
- * linked worktree shares the common ref store, and this worktree's common dir is the origin
- * qits-artifacts serves. So step 7 creates the tag, reads the tag <b>object's</b> sha, and deletes
- * the ref again: the object survives with nothing pointing at it, and the ref store is back to
- * holding nothing new before the push. That restores the property for the tag too — between the
- * commit and the push, this run has moved no ref anywhere — and it is also what makes the tag reach
- * the git host at all, since a ref already present in the bare is nothing for a push to report.
+ * <h2>The tag, and the dance that is gone</h2>
+ *
+ * A release creates its annotated tag with a plain {@code git tag -a} and pushes it by name. That is
+ * all it ever should have been. The three-step dance it replaces — tag, read the tag object's sha,
+ * delete the ref, push by sha — existed for exactly one reason: the worktree shared the served
+ * bare's ref store, so creating the tag published it, the push then reported {@code [up to date]}
+ * with zero receive commands, and the {@code finally} had to sweep up a ref in a repository the
+ * platform reads. On a mirror none of those three things is true, so none of the three steps is
+ * needed. What survives is the only leftover that can still bite: a tag this run created and did not
+ * push would refuse the same version locally next time, so it is dropped from the <i>cache</i> — and
+ * that is cache hygiene, not a ref anybody could have seen.
  *
  * <h2>Why the tag rides the same push</h2>
  *
  * One {@code git push --atomic} carrying both {@code HEAD:refs/heads/<main>} and {@code
- * <tagobj>:refs/tags/<version>} is one receive-pack, so both commands ride one pre-receive and one
+ * refs/tags/<version>} is one receive-pack, so both commands ride one pre-receive and one
  * post-receive, and either both land or neither does. That is what turns the tag into the version
  * <b>uniqueness</b> guarantee the platform never had: a non-forced push over an existing tag ref is
  * refused, and under {@code --atomic} that refusal takes the branch update with it. Two releases
  * that stamped the same second cannot both land, and the loser lands nothing at all.
+ *
+ * <p>It still fires from both ends. The mirror was refreshed from the host at step 0, so its tags
+ * are the host's tags and {@code git tag -a} refuses a version already released before this run has
+ * pushed anything; the push covers a writer who gets there later.
  *
  * <h2>Why the push is the compare-and-swap</h2>
  *
@@ -93,20 +103,6 @@ import org.jboss.logging.Logger;
  * the default branch and nothing else, so a task branch landing on its parent is an ordinary push.
  * It is still a compare-and-swap, because an ordinary push is fast-forward-only — that property
  * belongs to receive-pack, not to the option.
- *
- * <h2>Three inherited sharp edges, fixed here</h2>
- *
- * <ul>
- *   <li><b>Stale worktrees were never pruned.</b> A crashed merge leaves its admin registered and
- *       the <i>next</i> one fails with "already checked out" — a failure that outlives the process
- *       that caused it. {@link #prepareWorktree} prunes first, and removes a leftover directory the
- *       prune cannot (prune drops the registration, not the files).
- *   <li><b>{@code .tmp-merge-<currentTimeMillis>} collides</b> within a millisecond. The name here
- *       is the source branch, which is unique per repository by construction.
- *   <li><b>{@code GitExecutor} had no timeout.</b> The push is this service's first <i>network</i>
- *       git call and the flow answers synchronously, so it gets a deadline; the local calls keep
- *       today's behaviour, where a bound would only turn slow into broken.
- * </ul>
  */
 @ApplicationScoped
 public class ReleaseIntegrator {
@@ -116,25 +112,11 @@ public class ReleaseIntegrator {
   /** The push option the git host's protection hook accepts a fast-forward release under. */
   static final String RELEASE_PUSH_OPTION = "qits.release";
 
-  @Inject GitExecutor git;
+  @Inject GitMirrorRegistry mirrors;
 
   @Inject GitIdentity gitIdentity;
 
   @Inject VersionBumper bumper;
-
-  @Inject GitHostAddress gitHost;
-
-  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
-  String dataDir;
-
-  /**
-   * How long the push may take before the integrate fails rather than holding a request thread. Two
-   * minutes is generous for a push whose objects the receiving end already has (client and server
-   * share an object store here, so the pack is nearly empty) and short enough that a wedged host is
-   * an error rather than a hang.
-   */
-  @ConfigProperty(name = "qits.workspace.integrate.push-timeout-ms", defaultValue = "120000")
-  long pushTimeoutMs;
 
   /**
    * Which of the two processes this run is. The only difference between them, and therefore the only
@@ -158,7 +140,7 @@ public class ReleaseIntegrator {
   /**
    * One run of the flow.
    *
-   * @param repoId the repository, whose bare origin this service holds
+   * @param repoId the repository, which this service mirrors and pushes to
    * @param sourceBranch the branch being landed — also what the worktree is named after
    * @param targetBranch what it lands on: the default branch for {@link Mode#RELEASE}, the source's
    *     parent for {@link Mode#PLAIN}
@@ -195,26 +177,31 @@ public class ReleaseIntegrator {
     String repoId = run.repoId();
     String sourceBranch = run.sourceBranch();
     String targetBranch = run.targetBranch();
-    Path originPath = Path.of(dataDir, repoId, "origin").toAbsolutePath();
-    if (!Files.exists(originPath)) {
-      throw new NotFoundException("Repository origin not found on disk");
+    RepoMirror mirror = mirrors.of(repoId);
+
+    // [0] the mirror IS the object store now, so it has to be the host's. A preflight against a
+    // stale copy is a preflight against a repository nobody has.
+    refresh(mirror);
+    String targetRef = "refs/heads/" + targetBranch;
+    String sourceRef = "refs/heads/" + sourceBranch;
+    if (mirror.resolve(targetRef).isEmpty() || mirror.resolve(sourceRef).isEmpty()) {
+      throw new NotFoundException(
+          "Repository " + repoId + " has no '" + sourceBranch + "' or '" + targetBranch + "'");
     }
 
-    // [1] preflight, in the bare's object store — nothing is checked out and no ref moves.
-    requireNotAlreadyIntegrated(originPath, sourceBranch, targetBranch);
-    preflightMerge(originPath, sourceBranch, targetBranch);
+    // [1] preflight, in the mirror's object store — nothing is checked out and no ref moves.
+    requireNotAlreadyIntegrated(mirror, sourceRef, targetRef, sourceBranch, targetBranch);
+    preflightMerge(mirror, sourceRef, targetRef, sourceBranch, targetBranch);
 
-    // [2] a DETACHED worktree: the property that makes "no partial state" true rather than hoped.
-    Path worktree = prepareWorktree(originPath, repoId, targetBranch, sourceBranch);
-    // Declared out here because the finally needs both: which tag name to clean up, and whether
-    // this run is the one holding it. `tagRefHeld` is true only between `tag -a` and `tag -d`, so a
-    // tag that was already there and a tag the push has just created are both left alone.
+    // [2] a DETACHED worktree on the mirror: the property that makes "no partial state" true rather
+    // than hoped, now with no served ref store behind it to leak into.
     String version = null;
-    boolean tagRefHeld = false;
-    try {
+    boolean tagged = false;
+    boolean pushed = false;
+    try (MirrorWorktree worktree = mirror.worktree(sourceBranch, targetRef)) {
       // [3] the merge, staged but NOT committed — MERGE_HEAD stays set and the index stays open,
       // which is what lets the bump write into the same index and produce ONE commit.
-      mergeNoCommit(worktree, sourceBranch);
+      mergeNoCommit(worktree, sourceRef, sourceBranch);
 
       // [4] the stamp, taken ONCE. Recomputing it per file would let a slow bump write two versions
       // into one commit. A plain integrate is not a release and takes none.
@@ -229,33 +216,46 @@ public class ReleaseIntegrator {
       String subject = subjectOf(run, version);
       String commitSha = commit(worktree, run, version, subject);
 
-      // [7] the tag, made and then unreferenced — see "why nothing needs unwinding". A release
-      // only; a plain integrate tags nothing, because a tag names a version and it has none.
-      String tagObject = null;
+      // [7] the tag. A release only; a plain integrate tags nothing, because a tag names a version
+      // and it has none.
       if (version != null) {
-        createTagRef(worktree, version, subject);
-        tagRefHeld = true;
-        tagObject = tagObjectSha(worktree, version);
-        deleteTagRef(worktree, version);
-        tagRefHeld = false;
+        TagOutcome outcome = tag(worktree, version, subject);
+        if (outcome.alreadyExists()) {
+          throw versionAlreadyReleased(version);
+        }
+        tagged = true;
       }
 
       // [8] the push, which is the compare-and-swap — and, with the tag riding along, the
       // uniqueness check too.
-      Instant publishedAt = push(worktree, repoId, targetBranch, run.mode(), version, tagObject);
+      Instant publishedAt = push(worktree, targetBranch, run.mode(), version);
+      pushed = true;
 
       LOG.infof(
           "landed %s on %s of %s%s (%s)",
           sourceBranch, targetBranch, repoId, version == null ? "" : " as " + version, commitSha);
       return new Landed(version, commitSha, sourceBranch, targetBranch, publishedAt);
     } finally {
-      // [9] cleanup. In a finally because every failure above leaves the worktree behind and the
-      // NEXT run is what pays for it — and, if the run died mid-dance, a tag ref in the served bare
-      // that would refuse this repository's next release of that version.
-      if (tagRefHeld) {
-        deleteLeftoverTagRef(originPath, version);
+      // [9] cleanup. The worktree goes on every path — that is what AutoCloseable buys. What is left
+      // to sweep is a tag this run created and did not manage to push: it names nothing anybody can
+      // see, but it would refuse this repository's next attempt at the same version out of a local
+      // leftover, so it is dropped from the cache.
+      if (tagged && !pushed) {
+        mirror.deleteLocalTag(version);
       }
-      removeWorktree(originPath, worktree);
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // [0] the mirror
+  // ---------------------------------------------------------------------------------------------
+
+  private void refresh(RepoMirror mirror) {
+    try {
+      mirror.refreshNow();
+    } catch (GitMirrorException e) {
+      throw new InternalServerErrorException(
+          "Could not read the repository from the git host: " + e.getMessage());
     }
   }
 
@@ -269,182 +269,64 @@ public class ReleaseIntegrator {
    * onto an empty merge — which is what "integrate is not idempotent by design" costs and how it is
    * paid for.
    */
-  private void requireNotAlreadyIntegrated(Path originPath, String source, String target) {
-    try {
-      GitExecutor.ExecResult ancestor =
-          git.execAllowNonZero(
-              originPath.toFile(), "git", "merge-base", "--is-ancestor", "--end-of-options", source, target);
-      if (ancestor.exitCode() == 0) {
-        throw new IntegrateConflictException(
-            Reason.ALREADY_INTEGRATED,
-            "Branch '"
-                + source
-                + "' is already integrated into '"
-                + target
-                + "': it is an ancestor of it, so there is nothing to land.");
-      }
-    } catch (IntegrateConflictException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new InternalServerErrorException(
-          "Failed to compare '" + source + "' with '" + target + "': " + e.getMessage());
+  private void requireNotAlreadyIntegrated(
+      RepoMirror mirror, String sourceRef, String targetRef, String source, String target) {
+    if (mirror.isAncestor(sourceRef, targetRef)) {
+      throw new IntegrateConflictException(
+          Reason.ALREADY_INTEGRATED,
+          "Branch '"
+              + source
+              + "' is already integrated into '"
+              + target
+              + "': it is an ancestor of it, so there is nothing to land.");
     }
   }
 
   /**
    * The real three-way merge, in the object store, with no working tree involved ({@code merge-tree
-   * --write-tree}). It exits 1 to report conflicts, which is an answer rather than a failure — hence
-   * {@code execAllowNonZero}. Catching the common case here means the usual conflict costs no
-   * worktree at all; step 3 is the backstop for the rest.
+   * --write-tree}). Catching the common case here means the usual conflict costs no worktree at all;
+   * step 3 is the backstop for the rest.
    */
-  private void preflightMerge(Path originPath, String source, String target) {
-    GitExecutor.ExecResult result;
+  private void preflightMerge(
+      RepoMirror mirror, String sourceRef, String targetRef, String source, String target) {
+    MergeOutcome preview;
     try {
-      result =
-          git.execAllowNonZero(
-              originPath.toFile(),
-              "git",
-              "merge-tree",
-              "--write-tree",
-              "--name-only",
-              "--end-of-options",
-              target,
-              source);
-    } catch (Exception e) {
+      preview = mirror.previewMerge(targetRef, sourceRef);
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Failed to preflight the merge: " + e.getMessage());
     }
-    if (result.exitCode() == 0) {
+    if (preview.clean()) {
       return;
     }
-    if (result.exitCode() == 1) {
-      throw new IntegrateConflictException(
-          Reason.CONFLICT,
-          "Merging '" + source + "' into '" + target + "' conflicts. Nothing landed and '"
-              + target
-              + "' is unchanged.",
-          GitExecutor.conflictedFiles(result.output()));
-    }
-    throw new InternalServerErrorException(
-        "Failed to preflight the merge [" + result.exitCode() + "]: " + result.output());
-  }
-
-  // ---------------------------------------------------------------------------------------------
-  // [2] the detached worktree
-  // ---------------------------------------------------------------------------------------------
-
-  private Path prepareWorktree(Path originPath, String repoId, String target, String sourceBranch) {
-    Path worktree =
-        Path.of(dataDir, repoId, "workspaces", ".tmp-integrate-" + slug(sourceBranch))
-            .toAbsolutePath();
-    try {
-      Files.createDirectories(worktree.getParent());
-      // Prune first: a crashed integrate leaves the registration behind and `worktree add` then
-      // refuses forever. Prune drops the registration but never the files, so a surviving directory
-      // is removed by hand and the registration re-pruned.
-      git.exec(originPath.toFile(), "git", "worktree", "prune");
-      if (Files.exists(worktree)) {
-        deleteRecursively(worktree);
-        git.exec(originPath.toFile(), "git", "worktree", "prune");
-      }
-      // --detach is the whole safety property: no branch ref exists in this worktree, so nothing
-      // between here and the push can move one.
-      git.exec(
-          originPath.toFile(),
-          "git",
-          "worktree",
-          "add",
-          "--detach",
-          worktree.toString(),
-          "refs/heads/" + target);
-      return worktree;
-    } catch (Exception e) {
-      throw new InternalServerErrorException(
-          "Failed to prepare the integrate worktree: " + e.getMessage());
-    }
-  }
-
-  private void removeWorktree(Path originPath, Path worktree) {
-    try {
-      git.execAllowNonZero(
-          originPath.toFile(), "git", "worktree", "remove", "--force", worktree.toString());
-    } catch (Exception e) {
-      LOG.warnf(e, "failed to remove the integrate worktree at %s", worktree);
-    }
-    try {
-      if (Files.exists(worktree)) {
-        deleteRecursively(worktree);
-      }
-      git.execAllowNonZero(originPath.toFile(), "git", "worktree", "prune");
-    } catch (Exception e) {
-      LOG.warnf(e, "failed to clean up the integrate worktree at %s", worktree);
-    }
-  }
-
-  /**
-   * The worktree's name, from the source branch.
-   *
-   * <p>A branch name may hold a {@code /} (that is the whole point of {@code task/…}), so it cannot
-   * be a directory name as it stands. Two branches could slug to one name — but only two running at
-   * once would collide, and the repository lease upstream forbids that. What this buys is the flow
-   * being keyed by <b>(repository, source branch)</b> instead of by a workspace row, which is what
-   * lets a branch-keyed caller reuse it unchanged.
-   */
-  private static String slug(String branch) {
-    return branch.replaceAll("[^A-Za-z0-9._-]", "-");
-  }
-
-  private static void deleteRecursively(Path root) throws IOException {
-    try (var paths = Files.walk(root)) {
-      for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
-        Files.deleteIfExists(p);
-      }
-    }
+    throw new IntegrateConflictException(
+        Reason.CONFLICT,
+        "Merging '" + source + "' into '" + target + "' conflicts. Nothing landed and '"
+            + target
+            + "' is unchanged.",
+        preview.conflictedPaths());
   }
 
   // ---------------------------------------------------------------------------------------------
   // [3] merge, [5] bump, [6] commit
   // ---------------------------------------------------------------------------------------------
 
-  private void mergeNoCommit(Path worktree, String source) {
-    List<String> argv = new ArrayList<>(List.of("git"));
-    argv.addAll(gitIdentity.inlineArgs());
-    argv.addAll(List.of("merge", "--no-ff", "--no-commit", "--no-edit", "--end-of-options", source));
-    GitExecutor.ExecResult result;
+  private void mergeNoCommit(MirrorWorktree worktree, String sourceRef, String source) {
+    MergeOutcome merged;
     try {
-      result =
-          git.execAllowNonZero(
-              worktree.toFile(), gitIdentity.envMap(), null, argv.toArray(String[]::new));
-    } catch (Exception e) {
+      merged = worktree.mergeNoCommit(sourceRef, identity());
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Git merge failed: " + e.getMessage());
     }
-    if (result.exitCode() == 0) {
+    if (merged.clean()) {
       return;
     }
-    // The backstop for whatever merge-tree did not see. Abort so the worktree is removable, then
-    // report the same 409 the preflight would have — never the 500 today's merge produces, where
-    // git's non-zero exit becomes an exception and the conflict flag is dead code.
-    List<String> conflicts = unmergedPaths(worktree);
-    try {
-      git.execAllowNonZero(worktree.toFile(), "git", "merge", "--abort");
-    } catch (Exception ignored) {
-      // the worktree is removed in the caller's finally either way
-    }
+    // The backstop for whatever merge-tree did not see. The merge is already aborted, so the
+    // worktree is removable, and this is the same 409 the preflight would have produced — never the
+    // 500 a bare non-zero exit used to become.
     throw new IntegrateConflictException(
         Reason.MERGE_CONFLICT,
-        "Merging '" + source + "' conflicts. Nothing landed and the target branch is"
-            + " unchanged.",
-        conflicts);
-  }
-
-  /** The conflicted paths of a stopped merge, straight out of the index. */
-  private List<String> unmergedPaths(Path worktree) {
-    try {
-      String out =
-          git.exec(worktree.toFile(), "git", "diff", "--name-only", "--diff-filter=U");
-      return out.lines().map(String::trim).filter(line -> !line.isEmpty()).toList();
-    } catch (Exception e) {
-      return List.of();
-    }
+        "Merging '" + source + "' conflicts. Nothing landed and the target branch is unchanged.",
+        merged.conflictedPaths());
   }
 
   /**
@@ -453,16 +335,11 @@ public class ReleaseIntegrator {
    * nothing is added, and the commit below is identical in every other way. The commit is the
    * release; the files are one stack's rendering of it.
    */
-  private void stageBump(Path worktree, String version) {
-    VersionBumper.BumpResult bump = bumper.bump(worktree, version);
-    if (bump.changedFiles().isEmpty()) {
-      return;
-    }
-    List<String> argv = new ArrayList<>(List.of("git", "add", "--"));
-    bump.changedFiles().forEach(p -> argv.add(p.toString()));
+  private void stageBump(MirrorWorktree worktree, String version) {
+    VersionBumper.BumpResult bump = bumper.bump(worktree.path(), version);
     try {
-      git.exec(worktree.toFile(), argv.toArray(String[]::new));
-    } catch (Exception e) {
+      worktree.stage(List.copyOf(bump.changedFiles()));
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Failed to stage the version bump: " + e.getMessage());
     }
   }
@@ -489,7 +366,7 @@ public class ReleaseIntegrator {
    * <p>The body names both branches — the merge's parents record the graph, but the branch
    * <em>names</em> do not survive the merge otherwise, and they are what a human reads.
    */
-  private String commit(Path worktree, Run run, String version, String subject) {
+  private String commit(MirrorWorktree worktree, Run run, String version, String subject) {
     boolean release = version != null;
     String body =
         release
@@ -499,13 +376,9 @@ public class ReleaseIntegrator {
                 + "` into `"
                 + run.targetBranch()
                 + "` without a release.";
-    List<String> argv = new ArrayList<>(List.of("git"));
-    argv.addAll(gitIdentity.inlineArgs());
-    argv.addAll(List.of("commit", "-m", subject, "-m", body));
     try {
-      git.exec(worktree.toFile(), gitIdentity.envMap(), argv.toArray(String[]::new));
-      return git.exec(worktree.toFile(), "git", "rev-parse", "HEAD").trim();
-    } catch (Exception e) {
+      return worktree.commit(subject, body, identity());
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Failed to commit the merge: " + e.getMessage());
     }
   }
@@ -515,75 +388,18 @@ public class ReleaseIntegrator {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * {@code git tag -a <version> -m <subject> HEAD}, with the release commit's own identity as the
-   * tagger — one release, one name on it.
+   * {@code git tag -a <version> -m <subject> HEAD} in the mirror's worktree, with the release
+   * commit's own identity as the tagger — one release, one name on it.
    *
    * <p>The tag name is the version string exactly: {@code 2026.801.63140}, no {@code v} prefix. It
-   * is the same string the manifests, the event and the image tags carry, and a prefix here would
-   * be a second spelling of one identity.
-   *
-   * <p><b>A name that already exists is the uniqueness guarantee firing.</b> This worktree shares
-   * the served bare's ref store, so an existing {@code refs/tags/<version>} is seen right here and
-   * git refuses — before any ref of ours has moved, which is exactly where a refusal is cheapest.
-   * The push carries the same guarantee for the case where another writer gets there later.
+   * is the same string the manifests, the event and the image tags carry, and a prefix here would be
+   * a second spelling of one identity.
    */
-  private void createTagRef(Path worktree, String version, String subject) {
-    List<String> argv = new ArrayList<>(List.of("git"));
-    argv.addAll(gitIdentity.inlineArgs());
-    argv.addAll(List.of("tag", "-a", version, "-m", subject, "HEAD"));
-    GitExecutor.ExecResult result;
+  private TagOutcome tag(MirrorWorktree worktree, String version, String subject) {
     try {
-      result =
-          git.execAllowNonZero(
-              worktree.toFile(), gitIdentity.envMap(), null, argv.toArray(String[]::new));
-    } catch (Exception e) {
+      return worktree.tag(version, subject, identity());
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("Failed to tag the release: " + e.getMessage());
-    }
-    if (result.exitCode() == 0) {
-      return;
-    }
-    if (alreadyExists(result.output())) {
-      throw versionAlreadyReleased(version);
-    }
-    throw new InternalServerErrorException(
-        "Failed to tag the release [" + result.exitCode() + "]: " + result.output());
-  }
-
-  /** The tag <b>object's</b> sha — what the push sends, and what outlives {@code tag -d}. */
-  private String tagObjectSha(Path worktree, String version) {
-    try {
-      return git.exec(worktree.toFile(), "git", "rev-parse", "refs/tags/" + version).trim();
-    } catch (Exception e) {
-      throw new InternalServerErrorException(
-          "Failed to read the release tag's object: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Drops the ref again, leaving the object. Without this the tag is already in the served bare and
-   * the push has nothing to report — {@code [up to date]}, zero receive commands, no post-receive,
-   * and a ref this run moved that a failure would leave behind.
-   */
-  private void deleteTagRef(Path worktree, String version) {
-    try {
-      git.exec(worktree.toFile(), "git", "tag", "-d", version);
-    } catch (Exception e) {
-      throw new InternalServerErrorException(
-          "Failed to unreference the release tag: " + e.getMessage());
-    }
-  }
-
-  /**
-   * The {@code finally}'s half of the dance: a run that died between {@code tag -a} and {@code tag
-   * -d} left a ref in the served bare, and the repository's next release of that version would be
-   * refused by a tag no release ever pushed. Only ever called while this run holds the ref — a tag
-   * the push created is the release's and must survive.
-   */
-  private void deleteLeftoverTagRef(Path originPath, String version) {
-    try {
-      git.execAllowNonZero(originPath.toFile(), "git", "tag", "-d", version);
-    } catch (Exception e) {
-      LOG.warnf(e, "failed to remove the leftover release tag %s", version);
     }
   }
 
@@ -591,45 +407,33 @@ public class ReleaseIntegrator {
   // [8] the push
   // ---------------------------------------------------------------------------------------------
 
-  private Instant push(
-      Path worktree, String repoId, String target, Mode mode, String version, String tagObject) {
-    String remote = gitHost.pushUrl(repoId);
-    List<String> argv = new ArrayList<>(List.of("git", "push", "--porcelain"));
+  private Instant push(MirrorWorktree worktree, String target, Mode mode, String version) {
+    PushSpec spec = PushSpec.of(PushSpec.Ref.branch("HEAD", target));
+    if (version != null) {
+      // All or nothing. A refused tag must not leave the branch advanced, and a refused branch must
+      // not leave a tag naming a release that did not happen. Pushed by NAME: the tag lives in the
+      // mirror, which nobody serves, so there is nothing to unreference first.
+      spec =
+          PushSpec.of(
+                  PushSpec.Ref.branch("HEAD", target),
+                  PushSpec.Ref.tag("refs/tags/" + version, version))
+              .asAtomic();
+    }
     // Only a release needs the option: the git host's hook guards the default branch and nothing
     // else, so a plain integrate's target is an ordinary ref and an ordinary push moves it.
     if (mode == Mode.RELEASE) {
-      argv.add("--push-option=" + RELEASE_PUSH_OPTION);
+      spec = spec.withOption(RELEASE_PUSH_OPTION);
     }
-    if (tagObject != null) {
-      // All or nothing. A refused tag must not leave the branch advanced, and a refused branch must
-      // not leave a tag naming a release that did not happen.
-      argv.add("--atomic");
-    }
-    argv.add(remote);
-    argv.add("HEAD:refs/heads/" + target);
-    if (tagObject != null) {
-      // By sha, not by name: the local ref is gone by now and the object is what remains.
-      argv.add(tagObject + ":refs/tags/" + version);
-    }
-    GitExecutor.ExecResult result;
+    PushOutcome outcome;
     try {
-      result =
-          git.execAllowNonZero(
-              worktree.toFile(),
-              Duration.ofMillis(pushTimeoutMs),
-              Map.of(),
-              null,
-              argv.toArray(String[]::new));
-    } catch (TimeoutException e) {
-      throw new InternalServerErrorException(
-          "The push to " + remote + " timed out; nothing was released.");
-    } catch (Exception e) {
+      outcome = worktree.push(spec);
+    } catch (GitMirrorException e) {
       throw new InternalServerErrorException("The push failed: " + e.getMessage());
     }
-    if (result.exitCode() == 0) {
+    if (outcome.accepted()) {
       return Instant.now();
     }
-    throw classifyPushFailure(result.output(), target, version);
+    throw classifyPushFailure(outcome, target, version);
   }
 
   /**
@@ -643,19 +447,16 @@ public class ReleaseIntegrator {
    * must surface as a <b>4xx carrying the hook's own message</b> — never a 500 — because that
    * message is the only thing on screen that says what to do instead.
    */
-  private RuntimeException classifyPushFailure(String output, String target, String version) {
-    if (version != null && alreadyExists(output)) {
+  private RuntimeException classifyPushFailure(PushOutcome outcome, String target, String version) {
+    if (version != null && outcome.saysAlreadyExists()) {
       return versionAlreadyReleased(version);
     }
-    String remoteRefusal = remoteRejection(output);
+    String remoteRefusal = outcome.remoteRefusal();
     if (remoteRefusal != null) {
       return new IntegrateConflictException(
           Reason.PUSH_REJECTED, "The git host refused the push: " + remoteRefusal);
     }
-    String lower = output == null ? "" : output.toLowerCase();
-    if (lower.contains("non-fast-forward")
-        || lower.contains("fetch first")
-        || lower.contains("[rejected]")) {
+    if (outcome.saysNotFastForward()) {
       return new IntegrateConflictException(
           Reason.NOT_FAST_FORWARD,
           "'"
@@ -663,17 +464,14 @@ public class ReleaseIntegrator {
               + "' moved while this merge was being built, so the push was not a fast-forward."
               + " Nothing landed — try again.");
     }
+    String output = outcome.output();
     return new InternalServerErrorException(
         "The push failed: " + (output == null || output.isBlank() ? "no output" : output));
   }
 
   /**
-   * The git host's own words out of a {@code [remote rejected]} line. {@code git push} renders the
-   * reason in trailing parentheses; the whole line is the fallback, because a refusal a human cannot
-   * read is worse than a verbose one.
-   */
-  /**
-   * The one refusal a version stamp can produce, in the one wording both halves of the dance use.
+   * The one refusal a version stamp can produce, in the one wording both halves of the guarantee
+   * use.
    *
    * <p>It is <b>retryable</b>, and that is the whole reason it is not {@link Reason#PUSH_REJECTED}:
    * the next stamp is a different second, so pressing the button again is the right thing to do,
@@ -689,26 +487,7 @@ public class ReleaseIntegrator {
             + " stamps a different version.");
   }
 
-  /** Git's wording for a tag ref that is already there, from either half of the dance. */
-  private static boolean alreadyExists(String output) {
-    return output != null && output.toLowerCase().contains("already exists");
-  }
-
-  private static String remoteRejection(String output) {
-    if (output == null) {
-      return null;
-    }
-    for (String line : output.split("\n")) {
-      if (!line.contains("[remote rejected]") && !line.contains("[remote failure]")) {
-        continue;
-      }
-      int open = line.indexOf('(');
-      int close = line.lastIndexOf(')');
-      if (open >= 0 && close > open) {
-        return line.substring(open + 1, close).trim();
-      }
-      return line.trim();
-    }
-    return null;
+  private eu.wohlben.qits.workspaces.gitmirror.CommitIdentity identity() {
+    return gitIdentity.forMirror();
   }
 }

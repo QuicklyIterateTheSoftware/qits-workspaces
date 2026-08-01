@@ -31,22 +31,34 @@ public class FakeGitHostAddress implements GitHostAddress {
 
   private final AtomicReference<Runnable> beforeNextPush = new AtomicReference<>();
 
+  /**
+   * The read address, and it deliberately does <b>not</b> fire the hook. The mirror asks for this on
+   * every clone, fetch and {@code ls-remote}, and a staged second writer that fired on the first of
+   * those would move the branch long before the instant a race is about.
+   */
+  @Override
+  public String fetchUrl(String repoId) {
+    return Path.of(dataDir, repoId, "origin").toAbsolutePath().toString();
+  }
+
   @Override
   public String pushUrl(String repoId) {
     Runnable hook = beforeNextPush.getAndSet(null);
     if (hook != null) {
       hook.run();
     }
-    return Path.of(dataDir, repoId, "origin").toAbsolutePath().toString();
+    return fetchUrl(repoId);
   }
 
   /**
    * Run something once, at the instant before the next push — which is the only instant a
    * non-fast-forward race is about.
    *
-   * <p>This method is asked for the remote at step 7, after the worktree, the merge, the bump and
-   * the commit exist and before the ref is contended for, so a hook here moves the default branch
-   * exactly where a second writer would have. Staged rather than raced on purpose: a real race is
+   * <p>{@link #pushUrl} is asked for the remote at step 8, after the worktree, the merge, the bump,
+   * the commit and the tag exist and before the ref is contended for, so a hook here moves the
+   * default branch exactly where a second writer would have — and {@link #fetchUrl} exists so that
+   * everything the mirror reads on the way there leaves the hook alone. Staged rather than raced on
+   * purpose: a real race is
    * nondeterministic about which side loses, and the repository lease means two integrates through
    * the API usually do not contend at all — which is correct behaviour and useless as a test of what
    * happens when they do. The precedent is qits-ci's {@code FakeCiStepRunner.during(step, …)}, which

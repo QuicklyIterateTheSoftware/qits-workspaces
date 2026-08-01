@@ -30,11 +30,17 @@ public class ConfiguredGitHostAddress implements GitHostAddress {
   String artifactsUrl;
 
   @Override
-  public String pushUrl(String repoId) {
+  public String fetchUrl(String repoId) {
     String base = artifactsUrl == null ? "" : artifactsUrl.trim();
     while (base.endsWith("/")) {
       base = base.substring(0, base.length() - 1);
     }
     return base + "/artifacts/git/" + repoId;
+  }
+
+  /** One address, so reads and writes cannot drift apart in a deployment. */
+  @Override
+  public String pushUrl(String repoId) {
+    return fetchUrl(repoId);
   }
 }
