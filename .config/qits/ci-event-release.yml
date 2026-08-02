@@ -81,11 +81,6 @@ steps:
       # ~/.npmrc this step could write.
       git submodule update --init --depth 1 service/src/main/webui
 
-      # The second submodule, and it fails LATER and less legibly if it is forgotten: `eventstream`
-      # is a maven MODULE of this reactor, so an uninitialised one is a missing pom and the image
-      # build dies inside maven rather than at Quinoa's own message.
-      git submodule update --init --depth 1 eventstream
-
       cd service/src/main/webui
       npm_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
       sed -i -E "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_origin#" package-lock.json
@@ -99,6 +94,6 @@ steps:
 
       # --- half two: the image ------------------------------------------------------------------
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspaces:$version"
-      docker build -t "$ref" -f docker/Dockerfile .
+      docker build --network host -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true

@@ -11,7 +11,7 @@ anything else does: by pushing to the git host. This repo owns everything about 
 the boundary. Everything that runs *inside* the container belongs to
 [qits-workspace-daemon](https://github.com/QuicklyIterateTheSoftware/qits-workspace-daemon).
 
-    mvn verify        # a clone of this repo alone builds and tests green — no monorepo, no docker
+    mvn verify        # resolves qits-eventstream 1.0.0 from local qits-artifacts
 
 ## Layout
 
@@ -22,19 +22,15 @@ the boundary. Everything that runs *inside* the container belongs to
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
 | `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SCMRelease`. Plain records; a consumer depends on this jar and gets no domain. |
-| `eventstream/` | The platform event bus client — a **submodule**, [qits-eventstream](https://github.com/QuicklyIterateTheSoftware/qits-eventstream), built in place as a reactor module. |
 | `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/workspaces`. |
 
 So a checkout needs one command a plain clone does not give you:
 
     git submodule update --init
 
-Skip it and the build stops twice over, and neither message names a submodule. `eventstream` is a
-maven module, so an empty directory is a missing pom and the reactor dies before compiling anything.
-`webui` empty stops Quinoa at `No package.json found in Web UI directory` — `git clone` materialises
+Skip it and the web build stops at `No package.json found in Web UI directory` — `git clone` materialises
 a gitlink as an empty directory, and that is the one state Quinoa treats as a misconfiguration rather
-than as "no UI here". (A checkout with the `webui` directory *absent* builds fine, with a warning;
-an absent `eventstream` does not.)
+than as "no UI here". A checkout with the `webui` directory *absent* builds fine, with a warning.
 
 Quinoa shells out to `npm`, so a build here also wants **node on `PATH`** — the machine's own, which
 is the point: nothing in `application.properties` asks Quinoa to download one, so `./mvnw package`
