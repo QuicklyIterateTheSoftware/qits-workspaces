@@ -5,24 +5,20 @@ ports. This file is the working conventions on top of it.
 
 ## The two rules that shape everything
 
-**A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
-`mvn install` elsewhere, no credentials. `mvn verify` is the gate. Anything that would break that is
-not a tradeoff to weigh, it is the thing this repo exists to avoid.
+**A clone builds against the platform Maven repository** — no monorepo and no prior `mvn install`.
+`qits-eventstream:1.0.0` is resolved from local qits-artifacts; `qits-local-up.sh` publishes it before
+this repository enters the pipeline.
 
 That is why: the poms duplicate versions instead of inheriting them, the daemon protocol is
 vendored, tests build their own git origins (`TestOrigin`) instead of using fixtures, and the
 container runtime is faked in tests rather than shelling docker.
 
-*A clone*, not a bare `git clone`: two submodules are reactor input and the build needs both.
+The SPA is the sole submodule and an image build needs it.
 
     git submodule update --init
 
-`eventstream/` is the qits-eventstream repository, listed as a `<module>` and built in place, so an
-uninitialised one is a missing pom and the reactor dies before it compiles anything — a failure that
-names a path and not a submodule. `service/src/main/webui/` is the SPA and stops Quinoa instead. No
-credentials either way: both are public. `.config/qits/ci-post-receive.yml` initialises the two by
-path in the image build for the same reason, and a third submodule added for the SPA's sake would
-have to be added there deliberately.
+`service/src/main/webui/` is initialised explicitly by the pipeline. qits-eventstream is a normal
+Maven dependency and must not return as a gitlink or reactor module.
 
 The one thing beyond `.sdkmanrc`'s GraalVM a build wants is **node on `PATH`** — Quinoa shells out
 to npm for the Angular client. `mvn verify` does not need it (Quinoa is disabled by default in
