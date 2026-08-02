@@ -42,7 +42,8 @@ steps:
       # public GitHub repo needing no credentials, and one shallow fetch. (It was briefly private,
       # which an anonymous container reports as "could not read Username for 'https://github.com'" —
       # worth recognising if a sibling repo is ever born private too.)
-      git submodule update --init --depth 1 service/src/main/webui
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-spa-workspaces"
+      git -c submodule.qits-spa-workspaces.url="$frontend_url" submodule update --init --depth 1 service/src/main/webui
 
       # --- half one: the bundle ---------------------------------------------------------------
       #
