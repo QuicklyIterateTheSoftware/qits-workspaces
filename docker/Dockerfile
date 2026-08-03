@@ -26,13 +26,15 @@
 # An /etc/passwd line for 1001 would make it boot with no environment at all. It is deliberately not
 # here, for two reasons that are about this service rather than about images:
 #
-#   The data is not this service's own. `qits.repositories.data-dir` is a three-way on-disk contract
-#   — qits-projects clones the bare origins into it and qits-artifacts serves them over git
-#   smart-HTTP. This service NO LONGER WRITES THERE. Every branch create, branch delete, merge and
-#   release is a push to the git host over HTTP now, because a filesystem ref update fires no
-#   post-receive and so produced no CI run and no event for any of them. The volume stays mounted
-#   for two shrinking reasons: a rollback to a previous image needs it, and the workspace metadata
-#   sidecars written before they moved are still read from it. Neither will be true forever.
+#   The data is not this service's own. `qits.repositories.data-dir` is a two-way on-disk contract
+#   now (projects-volume-decoupling-plan.md BT) — qits-artifacts serves the bare origins over git
+#   smart-HTTP, and this service reads legacy sidecars off the same volume. qits-projects no longer
+#   mounts it at all: it clones its own mirrors over the wire instead. This service NO LONGER
+#   WRITES to the shared volume either way. Every branch create, branch delete, merge and release is
+#   a push to the git host over HTTP now, because a filesystem ref update fires no post-receive and
+#   so produced no CI run and no event for any of them. The volume stays mounted for two shrinking
+#   reasons: a rollback to a previous image needs it, and the workspace metadata sidecars written
+#   before they moved are still read from it. Neither will be true forever.
 #
 #   The H2-on-local-disk arrangement is a prototype, not a decided data architecture. An image that
 #   boots out of the box and starts writing a database bakes that prototype in and makes it look
@@ -43,9 +45,9 @@
 #   the git tree      is settled, and nothing about it is stored in SQL. So the image names it
 #                     itself — QITS_REPOSITORIES_DATA_DIR=/data/repositories in the runtime stage —
 #                     and it is correct out of the box rather than resolving to `?`. The literal is
-#                     shared: qits-artifacts and qits-projects ship the identical path, so one
-#                     mounted volume satisfies the three-way contract without a deployment having to
-#                     get the same string right three times.
+#                     shared: qits-artifacts ships the identical path, so one mounted volume
+#                     satisfies the two-way contract without a deployment having to get the same
+#                     string right twice.
 #
 #   this service's    the git mirrors (one bare per repository, plus the worktrees a merge runs in)
 #   own tree          and the workspace metadata sidecars. Named here too —
@@ -249,9 +251,10 @@ RUN chmod +x /work/qits-workspaces
 RUN mkdir -p /data/repositories && chown -R 1001:root /data && chmod -R 775 /data
 
 # The git tree, named here rather than left to a deployment: it is not the prototype, and nothing in
-# it is stored in SQL. `/data/repositories` is a literal qits-artifacts and qits-projects also ship —
-# the three-way on-disk contract in the header only holds if all three resolve it to the same volume,
-# and three services each told the same string separately is three chances to get it wrong.
+# it is stored in SQL. `/data/repositories` is a literal qits-artifacts also ships — the two-way
+# on-disk contract in the header only holds if both resolve it to the same volume, and two services
+# each told the same string separately is two chances to get it wrong. qits-projects no longer
+# ships this literal at all (projects-volume-decoupling-plan.md BT).
 #
 # Note what is NOT set beside it: no QUARKUS_DATASOURCE_WORKSPACES_JDBC_URL default. That asymmetry
 # is the whole point — the git tree works out of the box, the prototype database refuses to.
