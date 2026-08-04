@@ -416,6 +416,7 @@ public class WorkspaceService {
                   activity,
                   wt.preamble,
                   wt.result,
+                  wt.createdAt,
                   wt.resolvedAt,
                   info != null ? info.connectedAt() : null,
                   info != null ? info.version() : null,

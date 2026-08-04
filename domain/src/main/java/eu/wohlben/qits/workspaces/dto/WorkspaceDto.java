@@ -44,6 +44,9 @@ import java.time.Instant;
  *     waiting for the next prompt
  * @param preamble markdown: the reason/goal authored at creation
  * @param result markdown: the outcome authored at resolution
+ * @param createdAt when the workspace row was created. It is today's approximation of "last
+ *     touched" — the overview sorts on it — and stays that until the row carries a real touch
+ *     timestamp; {@code null} for rows that predate the column
  * @param resolvedAt when the workspace was resolved (null while ACTIVE)
  * @param daemonConnectedAt when the workspace's in-container {@code workspace-daemon} registered
  *     its control socket — the workspace's "connected since" (docs/epics/qits-workspace-registry/).
@@ -78,6 +81,7 @@ public record WorkspaceDto(
     AgentActivityState agentActivity,
     String preamble,
     String result,
+    Instant createdAt,
     Instant resolvedAt,
     Instant daemonConnectedAt,
     String daemonVersion,

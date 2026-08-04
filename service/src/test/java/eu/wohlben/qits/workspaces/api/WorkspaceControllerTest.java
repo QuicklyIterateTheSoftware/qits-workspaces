@@ -26,6 +26,9 @@ public class WorkspaceControllerTest {
   @jakarta.inject.Inject
   eu.wohlben.qits.workspaces.control.WorkspaceService workspaceService;
 
+  /** An ISO-8601 instant, the shape every {@code Instant} in {@code WorkspaceDto} serializes to. */
+  private static final String ISO_INSTANT = "\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z";
+
   /**
    * A repository with a bare origin on disk and a resolvable id, seeded in-JVM.
    *
@@ -58,7 +61,10 @@ public class WorkspaceControllerTest {
         .post("/workspaces/api/workspaces")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
-        .body("workspace.workspaceId", equalTo("step-01"));
+        .body("workspace.workspaceId", equalTo("step-01"))
+        // The create response is a thin view, but createdAt is a plain row field and rides along:
+        // the overview sorts on it, so a freshly created workspace must already carry one.
+        .body("workspace.createdAt", matchesPattern(ISO_INSTANT));
 
     // merge the workspace's branch into its parent, "feature". NOT into master: master is this
     // repository's default branch, which integrate alone writes now — that case is
@@ -146,7 +152,12 @@ public class WorkspaceControllerTest {
         // (also a regression guard for the path fix).
         .body(
             "entries.find { it.workspace.workspaceId == 'wt-list' }.workspace.branch",
-            equalTo("wt-branch"));
+            equalTo("wt-branch"))
+        // The overview orders by "most recently touched" and approximates that with createdAt, so
+        // the listing has to carry it — ISO-8601, like resolvedAt beside it.
+        .body(
+            "entries.find { it.workspace.workspaceId == 'wt-list' }.workspace.createdAt",
+            matchesPattern(ISO_INSTANT));
   }
 
   @Test
@@ -651,6 +662,8 @@ public class WorkspaceControllerTest {
         // be released?" is `parent == repositoryMainBranch` and asking another service for that one
         // string would be a second request per page.
         .body("workspace.repositoryMainBranch", equalTo("master"))
+        // Same createdAt the collection serves, and the same shape — one client cache holds both.
+        .body("workspace.createdAt", matchesPattern(ISO_INSTANT))
         // Not a second shape: the status strip reads runtime, daemon and cleanliness off exactly
         // the fields the list already carries, so one client cache holds both.
         .body("workspace", hasKey("runtimeStatus"))
