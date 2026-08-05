@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.workspaces.control.FakeGitHostAddress;
 import eu.wohlben.qits.workspaces.control.FakeReleaseAnnouncer;
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
-import eu.wohlben.qits.workspaces.control.GitExecutor;
+import eu.wohlben.qits.workspaces.control.TestGit;
 import eu.wohlben.qits.workspaces.control.TestOrigin;
 import eu.wohlben.qits.workspaces.control.VersionStamp;
 import eu.wohlben.qits.workspaces.control.WorkspaceIds;
@@ -57,7 +57,7 @@ public class ReleaseControllerTest {
   private static final Pattern VERSION =
       Pattern.compile("(?:[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)");
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /** This service's own tree — where the mirrors and their worktrees live now. */
@@ -69,7 +69,6 @@ public class ReleaseControllerTest {
   @Inject FakeReleaseAnnouncer announcer;
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
-  @Inject GitExecutor git;
 
   @BeforeEach
   void resetDoubles() {
@@ -108,7 +107,7 @@ public class ReleaseControllerTest {
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
-    return git.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
+    return TestGit.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
   }
 
   /** Every tag the origin holds, one per line and empty when there are none. */
@@ -435,7 +434,7 @@ public class ReleaseControllerTest {
         () -> {
           try {
             Path worktree = Path.of(ownDataDir, "worktrees", repoId, "raced-b");
-            String subject = git.exec(worktree.toFile(), "git", "log", "-1", "--format=%s").trim();
+            String subject = TestGit.exec(worktree.toFile(), "git", "log", "-1", "--format=%s").trim();
             String version = subject.substring(subject.indexOf('(') + 1, subject.indexOf(')'));
             inOrigin(repoId, "git", "tag", version, otherWriter);
           } catch (Exception e) {

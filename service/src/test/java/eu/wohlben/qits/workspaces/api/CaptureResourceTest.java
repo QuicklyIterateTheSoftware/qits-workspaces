@@ -41,7 +41,7 @@ public class CaptureResourceTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-test-capture");
         return Map.of(
-            "qits.repositories.data-dir",
+            "qits.test.origins-dir",
             tempDir.toString(),
             // Small enough to trip cheaply in the oversize tests, large enough for happy paths.
             "qits.capture.max-payload-bytes",
@@ -59,7 +59,7 @@ public class CaptureResourceTest {
   @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /**

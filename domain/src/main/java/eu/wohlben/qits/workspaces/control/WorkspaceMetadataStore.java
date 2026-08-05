@@ -6,7 +6,6 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -20,10 +19,15 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * is not git, nothing else reads it, and a private file of one service has no business in another
  * service's storage. It is here now, beside this service's own database and event outbox.
  *
- * <p>{@link #read} still looks at the old location when the new one has nothing, so a deployment
- * upgrading across this change keeps answering for workspaces created before it, and {@link #delete}
- * removes both. Nothing writes to the old path again. When no workspace created before this change
- * can still be ACTIVE, the fallback and its config key can go.
+ * <p>The read fallback that carried a deployment across that move is gone, and so is the config key
+ * it needed: no ACTIVE workspace has a sidecar in the old location any more, so it could never fire
+ * again.
+ *
+ * <p><b>Nothing reads the sidecar.</b> Not this repository, not the workspace daemon — this
+ * service's data tree is mounted into no container — and nothing else on the platform. The {@code
+ * workspace} row carries the same two values. What is left is the write and the discard, kept as the
+ * on-disk trace of a workspace; whether the file should exist at all is a separate question from
+ * unmounting the volume, and is not answered here.
  */
 @ApplicationScoped
 public class WorkspaceMetadataStore {
@@ -33,14 +37,6 @@ public class WorkspaceMetadataStore {
   /** This service's own data tree — where the sidecars live now. */
   @ConfigProperty(name = "qits.workspaces.data-dir", defaultValue = "data/workspaces")
   String dataDir;
-
-  /**
-   * The shared repositories volume, read-only and only for sidecars written before the move. Keep
-   * the key spelled as the repositories one: it names the same tree the other two services mount,
-   * and a second key that had to equal it would only be a way to get it wrong.
-   */
-  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
-  String legacyDataDir;
 
   /** Write (or overwrite) the sidecar, creating the metadata dir on first use. */
   public void write(String repoId, WorkspaceMetadata metadata) {
@@ -56,28 +52,10 @@ public class WorkspaceMetadataStore {
     }
   }
 
-  /** The sidecar, or empty when the workspace never had one (or it was already discarded). */
-  public Optional<WorkspaceMetadata> read(String repoId, String workspaceId) {
-    Path file = fileFor(metadataDir(repoId), workspaceId);
-    if (!Files.exists(file)) {
-      file = fileFor(legacyMetadataDir(repoId), workspaceId);
-    }
-    if (!Files.exists(file)) {
-      return Optional.empty();
-    }
-    try {
-      return Optional.of(objectMapper.readValue(file.toFile(), WorkspaceMetadata.class));
-    } catch (IOException e) {
-      throw new RuntimeException(
-          "Failed to read workspace metadata for " + repoId + "/" + workspaceId, e);
-    }
-  }
-
-  /** Remove the sidecar from both locations; a missing file is not an error (discard is idempotent). */
+  /** Remove the sidecar; a missing file is not an error (discard is idempotent). */
   public void delete(String repoId, String workspaceId) {
     try {
       Files.deleteIfExists(fileFor(metadataDir(repoId), workspaceId));
-      Files.deleteIfExists(fileFor(legacyMetadataDir(repoId), workspaceId));
     } catch (IOException e) {
       throw new RuntimeException(
           "Failed to delete workspace metadata for " + repoId + "/" + workspaceId, e);
@@ -86,10 +64,6 @@ public class WorkspaceMetadataStore {
 
   private Path metadataDir(String repoId) {
     return Path.of(dataDir, "metadata", repoId);
-  }
-
-  private Path legacyMetadataDir(String repoId) {
-    return Path.of(legacyDataDir, repoId, "metadata");
   }
 
   private static Path fileFor(Path metadataDir, String workspaceId) {

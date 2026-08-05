@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.workspaces.control.FakeGitHostAddress;
 import eu.wohlben.qits.workspaces.control.FakeReleaseAnnouncer;
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
-import eu.wohlben.qits.workspaces.control.GitExecutor;
+import eu.wohlben.qits.workspaces.control.TestGit;
 import eu.wohlben.qits.workspaces.control.TestOrigin;
 import eu.wohlben.qits.workspaces.control.WorkspaceIds;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
@@ -42,7 +42,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class IntegrateControllerTest {
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @Inject FakeRepositoryLookup repositories;
@@ -50,7 +50,6 @@ public class IntegrateControllerTest {
   @Inject FakeReleaseAnnouncer announcer;
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
-  @Inject GitExecutor git;
 
   @BeforeEach
   void resetDoubles() {
@@ -96,7 +95,7 @@ public class IntegrateControllerTest {
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
-    return git.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
+    return TestGit.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
   }
 
   private List<String> activeLabels(String repoId) {

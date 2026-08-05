@@ -64,7 +64,7 @@ public class DaemonStreamRouteTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-daemon-stream-test-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.test.origins-dir", tempDir.toString(),
             // Short enough that the expiry test does not dominate the run, long enough that a
             // loopback dial-back never loses the race.
             "qits.workspace.daemon-tunnel.nonce-ttl-ms", "8000");
@@ -84,7 +84,7 @@ public class DaemonStreamRouteTest {
 
   @Inject WorkspaceDaemonRegistry registry;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   private Vertx vertx;

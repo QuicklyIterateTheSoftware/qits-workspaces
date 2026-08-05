@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 public class WorkspaceControllerTest {
 
   // The effective data dir the app uses, so tests can commit directly inside a workspace on disk.
-  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
+  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @jakarta.inject.Inject eu.wohlben.qits.workspaces.control.WorkspaceIds workspaceIds;

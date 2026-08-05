@@ -6,9 +6,9 @@ import eu.wohlben.qits.workspaces.gitmirror.GitRemotes;
  * Where a repository answers as a <em>git remote</em> — the url this service mirrors from and pushes
  * to.
  *
- * <p>This context used to hold that repository on disk, in the tree {@code qits.repositories.data-dir}
- * names, and advanced refs by writing them there. That is why <b>no branch creation, merge or
- * cleanup this service performed ever produced a CI run</b>: a filesystem ref update fires no {@code
+ * <p>This context used to hold that repository on disk, on the shared volume of bare origins
+ * qits-artifacts serves, and advanced refs by writing them there. That is why <b>no branch creation,
+ * merge or cleanup this service performed ever produced a CI run</b>: a filesystem ref update fires no {@code
  * post-receive}, so nothing downstream learned. Every one of them is a push now, over HTTP to the
  * ordinary git host, so receive-pack is the sole writer of every ref, the protection hook sees every
  * release, and the existing post-receive → qits-ci → build chain happens for the ordinary reason.

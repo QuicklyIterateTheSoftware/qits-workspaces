@@ -28,9 +28,8 @@ public class WorkspaceDefaultMainBranchTest {
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject WorkspaceHistoryService workspaceHistoryService;
-  @Inject GitExecutor git;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /**
@@ -49,7 +48,7 @@ public class WorkspaceDefaultMainBranchTest {
 
   private String revParse(String repoId, String ref) throws Exception {
     Path originPath = Path.of(dataDir, repoId, "origin");
-    return git.exec(originPath.toFile(), "git", "rev-parse", ref).trim();
+    return TestGit.exec(originPath.toFile(), "git", "rev-parse", ref).trim();
   }
 
   @Test

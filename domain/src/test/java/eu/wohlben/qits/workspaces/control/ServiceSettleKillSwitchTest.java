@@ -29,7 +29,7 @@ public class ServiceSettleKillSwitchTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-daemon-settle-killswitch-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.test.origins-dir", tempDir.toString(),
             "qits.services.autostop-enabled", "false",
             "qits.services.autostart-enabled", "false");
       } catch (Exception e) {
@@ -42,7 +42,7 @@ public class ServiceSettleKillSwitchTest {
 
   @Inject WorkspaceIds workspaceIds;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;

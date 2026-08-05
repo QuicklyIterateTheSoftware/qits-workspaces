@@ -26,7 +26,6 @@ import jakarta.enterprise.event.Event;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -162,7 +161,7 @@ public class WorkspaceService {
    * The git substrate: a mirror per repository, the worktrees a merge runs in, and the pushes that
    * are now the only way a ref of a served repository moves.
    *
-   * <p>Nothing in this class opens {@code qits.repositories.data-dir} any more. Every branch create,
+   * <p>Nothing in this class opens the shared volume of bare origins any more. Every branch create,
    * every branch delete and every merge used to write a ref there directly, and every one of them
    * fired no {@code post-receive} — so a workspace created, integrated or cleaned up produced no CI
    * run and no event. They are pushes now, and the chain downstream happens for the ordinary reason.
@@ -667,16 +666,6 @@ public class WorkspaceService {
       }
     }
     return false;
-  }
-
-  /**
-   * The on-disk path of a host workspace checked out on {@code branch}, if any. With workspace
-   * containers there are no host checkouts (each branch lives in its container), so this is always
-   * empty — the sync code then updates the bare origin ref directly rather than a checked-out
-   * workspace. Kept as the seam so pull stays branch-aware if host workspaces ever return.
-   */
-  public Optional<Path> workspacePathForBranch(String repoId, String branch) {
-    return Optional.empty();
   }
 
   /**

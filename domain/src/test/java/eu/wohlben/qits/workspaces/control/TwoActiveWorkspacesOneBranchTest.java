@@ -35,7 +35,7 @@ public class TwoActiveWorkspacesOneBranchTest {
   @Inject WorkspaceService workspaceService;
   @Inject WorkspaceRepository workspaceRepository;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /**

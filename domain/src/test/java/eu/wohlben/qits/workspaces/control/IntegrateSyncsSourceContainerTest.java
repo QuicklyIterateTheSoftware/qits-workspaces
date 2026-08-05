@@ -34,7 +34,7 @@ public class IntegrateSyncsSourceContainerTest {
     public Map<String, String> getConfigOverrides() {
       try {
         Path tempDir = Files.createTempDirectory("qits-integrate-sync-test-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
+        return Map.of("qits.test.origins-dir", tempDir.toString());
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -46,9 +46,8 @@ public class IntegrateSyncsSourceContainerTest {
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
-  @Inject GitExecutor git;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   private String clonedRepo() throws Exception {

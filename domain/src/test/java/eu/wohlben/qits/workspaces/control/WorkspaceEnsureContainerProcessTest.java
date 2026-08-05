@@ -32,9 +32,8 @@ public class WorkspaceEnsureContainerProcessTest {
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject TechnicalProcessRegistry registry;
-  @Inject GitExecutor git;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /** Records a terminal process's full replay (attach on a terminal process replays + done). */
@@ -138,7 +137,7 @@ public class WorkspaceEnsureContainerProcessTest {
     String repoId = repoWithWorkspace("doomed");
     // Kill the workspace's branch in the bare origin, so the provision has nothing to recreate
     // from (the branch-gone abandonment path).
-    git.exec(Path.of(dataDir, repoId, "origin").toFile(), "git", "branch", "-D", "--", "doomed");
+    TestGit.exec(Path.of(dataDir, repoId, "origin").toFile(), "git", "branch", "-D", "--", "doomed");
 
     Replay replay =
         replayOf(awaitTerminal(workspaceService.beginEnsureContainer(workspaceIds.of(repoId, "doomed"))));

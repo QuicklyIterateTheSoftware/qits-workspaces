@@ -30,7 +30,7 @@ public class ServiceAutoStartKillSwitchTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-daemon-autostart-killswitch-repos");
         return Map.of(
-            "qits.repositories.data-dir",
+            "qits.test.origins-dir",
             tempDir.toString(),
             "qits.services.autostart-enabled",
             "false");
@@ -44,7 +44,7 @@ public class ServiceAutoStartKillSwitchTest {
 
   @Inject WorkspaceIds workspaceIds;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;

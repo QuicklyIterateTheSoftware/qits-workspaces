@@ -334,7 +334,8 @@ release whose artifacts still carry the previous version, and that is discovered
 
 ## The mirror, and what it replaced
 
-Nothing here opens `qits.repositories.data-dir` any more. Each repository is **mirrored** under
+Nothing here opens the shared volume of bare origins any more — there is no config key naming it and
+a deployment does not mount it. Each repository is **mirrored** under
 `qits.workspaces.data-dir` (`mirrors/<repoId>.git`, worktrees beside it), filled by `git clone
 --mirror` and kept current by `git fetch --prune` — qits-ci's own cache pattern, one size larger
 because this service has to merge and not only read config.
@@ -616,7 +617,7 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
 - **App-level config lives in `service/src/main/resources/application.properties`, and the tests
   inherit it.** That file is on the test classpath and Quarkus merges it, so
   `service/src/test/resources/application.properties` holds test-only *overrides* (in-memory H2,
-  `flyway…clean-at-start`, `qits.repositories.data-dir` under `target/`) and nothing else. Never
+  `flyway…clean-at-start`, the on-disk trees under `target/`) and nothing else. Never
   re-declare a shipped setting such as `quarkus.rest.path` there: the copy is free to drift from
   what ships, and then a green suite proves nothing.
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`
@@ -657,11 +658,18 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first,
   or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
-  returns a repo id; pair it with `FakeRepositoryLookup.register`. The suite sets
-  `qits.workspaces.data-dir` to a **different** directory from `qits.repositories.data-dir` on
-  purpose: that separation is the change under test, and a suite pointing both at one tree would
-  prove nothing. It also sets `qits.workspace.git.mirror-freshness-ms=0`, because a fixture that
-  changes between two assertions must never be served from a window.
+  returns a repo id; pair it with `FakeRepositoryLookup.register`. Where those origins go is
+  **`qits.test.origins-dir`, a key no deployment has** — the suite needs somewhere to put a fixture
+  git host, and nothing in `src/main` reads it. It is deliberately a **different** directory from
+  `qits.workspaces.data-dir`: the service's own tree must not be the tree it fetches from, or a
+  suite would prove nothing about the separation. The properties files also set
+  `qits.workspace.git.mirror-freshness-ms=0`, because a fixture that changes between two assertions
+  must never be served from a window.
+- `TestGit.exec` is how a test runs git in one of those fixture directories. It is a thin static
+  helper over `gitmirror`'s `GitCli`, and it replaced `GitExecutor` — a production CDI bean whose
+  only remaining callers were tests. `GitCli`'s own properties (the per-line tap, the unterminated
+  final line, `GIT_TERMINAL_PROMPT=0`) are asserted in `gitmirror`'s `GitCliTest`, offline and with
+  no augmentation, rather than through a `@QuarkusTest` on a bean that only delegated.
 - `gitmirror/`'s own suite (`RepoMirrorTest`) is the one that proves the substrate: clone, fetch,
   prune, `ls-remote` answering while the mirror is stale, a branch create and delete arriving as
   pushes, the worktree merge/commit/tag/atomic-push sequence, and a leftover worktree being pruned

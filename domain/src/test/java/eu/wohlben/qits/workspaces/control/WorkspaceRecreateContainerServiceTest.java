@@ -31,11 +31,10 @@ public class WorkspaceRecreateContainerServiceTest {
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
-  @Inject GitExecutor git;
   @Inject WorkspaceContainerStartedRecorder startedRecorder;
   @Inject FakeWorkspaceGitStatus gitStatus;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /**

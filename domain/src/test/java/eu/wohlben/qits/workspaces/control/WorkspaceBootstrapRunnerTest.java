@@ -63,7 +63,7 @@ public class WorkspaceBootstrapRunnerTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-bootstrap-runner-test-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.test.origins-dir", tempDir.toString(),
             "qits.services.autostart-enabled", "true",
             // The host's chain-await timeout (the fake driver runs the chain synchronously, so this
             // only bounds a hung await).
@@ -87,9 +87,8 @@ public class WorkspaceBootstrapRunnerTest {
   @Inject WorkspaceContainerEventPublisher containerEvents;
   @Inject WorkspaceReadyForServicesRecorder readyRecorder;
   @Inject FakeWorkspaceBootstrapDriver bootstrapDriver;
-  @Inject GitExecutor git;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   private Path scratch;
@@ -120,13 +119,13 @@ public class WorkspaceBootstrapRunnerTest {
   private void commitConfig(String repoId, String yaml) throws Exception {
     Path origin = Path.of(dataDir, repoId, "origin");
     Path worktree = Files.createTempDirectory("qits-config-commit");
-    git.exec(null, "git", "clone", origin.toString(), worktree.toString());
-    git.exec(worktree.toFile(), "git", "config", "user.email", "t@example.com");
-    git.exec(worktree.toFile(), "git", "config", "user.name", "Test");
+    TestGit.exec(null, "git", "clone", origin.toString(), worktree.toString());
+    TestGit.exec(worktree.toFile(), "git", "config", "user.email", "t@example.com");
+    TestGit.exec(worktree.toFile(), "git", "config", "user.name", "Test");
     Files.writeString(worktree.resolve(".qits-config.yml"), yaml);
-    git.exec(worktree.toFile(), "git", "add", ".qits-config.yml");
-    git.exec(worktree.toFile(), "git", "commit", "-m", "stage qits config");
-    git.exec(worktree.toFile(), "git", "push", "origin", "HEAD:master");
+    TestGit.exec(worktree.toFile(), "git", "add", ".qits-config.yml");
+    TestGit.exec(worktree.toFile(), "git", "commit", "-m", "stage qits config");
+    TestGit.exec(worktree.toFile(), "git", "push", "origin", "HEAD:master");
   }
 
   /** A bootstrap chain YAML (version 1) from {@code name=execute[=check]} tuples. */

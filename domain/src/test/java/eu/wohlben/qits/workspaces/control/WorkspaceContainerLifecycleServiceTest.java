@@ -38,13 +38,12 @@ public class WorkspaceContainerLifecycleServiceTest {
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
-  @Inject GitExecutor git;
   @Inject WorkspaceContainerStartedRecorder startedRecorder;
   @Inject WorkspaceContainerStoppingRecorder stoppingRecorder;
   @Inject FakeWorkspaceGitStatus gitStatus;
   @Inject FakeWorkspaceAgentActivity agentActivity;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /**
@@ -79,8 +78,8 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertEquals(WorkspaceRuntimeStatus.STOPPED, workspaceDto(repoId, "feat").runtimeStatus());
     Path originPath = Path.of(dataDir, repoId, "origin");
     assertEquals(
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
+        TestGit.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
+        TestGit.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
         "the branch ref exists in origin at the parent's commit");
     // The runtime mirrors docker: touching the not-yet-provisioned container fails, it doesn't
     // silently run elsewhere — a use-site that forgot ensureContainer becomes a test failure.
@@ -94,7 +93,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertTrue(containers.exists(container), "first use provisions the container");
     assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "feat").runtimeStatus());
     assertEquals(
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
+        TestGit.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/feat").trim(),
         containerHead(container),
         "the provisioned container has the branch checked out");
   }
@@ -161,7 +160,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     assertTrue(containers.exists(container));
     Path originPath = Path.of(dataDir, repoId, "origin");
     assertEquals(
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
+        TestGit.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
         containerHead(container));
   }
 
@@ -177,14 +176,14 @@ public class WorkspaceContainerLifecycleServiceTest {
     workspaceService.createWorkspace(repoId, "feeder", "feature", "feeder", null);
     Path originPath = Path.of(dataDir, repoId, "origin");
     String masterBefore =
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim();
+        TestGit.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim();
 
     var result = workspaceService.mergeWorkspace(workspaceIds.of(repoId, "feeder"), "master");
 
     assertFalse(result.hasConflicts(), "the host-side merge succeeds without a container");
     assertNotEquals(
         masterBefore,
-        git.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
+        TestGit.exec(originPath.toFile(), "git", "rev-parse", "refs/heads/master").trim(),
         "origin's target ref advanced");
     assertFalse(
         containers.exists(containers.containerName("feeder", repoId)),
@@ -270,7 +269,7 @@ public class WorkspaceContainerLifecycleServiceTest {
     // Both the container AND the durable branch disappear: the work no longer exists anywhere.
     containers.rm(container);
     Path originPath = Path.of(dataDir, repoId, "origin");
-    git.exec(originPath.toFile(), "git", "branch", "-D", "--", "feat");
+    TestGit.exec(originPath.toFile(), "git", "branch", "-D", "--", "feat");
 
     assertThrows(NotFoundException.class, () -> workspaceService.ensureContainer(workspaceIds.of(repoId, "feat")));
 

@@ -145,9 +145,10 @@ it explains why each line is load-bearing.
 Beyond that, a deployment must allow-list `/workspaces/daemon/` for unauthenticated access — that is
 the daemon's dial-home control socket, and it authenticates by workspace id, not by session. In the
 monorepo this lived in `auth/core`'s `PublicPaths`; under the gateway it is `PublicPaths` there.
-`qits.repositories.data-dir` is still mounted and is **almost unused**: nothing here writes to it,
-and the only thing that reads it is the fallback for workspace metadata sidecars written before they
-moved to this service's own tree. It stays for the rollback, and for that fallback.
+The shared volume of bare origins is **not mounted any more** and there is no config key naming it.
+Nothing here wrote to it once every ref move became a push, and its last reader — the fallback for
+workspace metadata sidecars written before they moved to this service's own tree — went once no
+ACTIVE workspace still had one there. `qits.workspaces.data-dir` is the only tree this service opens.
 
 **The event bus needs nothing.** A release publishes `SCMRelease` through the `qits-eventstream`
 jar, which ships every key it needs as a default: `qits.events.url` is the qits-net alias, and

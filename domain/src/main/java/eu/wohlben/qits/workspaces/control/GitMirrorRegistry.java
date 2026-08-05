@@ -22,10 +22,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 public class GitMirrorRegistry {
 
   /**
-   * This service's <b>own</b> data tree, and the asymmetry with {@code qits.repositories.data-dir}
-   * is the point: that one is the shared volume qits-artifacts serves and qits-projects clones into,
-   * and nothing here writes to it any more. The mirrors are a private cache of repositories this
-   * service does not own, so they live where its database and its event outbox already do.
+   * This service's <b>own</b> data tree, and the only one it opens. The mirrors are a private cache
+   * of repositories this service does not own — the served originals are qits-artifacts', reached
+   * over HTTP and never on disk — so they live where this service's database and event outbox
+   * already do.
    */
   @ConfigProperty(name = "qits.workspaces.data-dir", defaultValue = "data/workspaces")
   String dataDir;

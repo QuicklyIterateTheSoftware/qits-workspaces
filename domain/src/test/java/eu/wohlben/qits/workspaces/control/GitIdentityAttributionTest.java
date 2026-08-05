@@ -31,7 +31,7 @@ public class GitIdentityAttributionTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-git-identity-test-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.test.origins-dir", tempDir.toString(),
             "qits.git.author-name", "qits-bot",
             "qits.git.author-email", "qits-bot@example.com");
       } catch (Exception e) {
@@ -45,9 +45,8 @@ public class GitIdentityAttributionTest {
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
   @Inject ContainerRuntime containers;
-  @Inject GitExecutor git;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   private String clonedRepo() throws Exception {
@@ -60,7 +59,7 @@ public class GitIdentityAttributionTest {
   /** Author and committer of the tip commit of {@code ref} in the repo's bare origin. */
   private String tipAttribution(String repoId, String ref) throws Exception {
     Path originPath = Path.of(dataDir, repoId, "origin");
-    return git.exec(originPath.toFile(), "git", "log", "-1", "--format=%an <%ae>|%cn <%ce>", ref)
+    return TestGit.exec(originPath.toFile(), "git", "log", "-1", "--format=%an <%ae>|%cn <%ce>", ref)
         .trim();
   }
 

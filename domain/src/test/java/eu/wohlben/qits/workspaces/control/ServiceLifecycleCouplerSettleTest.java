@@ -39,7 +39,7 @@ public class ServiceLifecycleCouplerSettleTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-daemon-settle-test-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.test.origins-dir", tempDir.toString(),
             "qits.services.autostop-enabled", "true",
             // Keep auto-start OFF so these tests isolate the settle direction; start manually.
             "qits.services.autostart-enabled", "false");
@@ -55,7 +55,7 @@ public class ServiceLifecycleCouplerSettleTest {
 
   @Inject WorkspaceIds workspaceIds;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;

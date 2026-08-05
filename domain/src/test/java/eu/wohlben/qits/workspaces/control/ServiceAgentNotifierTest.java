@@ -29,7 +29,7 @@ public class ServiceAgentNotifierTest {
 
   @Inject FakeRepositoryLookup repositories;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @Inject WorkspaceService workspaceService;

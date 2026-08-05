@@ -15,12 +15,12 @@ import org.junit.jupiter.api.Test;
 /**
  * Regression test for the workspace path bug.
  *
- * <p>Host git used to run with its working directory set to the bare origin, so when {@code
- * qits.repositories.data-dir} was a <em>relative</em> path (as in dev) a relative workspace path was
- * created nested under origin instead of the repo's workspaces directory — leaving {@code
- * list}/{@code merge}/{@code discard} unable to find it on disk. The mirror resolves its root to an
- * absolute path once, at construction, which is what makes the bug unreachable rather than fixed;
- * this test keeps a relative data dir exercised so the property stays asserted. The other
+ * <p>Host git used to run with its working directory set to the bare origin, so a <em>relative</em>
+ * data dir (as in dev) put the workspace path nested under origin instead of under the repository's
+ * workspaces directory — leaving {@code list}/{@code merge}/{@code discard} unable to find it on
+ * disk. {@code GitMirrorRegistry} resolves {@code qits.workspaces.data-dir} to an absolute path
+ * once, at construction, which is what makes the bug unreachable rather than fixed; this test keeps
+ * a relative one exercised through a whole lifecycle so the property stays asserted. The other
  * controller tests use an absolute temp dir and so never covered it.
  */
 @QuarkusTest
@@ -30,8 +30,12 @@ public class WorkspaceRelativeDataDirTest {
   public static class TestProfile implements QuarkusTestProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-      // Deliberately relative (resolves under the module's target/ build dir).
-      return Map.of("qits.repositories.data-dir", "target/qits-rel-workspace-test");
+      // Both deliberately relative (they resolve under the module's target/ build dir): the tree
+      // under test is the service's own, and the fixture origins are relative beside it so the
+      // whole flow runs with nothing pre-absolutised.
+      return Map.of(
+          "qits.workspaces.data-dir", "target/qits-rel-workspace-own",
+          "qits.test.origins-dir", "target/qits-rel-workspace-test");
     }
   }
 
@@ -48,7 +52,7 @@ public class WorkspaceRelativeDataDirTest {
   @jakarta.inject.Inject
   eu.wohlben.qits.workspaces.control.FakeRepositoryLookup repositories;
 
-  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
+  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   private String createProjectAndRepository() {

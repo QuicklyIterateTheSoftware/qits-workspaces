@@ -40,7 +40,7 @@ public class ServiceAutoStarterTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-service-autostart-test-repos");
         return Map.of(
-            "qits.repositories.data-dir",
+            "qits.test.origins-dir",
             tempDir.toString(),
             "qits.services.autostart-enabled",
             "true");
@@ -56,7 +56,7 @@ public class ServiceAutoStarterTest {
 
   @Inject WorkspaceIds workspaceIds;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;

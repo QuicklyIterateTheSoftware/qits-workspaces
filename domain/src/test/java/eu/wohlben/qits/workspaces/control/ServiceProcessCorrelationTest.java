@@ -36,7 +36,7 @@ public class ServiceProcessCorrelationTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-service-process-test-repos");
         return Map.of(
-            "qits.repositories.data-dir",
+            "qits.test.origins-dir",
             tempDir.toString(),
             "qits.services.autostart-enabled",
             "true");
@@ -52,7 +52,7 @@ public class ServiceProcessCorrelationTest {
 
   @Inject WorkspaceIds workspaceIds;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
   @Inject FakeWorkspaceConfigReader configReader;

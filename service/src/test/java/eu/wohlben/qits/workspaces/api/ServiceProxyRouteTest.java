@@ -59,7 +59,7 @@ public class ServiceProxyRouteTest {
     public Map<String, String> getConfigOverrides() {
       try {
         Path tempDir = Files.createTempDirectory("qits-service-proxy-test-repos");
-        return Map.of("qits.repositories.data-dir", tempDir.toString());
+        return Map.of("qits.test.origins-dir", tempDir.toString());
       } catch (Exception e) {
         throw new RuntimeException(e);
       }
@@ -79,7 +79,7 @@ public class ServiceProxyRouteTest {
 
   @Inject eu.wohlben.qits.workspaces.control.WorkspaceIds workspaceIds;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
   @Inject WorkspaceService workspaceService;
 

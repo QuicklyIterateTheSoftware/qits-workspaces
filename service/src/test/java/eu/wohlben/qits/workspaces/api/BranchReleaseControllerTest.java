@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.workspaces.control.FakeGitHostAddress;
 import eu.wohlben.qits.workspaces.control.FakeReleaseAnnouncer;
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
-import eu.wohlben.qits.workspaces.control.GitExecutor;
+import eu.wohlben.qits.workspaces.control.TestGit;
 import eu.wohlben.qits.workspaces.control.TestOrigin;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
@@ -51,14 +51,13 @@ public class BranchReleaseControllerTest {
   /** The train's own ref shape: one branch per upstream, force-pushed by the bump step. */
   private static final String MAINTENANCE = "maintenance/qits-spa-ui-components";
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @Inject FakeRepositoryLookup repositories;
   @Inject FakeGitHostAddress gitHost;
   @Inject FakeReleaseAnnouncer announcer;
   @Inject WorkspaceService workspaceService;
-  @Inject GitExecutor git;
 
   @BeforeEach
   void resetDoubles() {
@@ -96,7 +95,7 @@ public class BranchReleaseControllerTest {
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
-    return git.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
+    return TestGit.exec(Path.of(dataDir, repoId, "origin").toFile(), argv).trim();
   }
 
   private List<String> originBranches(String repoId) throws Exception {

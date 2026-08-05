@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class WorkspaceBootstrapRunControllerTest {
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @Inject FakeRepositoryLookup repositories;

@@ -29,7 +29,7 @@ public class WorkspaceBootstrapKillSwitchTest {
       try {
         Map<String, String> overrides = new HashMap<>();
         overrides.put(
-            "qits.repositories.data-dir",
+            "qits.test.origins-dir",
             Files.createTempDirectory("qits-bootstrap-killswitch-test").toString());
         overrides.put("qits.bootstrap.autorun-enabled", "false");
         return overrides;
@@ -47,9 +47,8 @@ public class WorkspaceBootstrapKillSwitchTest {
   @Inject WorkspaceService workspaceService;
   @Inject BootstrapRunService bootstrapRunService;
   @Inject WorkspaceReadyForServicesRecorder readyRecorder;
-  @Inject GitExecutor git;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @Test
@@ -61,15 +60,15 @@ public class WorkspaceBootstrapKillSwitchTest {
     // the kill switch, not its absence, is what suppresses the run.
     Path origin = Path.of(dataDir, repoId, "origin");
     Path worktree = Files.createTempDirectory("qits-config-commit");
-    git.exec(null, "git", "clone", origin.toString(), worktree.toString());
-    git.exec(worktree.toFile(), "git", "config", "user.email", "t@example.com");
-    git.exec(worktree.toFile(), "git", "config", "user.name", "Test");
+    TestGit.exec(null, "git", "clone", origin.toString(), worktree.toString());
+    TestGit.exec(worktree.toFile(), "git", "config", "user.email", "t@example.com");
+    TestGit.exec(worktree.toFile(), "git", "config", "user.name", "Test");
     Files.writeString(
         worktree.resolve(".qits-config.yml"),
         "version: 1\nbootstrap:\n  - name: 'install'\n    execute: 'echo hi'\n");
-    git.exec(worktree.toFile(), "git", "add", ".qits-config.yml");
-    git.exec(worktree.toFile(), "git", "commit", "-m", "stage qits config");
-    git.exec(worktree.toFile(), "git", "push", "origin", "HEAD:master");
+    TestGit.exec(worktree.toFile(), "git", "add", ".qits-config.yml");
+    TestGit.exec(worktree.toFile(), "git", "commit", "-m", "stage qits config");
+    TestGit.exec(worktree.toFile(), "git", "push", "origin", "HEAD:master");
     workspaceService.createWorkspace(repoId, "work", "master", "work");
     readyRecorder.clear();
 

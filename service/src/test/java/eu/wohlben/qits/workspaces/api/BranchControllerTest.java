@@ -4,7 +4,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
-import eu.wohlben.qits.workspaces.control.GitExecutor;
+import eu.wohlben.qits.workspaces.control.TestGit;
 import eu.wohlben.qits.workspaces.control.TestOrigin;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
@@ -27,12 +27,11 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class BranchControllerTest {
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @Inject FakeRepositoryLookup repositories;
   @Inject WorkspaceService workspaceService;
-  @Inject GitExecutor git;
 
   /**
    * A repository with a bare origin on disk and a resolvable id, seeded in-JVM.
@@ -66,7 +65,7 @@ public class BranchControllerTest {
   /** The branch names present in the repository's bare origin. */
   private String originBranches(String repoId) throws Exception {
     Path originPath = Path.of(dataDir, repoId, "origin");
-    return git.exec(
+    return TestGit.exec(
         originPath.toFile(), "git", "for-each-ref", "--format=%(refname:short)", "refs/heads");
   }
 

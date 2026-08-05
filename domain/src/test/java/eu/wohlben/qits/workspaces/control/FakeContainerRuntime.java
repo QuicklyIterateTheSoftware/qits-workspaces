@@ -53,7 +53,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
   private static final Pattern CLONE_URL_NAMED =
       Pattern.compile("^https?://[^/]+/git/([^/]+)/([^/]+?)(?:\\.git)?$");
 
-  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   @ConfigProperty(name = "qits.workspace.persist-workspace", defaultValue = "true")

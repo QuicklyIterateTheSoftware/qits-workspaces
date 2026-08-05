@@ -34,7 +34,7 @@ public class FakeWorkspaceBootstrapDriver implements WorkspaceBootstrapDriver {
 
   @Inject eu.wohlben.qits.workspaces.persistence.WorkspaceRepository workspaces;
 
-  @ConfigProperty(name = "qits.repositories.data-dir", defaultValue = "data/repositories")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /** The persistent outcome recorders, fed on every step outcome like the real registry. */

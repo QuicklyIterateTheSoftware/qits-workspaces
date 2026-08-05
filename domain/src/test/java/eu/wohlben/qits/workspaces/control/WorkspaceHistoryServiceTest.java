@@ -32,7 +32,7 @@ public class WorkspaceHistoryServiceTest {
 
   @Inject WorkspaceHistoryService workspaceHistoryService;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /**

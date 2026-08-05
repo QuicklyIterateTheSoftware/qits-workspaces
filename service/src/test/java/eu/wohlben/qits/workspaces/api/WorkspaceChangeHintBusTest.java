@@ -43,7 +43,7 @@ class WorkspaceChangeHintBusTest {
 
   @Inject eu.wohlben.qits.workspaces.control.WorkspaceService workspaceService;
 
-  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.repositories.data-dir")
+  @org.eclipse.microprofile.config.inject.ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   /** The collection root; a workspace's channel hangs off its id, which only exists at runtime. */

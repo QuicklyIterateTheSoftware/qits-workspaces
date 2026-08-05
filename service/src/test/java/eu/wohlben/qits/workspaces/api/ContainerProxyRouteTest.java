@@ -85,7 +85,7 @@ public class ContainerProxyRouteTest {
       try {
         Path tempDir = Files.createTempDirectory("qits-container-proxy-test-repos");
         return Map.of(
-            "qits.repositories.data-dir", tempDir.toString(),
+            "qits.test.origins-dir", tempDir.toString(),
             "qits.workspace.daemon-api-port", String.valueOf(latchedPort()),
             "qits.workspace.daemon-api-token", TOKEN);
       } catch (Exception e) {
@@ -104,7 +104,7 @@ public class ContainerProxyRouteTest {
 
   @Inject WorkspaceService workspaceService;
 
-  @ConfigProperty(name = "qits.repositories.data-dir")
+  @ConfigProperty(name = "qits.test.origins-dir")
   String dataDir;
 
   private Vertx daemonVertx;
