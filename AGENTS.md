@@ -354,18 +354,21 @@ Three kinds of git call, and the distinction decides correctness:
   refresh, and a refresh that fails leaves the counts UNKNOWN, which refuses.
 - **Writes** are pushes. All of them. `createBranch` is `push <from>:refs/heads/<new>`, cleanup and
   discard are `push :refs/heads/<branch>`, a merge is a worktree on the mirror plus
-  `push HEAD:refs/heads/<target>`, a release is that plus the tag. There is no other door, which is
-  the property the whole change exists to establish.
+  `push HEAD:refs/heads/<target>`, a release is that plus the tag and then the same commit again
+  onto the environment branch. There is no other door, which is the property the whole change exists
+  to establish.
 
-Only the default branch's push carries `-o qits.release`; nothing else writes the default branch, so
-nothing else needs an option. The mirror is a **cache**: delete it and the next request re-clones.
+Only a release's pushes carry `-o qits.release` — the default branch's, and the promotion that
+follows it; nothing else writes the default branch, so nothing else needs an option. The mirror is a
+**cache**: delete it and the next request re-clones.
 
 ## The two doors: release and integrate
 
 **`POST /workspaces/api/workspaces/{id}/release`** is **the one door into a repository's default
 branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
 version into the same index, commits both as **one** commit — `release(<version>): <summary>` —
-**pushes** it — together with an annotated **tag** named the version — and publishes `SCMRelease`.
+**pushes** it — together with an annotated **tag** named the version — publishes `SCMRelease`, and
+**promotes** the same commit onto the environment branch, which is what deploys it.
 
 **`POST /workspaces/api/workspaces/{id}/integrate`** lands a workspace on **its parent branch** — a
 `task/…` on the `epic/…` it forked from — as one pushed commit `integrate(<source>): <summary>`. No
@@ -388,7 +391,7 @@ are ten lines each and differ only in the target and the mode.
 ## The third spelling: releasing a branch by name
 
 **`POST /workspaces/api/branches/release?repositoryId=…`** `{branch, summary}` →
-`{version, commitSha, branch}`. It really is a resolver: `releaseBranch` picks the target and calls
+`{version, commitSha, branch, environmentBranch, promotionError}`. It really is a resolver: `releaseBranch` picks the target and calls
 `landOnBranch` with the arguments the workspace path passes, so nothing about the release is
 re-implemented. It answers with the record `/workspaces/{id}/release` answers with — the *same Java
 type*, so the two cannot drift into two schemas. What a branch name adds is only what an id already
@@ -549,6 +552,41 @@ push leaves the tag in the mirror, where it names nothing anybody can see — bu
 repository's next attempt at the same version out of a local leftover, so it is dropped. It cannot
 erase a real release tag, because a real release tag is on the git host and this deletes only the
 copy.
+
+## The promotion: the second push, and the one that deploys
+
+A release pushes the released commit **again**, onto `qits.workspaces.release.environment-branch`
+(`environment/dev` in the shipped defaults). That second push is what ships: qits-cd registers and
+deploys an application from a green build **on an environment's branch**, so `main` is the
+integration trunk that builds and the environment branch is the deploy. Pushing only `main` builds
+and deploys nothing — the same rule the direct-push escape hatch follows.
+
+- **Two pushes, in this order, never one atomic push.** The default branch first, byte for byte the
+  push it always was. A promotion riding along atomically would let a stuck environment branch refuse
+  the *release*, which is the one ref this flow exists to move.
+- **Create or fast-forward, never a force.** A push to a ref that is not there is a create, which is
+  the ordinary first case for a repository that has never deployed. A non-fast-forward means the
+  branch holds something the release is not built on, and it is reported rather than overwritten.
+- **The push carries `-o qits.release` like the release push it follows.** The environment branch is
+  not the repository's default ref, so the protection hook does not read it today; the option is
+  fast-forward-only at the hook, which is exactly what this push is, so it costs nothing and keeps
+  one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)` again.
+- **Blank disables it.** One key answers "where to" and "whether at all"; a promotion with no target
+  branch is not configured. A deployment that has not cut over to deploy branches empties the key and
+  a release is exactly what it was before.
+
+**A failed promotion is a partial success, not a failed release**, and that decision lives in
+`ReleaseIntegrator` (the class javadoc says why, beside the code). By the time it runs receive-pack
+has accepted the release: the commit is on the default branch, the tag is on the host, post-receive
+has fired and CI is building. Throwing there would cost the caller its version and its sha, skip
+`SCMRelease` and leave the workspace ACTIVE on a branch that is already merged — and undo none of the
+push. So it is **200 with a `promotionError`**: the sentence naming what refused it and which sha to
+push once the branch is sorted out, logged at ERROR. The precedent is `deleteLandedBranch`, which is
+best-effort for the same reason: once the release is in, nothing after it may pretend it is not.
+
+The response gained two fields for it — `environmentBranch` (null when promotion is off) and
+`promotionError` (null when it landed) — on the record **both** release doors answer with. **A
+plain integrate promotes nothing**: it released nothing to deploy.
 
 ## The SCMRelease event
 
