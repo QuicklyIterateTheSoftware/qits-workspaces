@@ -133,12 +133,15 @@ tree, rebuildable — delete it and the next request re-clones), does its merges
 mirror, and reaches the served repository only by pushing. An unreachable git host is no longer a
 one-endpoint problem.
 
-`qits.workspaces.release.environment-branch` (default `environment/dev`) is where a release is
-**promoted**: the same commit, pushed a second time, and that push is what deploys — qits-cd ships an
-application from a green build on an environment's branch, so `main` builds and this branch ships.
-Fast-forward or create, never a force; **blank disables promotion**. A promotion that fails does not
-fail the release (the release push is already accepted): the answer is a 200 carrying
-`promotionError`, and the failure is logged at ERROR.
+`qits.workspaces.release.promotion-branches` (default `environment/dev,platform/main`) is where a
+release is **promoted**: the same commit, pushed again onto each, and those pushes are what deploy —
+qits-cd ships an application from a green build on a deploy branch, so `main` builds and these
+branches ship. Both, because a repository listens on one and this service does not read which (a
+platform service deploys from `platform/main`, an environment service from `environment/dev`); the
+cost is a second CI build on the branch nothing listens to. Fast-forward or create, never a force;
+**blank disables promotion**. A promotion that fails does not fail the release (the release push is
+already accepted) and fails per branch: the answer is a 200 whose `promotions` entry for that branch
+carries an `error`, and the failure is logged at ERROR.
 
 One behaviour worth knowing before you debug it: **a missing repository and an unreachable
 qits-projects are different answers.** Only a 404 becomes "no such repository" (and then a 404 from

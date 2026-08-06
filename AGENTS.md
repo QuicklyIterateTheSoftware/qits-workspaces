@@ -391,7 +391,7 @@ are ten lines each and differ only in the target and the mode.
 ## The third spelling: releasing a branch by name
 
 **`POST /workspaces/api/branches/release?repositoryId=…`** `{branch, summary}` →
-`{version, commitSha, branch, environmentBranch, promotionError}`. It really is a resolver: `releaseBranch` picks the target and calls
+`{version, commitSha, branch, promotions[]}`. It really is a resolver: `releaseBranch` picks the target and calls
 `landOnBranch` with the arguments the workspace path passes, so nothing about the release is
 re-implemented. It answers with the record `/workspaces/{id}/release` answers with — the *same Java
 type*, so the two cannot drift into two schemas. What a branch name adds is only what an id already
@@ -553,40 +553,50 @@ repository's next attempt at the same version out of a local leftover, so it is 
 erase a real release tag, because a real release tag is on the git host and this deletes only the
 copy.
 
-## The promotion: the second push, and the one that deploys
+## The promotions: the further pushes, and the ones that deploy
 
-A release pushes the released commit **again**, onto `qits.workspaces.release.environment-branch`
-(`environment/dev` in the shipped defaults). That second push is what ships: qits-cd registers and
-deploys an application from a green build **on an environment's branch**, so `main` is the
-integration trunk that builds and the environment branch is the deploy. Pushing only `main` builds
-and deploys nothing — the same rule the direct-push escape hatch follows.
+A release pushes the released commit **again**, onto every branch in
+`qits.workspaces.release.promotion-branches` (`environment/dev,platform/main` in the shipped
+defaults). Those pushes are what ship: qits-cd registers and deploys an application from a green
+build **on a deploy branch**, so `main` is the integration trunk that builds and the deploy branches
+are what deploys. Pushing only `main` builds and deploys nothing — the same rule the direct-push
+escape hatch follows.
 
-- **Two pushes, in this order, never one atomic push.** The default branch first, byte for byte the
-  push it always was. A promotion riding along atomically would let a stuck environment branch refuse
-  the *release*, which is the one ref this flow exists to move.
+- **Every branch, because a repository listens on one and this service does not know which.** A
+  platform service deploys from `platform/main` and an environment service from `environment/dev`;
+  the repository's own spec says which it is, and reading that spec here is a **recorded debt**. The
+  price of not guessing is a second CI build on the branch nothing listens to, which is accepted.
+- **Separate pushes, in this order, never one atomic push.** The default branch first, byte for byte
+  the push it always was, then each deploy branch in the configured order. A promotion riding along
+  atomically would let a stuck deploy branch refuse the *release*, which is the one ref this flow
+  exists to move — and would let one stuck deploy branch block the other.
 - **Create or fast-forward, never a force.** A push to a ref that is not there is a create, which is
   the ordinary first case for a repository that has never deployed. A non-fast-forward means the
   branch holds something the release is not built on, and it is reported rather than overwritten.
-- **The push carries `-o qits.release` like the release push it follows.** The environment branch is
-  not the repository's default ref, so the protection hook does not read it today; the option is
-  fast-forward-only at the hook, which is exactly what this push is, so it costs nothing and keeps
-  one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)` again.
-- **Blank disables it.** One key answers "where to" and "whether at all"; a promotion with no target
-  branch is not configured. A deployment that has not cut over to deploy branches empties the key and
-  a release is exactly what it was before.
+- **Each push carries `-o qits.release` like the release push it follows.** A deploy branch is not
+  the repository's default ref, so the protection hook does not read it today; the option is
+  fast-forward-only at the hook, which is exactly what these pushes are, so it costs nothing and
+  keeps one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)`
+  again.
+- **Blank disables all of them.** One key answers "where to" and "whether at all"; a promotion with
+  no target branches is not configured. A deployment that has not cut over to deploy branches empties
+  the key and a release is exactly what it was before.
 
-**A failed promotion is a partial success, not a failed release**, and that decision lives in
-`ReleaseIntegrator` (the class javadoc says why, beside the code). By the time it runs receive-pack
-has accepted the release: the commit is on the default branch, the tag is on the host, post-receive
-has fired and CI is building. Throwing there would cost the caller its version and its sha, skip
-`SCMRelease` and leave the workspace ACTIVE on a branch that is already merged — and undo none of the
-push. So it is **200 with a `promotionError`**: the sentence naming what refused it and which sha to
-push once the branch is sorted out, logged at ERROR. The precedent is `deleteLandedBranch`, which is
-best-effort for the same reason: once the release is in, nothing after it may pretend it is not.
+**A failed promotion is a partial success, not a failed release — and it is partial per branch**,
+and that decision lives in `ReleaseIntegrator` (the class javadoc says why, beside the code). By the
+time it runs receive-pack has accepted the release: the commit is on the default branch, the tag is
+on the host, post-receive has fired and CI is building. Throwing there would cost the caller its
+version and its sha, skip `SCMRelease` and leave the workspace ACTIVE on a branch that is already
+merged — and undo none of the push. So it is **200 with an `error` on that branch's entry**: the
+sentence naming what refused it and which sha to push once the branch is sorted out, logged at ERROR.
+A branch that refuses does not stop the branches after it. The precedent is `deleteLandedBranch`,
+which is best-effort for the same reason: once the release is in, nothing after it may pretend it is
+not.
 
-The response gained two fields for it — `environmentBranch` (null when promotion is off) and
-`promotionError` (null when it landed) — on the record **both** release doors answer with. **A
-plain integrate promotes nothing**: it released nothing to deploy.
+The response carries `promotions` for it — one `{branch, error}` per configured deploy branch, in
+the configured order, `error` null when that push landed — on the record **both** release doors
+answer with. It is empty when promotion is off, and **a plain integrate promotes nothing**: it
+released nothing to deploy.
 
 ## The SCMRelease event
 
