@@ -135,6 +135,23 @@ public class ReleaseControllerTest {
     }
   }
 
+  /**
+   * The deploy branch a release is promoted to. The shipped default (domain's
+   * {@code microprofile-config.properties}), so this suite runs with promotion on, as a deployment
+   * does.
+   */
+  private static final String ENVIRONMENT_BRANCH = "environment/dev";
+
+  /**
+   * The environment branch's commit in the origin, or {@code ""} when the ref is absent. {@code
+   * for-each-ref} rather than {@code rev-parse} because "not there" is an answer here, and a
+   * non-zero exit would be an exception instead.
+   */
+  private String environmentBranchInOrigin(String repoId) throws Exception {
+    return inOrigin(
+        repoId, "git", "for-each-ref", "--format=%(objectname)", "refs/heads/" + ENVIRONMENT_BRANCH);
+  }
+
   private List<String> activeLabels(String repoId) {
     return given()
         .when()
@@ -270,6 +287,126 @@ public class ReleaseControllerTest {
         "release(" + version + "): no manifests here",
         inOrigin(repoId, "git", "log", "-1", "--format=%s", "master"));
     assertEquals(1, announcer.announced().size());
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // the promotion — the second push, which is what deploys
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * The environment branch is <b>created</b> when it is absent, at the released commit exactly. A
+   * repository that has never deployed is the ordinary first case, not an error, and a create is
+   * what receive-pack does with a push to a ref that is not there.
+   */
+  @Test
+  public void aReleaseCreatesTheEnvironmentBranchAtTheReleasedCommit() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "deploy", "deploy-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "deploy-b", "shipped.md", "shipped\n", "the work");
+
+    assertEquals(
+        "", environmentBranchInOrigin(repoId), "the fixture has no environment branch to start with");
+
+    String commitSha =
+        release(repoId, "deploy", "the first deploy of this repository")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("environmentBranch", equalTo(ENVIRONMENT_BRANCH))
+            .body("promotionError", nullValue())
+            .extract()
+            .path("commitSha");
+
+    assertEquals(
+        commitSha,
+        inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
+        "the environment branch holds the released commit, which is what deploys it");
+    assertEquals(
+        inOrigin(repoId, "git", "rev-parse", "master"),
+        inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
+        "the same commit on both branches: main is the trunk, this one is the deploy");
+  }
+
+  /**
+   * A branch that already exists is <b>fast-forwarded</b>, and that is asserted as history rather
+   * than as an absence of errors: what was deployed before is still reachable from the branch, which
+   * a force push would not have left true.
+   *
+   * <p>The starting point is written as a ref rather than produced by a first release, deliberately.
+   * Two releases a fraction of a second apart stamp one version and the second is refused whole
+   * (see the concurrency test below) — a real property of the flow, and the wrong thing for this
+   * test to depend on.
+   */
+  @Test
+  public void thePromotionFastForwardsAnEnvironmentBranchThatAlreadyExists() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "next", "next-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "next-b", "two.txt", "two\n", "the work");
+    // Where an earlier release left it: on the default branch, which this one builds on.
+    String deployedBefore = inOrigin(repoId, "git", "rev-parse", "master");
+    inOrigin(repoId, "git", "branch", ENVIRONMENT_BRANCH, "master");
+
+    String commitSha =
+        release(repoId, "next", "the next deploy")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("environmentBranch", equalTo(ENVIRONMENT_BRANCH))
+            .body("promotionError", nullValue())
+            .extract()
+            .path("commitSha");
+
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH));
+    assertTrue(
+        inOrigin(repoId, "git", "rev-list", ENVIRONMENT_BRANCH)
+            .lines()
+            .anyMatch(deployedBefore::equals),
+        "what was deployed before is still in the branch's history, so this was a fast-forward");
+  }
+
+  /**
+   * The environment branch holds something the release is not built on — a hand-pushed hotfix, a
+   * rollback, a wrong ref — and the promotion is refused rather than forced.
+   *
+   * <p>What this asserts is the <b>partial success</b>: a 200 with the version and the sha, because
+   * the release really did land and no exception could take it back, plus a {@code promotionError}
+   * saying nothing deployed and which commit to push once the branch is sorted out. The alternative
+   * — throwing — would answer a caller whose work is already on the default branch with a failure,
+   * skip the {@code SCMRelease} event and leave the workspace ACTIVE on a merged branch.
+   */
+  @Test
+  public void aPromotionThatIsNotAFastForwardIsReportedAndTheReleaseStillLands() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "stuck", "stuck-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "stuck-b", "mine.txt", "mine\n", "my work");
+    // feature forked before master's second commit, so no descendant of master can fast-forward
+    // over it — a real divergence, not a stale copy.
+    String divergent = inOrigin(repoId, "git", "rev-parse", "feature");
+    inOrigin(repoId, "git", "branch", ENVIRONMENT_BRANCH, "feature");
+
+    var response =
+        release(repoId, "stuck", "released but not deployed")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("version", matchesRegex(VERSION.pattern()))
+            .body("environmentBranch", equalTo(ENVIRONMENT_BRANCH))
+            .body("promotionError", containsString("fast-forward"))
+            .body("promotionError", containsString(ENVIRONMENT_BRANCH))
+            .extract();
+    String commitSha = response.path("commitSha");
+
+    assertEquals(
+        commitSha,
+        inOrigin(repoId, "git", "rev-parse", "master"),
+        "the release is in: a failed promotion never unwinds the push that already happened");
+    assertEquals(
+        divergent,
+        inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
+        "the environment branch is untouched — the promotion is never a force push");
+    assertTrue(
+        response.path("promotionError").toString().contains(commitSha),
+        "the message names the commit to push, which is the only thing left to do by hand");
+    assertEquals(
+        1, announcer.announced().size(), "the release happened, so SCMRelease is published");
+    assertTrue(!activeLabels(repoId).contains("stuck"), "and the workspace resolved");
   }
 
   // -----------------------------------------------------------------------------------------

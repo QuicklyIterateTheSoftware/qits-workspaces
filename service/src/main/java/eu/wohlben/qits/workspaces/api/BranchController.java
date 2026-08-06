@@ -138,7 +138,11 @@ public class BranchController {
       @QueryParam("repositoryId") String repoId, @Valid ReleaseBranchRequest request) {
     var result = workspaceService.releaseBranch(repoId, request.branch(), request.summary());
     return new WorkspaceController.ReleaseRequest.Response(
-        result.version(), result.commitSha(), result.branch());
+        result.version(),
+        result.commitSha(),
+        result.branch(),
+        result.environmentBranch(),
+        result.promotionError());
   }
 
   public static record CleanupBranchRequest(@NotBlank String branch, String result) {

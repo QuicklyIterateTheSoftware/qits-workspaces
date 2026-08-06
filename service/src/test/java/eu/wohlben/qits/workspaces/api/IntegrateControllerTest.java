@@ -203,6 +203,10 @@ public class IntegrateControllerTest {
         "",
         inOrigin(repoId, "git", "tag", "-l"),
         "a plain integrate stamps no version, so there is nothing for a tag to name");
+    assertEquals(
+        "",
+        inOrigin(repoId, "git", "for-each-ref", "--format=%(refname)", "refs/heads/environment"),
+        "and it deploys nothing: the promotion to the environment branch is a release's second push");
   }
 
   /**

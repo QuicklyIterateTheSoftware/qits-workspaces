@@ -191,6 +191,10 @@ components:
           type: string
         branch:
           type: string
+        environmentBranch:
+          type: string
+        promotionError:
+          type: string
     Response1:
       type: object
       properties:

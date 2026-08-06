@@ -1405,7 +1405,12 @@ public class WorkspaceService {
    */
   public ReleaseResult releaseWorkspace(Long id, String summary) {
     ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.RELEASE);
-    return new ReleaseResult(landed.version(), landed.commitSha(), landed.branch());
+    return new ReleaseResult(
+        landed.version(),
+        landed.commitSha(),
+        landed.branch(),
+        landed.environmentBranch(),
+        landed.promotionError());
   }
 
   /**
@@ -1496,7 +1501,12 @@ public class WorkspaceService {
     // force-push of a maintenance branch is then a create, which the git host's hook allows.
     deleteLandedBranch(repoId, branch);
 
-    return new ReleaseResult(landed.version(), landed.commitSha(), landed.branch());
+    return new ReleaseResult(
+        landed.version(),
+        landed.commitSha(),
+        landed.branch(),
+        landed.environmentBranch(),
+        landed.promotionError());
   }
 
   /** Best-effort, as in {@code doDiscard}: the release is in and a surviving ref must not undo it. */
@@ -1981,8 +1991,19 @@ public class WorkspaceService {
    * What a successful release answers. Three facts, none derivable from the others: the version
    * that was just minted, the merge commit carrying both the merge and the bump, and the source
    * branch — which the merge's parents record as a sha but never as a name.
+   *
+   * <p>Plus the promotion, which is a fourth fact and a fifth: the deploy branch the release was
+   * pushed to a second time ({@code null} when promotion is disabled), and why that push failed
+   * ({@code null} when it landed). <b>A release with a {@code promotionError} still happened</b> —
+   * the version is real, the default branch has it, CI is building it, and only the deploy did not
+   * follow. {@link ReleaseIntegrator} is where that decision lives and why.
    */
-  public record ReleaseResult(String version, String commitSha, String branch) {}
+  public record ReleaseResult(
+      String version,
+      String commitSha,
+      String branch,
+      String environmentBranch,
+      String promotionError) {}
 
   /**
    * What a successful plain integrate answers. <b>No version</b>, because none was minted — the

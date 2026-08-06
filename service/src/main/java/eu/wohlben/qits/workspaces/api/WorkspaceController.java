@@ -283,8 +283,19 @@ public class WorkspaceController {
    *     cap lets the summary be the whole of what is left and no more.
    */
   public static record ReleaseRequest(@NotBlank @Size(max = 100) String summary) {
-    /** @see eu.wohlben.qits.workspaces.control.WorkspaceService.ReleaseResult */
-    public record Response(String version, String commitSha, String branch) {}
+    /**
+     * @param environmentBranch the deploy branch this release was promoted to, {@code null} when
+     *     promotion is disabled
+     * @param promotionError why that promotion failed, {@code null} when it landed. <b>A 200 with a
+     *     {@code promotionError} is a release that happened and did not deploy</b> — show it.
+     * @see eu.wohlben.qits.workspaces.control.WorkspaceService.ReleaseResult
+     */
+    public record Response(
+        String version,
+        String commitSha,
+        String branch,
+        String environmentBranch,
+        String promotionError) {}
   }
 
   /**
@@ -324,7 +335,12 @@ public class WorkspaceController {
   public ReleaseRequest.Response release(
       @PathParam("id") Long id, @Valid ReleaseRequest request) {
     var result = workspaceService.releaseWorkspace(id, request.summary());
-    return new ReleaseRequest.Response(result.version(), result.commitSha(), result.branch());
+    return new ReleaseRequest.Response(
+        result.version(),
+        result.commitSha(),
+        result.branch(),
+        result.environmentBranch(),
+        result.promotionError());
   }
 
   /** @param summary the commit's subject after the {@code integrate(<branch>)} scope. */
