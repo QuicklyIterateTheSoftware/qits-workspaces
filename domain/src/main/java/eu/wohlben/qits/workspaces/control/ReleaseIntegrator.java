@@ -14,6 +14,7 @@ import eu.wohlben.qits.workspaces.gitmirror.TagOutcome;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -106,31 +107,39 @@ import org.jboss.logging.Logger;
  * It is still a compare-and-swap, because an ordinary push is fast-forward-only — that property
  * belongs to receive-pack, not to the option.
  *
- * <h2>The promotion, and why a failed one does not fail the release</h2>
+ * <h2>The promotions, and why a failed one does not fail the release</h2>
  *
- * A release pushes the same commit a second time, onto the environment branch
- * ({@code qits.workspaces.release.environment-branch}, {@code environment/dev} by default). That
- * second push is what deploys: qits-cd registers and deploys an application from a green build on an
- * environment's branch, so the default branch builds and the environment branch ships. A plain
+ * A release pushes the same commit again onto <b>every</b> deploy branch
+ * ({@code qits.workspaces.release.promotion-branches}, {@code environment/dev,platform/main} by
+ * default). Those pushes are what deploy: qits-cd registers and deploys an application from a green
+ * build on a deploy branch, so the default branch builds and the deploy branches ship. A plain
  * integrate promotes nothing — it released nothing to deploy.
  *
- * <p>Two pushes, not one atomic push, and the order is fixed: the default branch first, byte for
- * byte the push it always was. A promotion that rode along atomically would let a stuck environment
- * branch refuse the <i>release</i>, which is the one ref this flow exists to move.
+ * <p><b>Every branch, because a repository listens on one and this flow does not know which.</b> A
+ * platform service deploys from {@code platform/main} and an environment service from {@code
+ * environment/dev}; the repository's own spec says which it is, and reading that spec here is a
+ * recorded debt. Pushing both costs a second CI build on the branch nothing listens to, which is the
+ * accepted price of not guessing.
  *
- * <p><b>A failed promotion is a partial success, not a failed release.</b> By the time it runs,
- * receive-pack has accepted the release: the commit is on the default branch, the tag is on the
- * host, post-receive has fired and CI is building. Throwing here would cost the caller its version
- * and its sha, skip the {@code SCMRelease} event and leave the workspace ACTIVE on a branch that is
- * already merged — a far worse state than "released but not deployed", and none of it would undo the
- * push. So the failure is carried out on {@link Landed#promotionError()}, logged at ERROR, and
- * returned to the caller beside the version. It is the same call the branch cleanup after a release
- * makes ({@code WorkspaceService.deleteLandedBranch}): once the release is in, nothing after it may
+ * <p>Separate pushes, not one atomic push, and the order is fixed: the default branch first, byte
+ * for byte the push it always was, then each deploy branch in the configured order. A promotion that
+ * rode along atomically would let a stuck deploy branch refuse the <i>release</i>, which is the one
+ * ref this flow exists to move — and would let one stuck deploy branch block the other.
+ *
+ * <p><b>A failed promotion is a partial success, not a failed release, and it is partial per
+ * branch.</b> By the time it runs, receive-pack has accepted the release: the commit is on the
+ * default branch, the tag is on the host, post-receive has fired and CI is building. Throwing here
+ * would cost the caller its version and its sha, skip the {@code SCMRelease} event and leave the
+ * workspace ACTIVE on a branch that is already merged — a far worse state than "released but not
+ * deployed", and none of it would undo the push. So the failure is carried out on {@link
+ * Promotion#error()}, logged at ERROR, and returned to the caller beside the version; the branches
+ * after it are still attempted. It is the same call the branch cleanup after a release makes
+ * ({@code WorkspaceService.deleteLandedBranch}): once the release is in, nothing after it may
  * pretend it is not.
  *
- * <p><b>Never forced.</b> A non-fast-forward means the environment branch holds something the
- * release is not built on, and overwriting it would silently drop whatever that was. It is reported,
- * with the sha to push once the branch is sorted out.
+ * <p><b>Never forced.</b> A non-fast-forward means the deploy branch holds something the release is
+ * not built on, and overwriting it would silently drop whatever that was. It is reported, with the
+ * sha to push once the branch is sorted out.
  */
 @ApplicationScoped
 public class ReleaseIntegrator {
@@ -141,16 +150,21 @@ public class ReleaseIntegrator {
   static final String RELEASE_PUSH_OPTION = "qits.release";
 
   /**
-   * The deploy branch a release is promoted to once the default branch has it — {@code
-   * environment/dev} in the shipped defaults (domain's {@code microprofile-config.properties}).
-   * <b>Blank or absent disables promotion</b> and a release is then exactly what it was before.
+   * The deploy branches a release is promoted to once the default branch has it — {@code
+   * environment/dev,platform/main} in the shipped defaults (domain's {@code
+   * microprofile-config.properties}). <b>Blank or absent disables promotion altogether</b> and a
+   * release is then exactly what it was before.
+   *
+   * <p>A list because a repository deploys from exactly one of them and this service does not know
+   * which: the deploy target is the repository's own spec, which is a debt to read here. Both are
+   * pushed, one is listened to.
    *
    * <p>{@code Optional} rather than a {@code defaultValue}, because SmallRye reads an empty property
-   * value as "no value" — which is the off switch — and would fail a plain {@code String}. Same
+   * value as "no value" — which is the off switch — and would fail a plain {@code List}. Same
    * arrangement, same reason, as {@code WorkspaceContainerFactory}'s resource caps.
    */
-  @ConfigProperty(name = "qits.workspaces.release.environment-branch")
-  Optional<String> environmentBranch;
+  @ConfigProperty(name = "qits.workspaces.release.promotion-branches")
+  Optional<List<String>> promotionBranches;
 
   @Inject GitMirrorRegistry mirrors;
 
@@ -199,12 +213,9 @@ public class ReleaseIntegrator {
    *     as a name
    * @param targetBranch what it landed on
    * @param publishedAt when the push was accepted
-   * @param environmentBranch the deploy branch this release was promoted to — <b>null when
-   *     promotion is disabled</b> and for every {@link Mode#PLAIN} run. Set whether the promotion
-   *     landed or not; {@code promotionError} is what tells those apart.
-   * @param promotionError why the promotion failed, in a sentence a person can act on — <b>null
-   *     when it landed</b>, and null when there was none to attempt. The release itself is in
-   *     either way: see the class javadoc for why this is a field rather than an exception.
+   * @param promotions one entry per configured deploy branch, in the configured order — <b>empty
+   *     when promotion is disabled</b> and for every {@link Mode#PLAIN} run. An entry exists whether
+   *     that promotion landed or not; its {@code error} is what tells those apart.
    */
   public record Landed(
       String version,
@@ -212,8 +223,17 @@ public class ReleaseIntegrator {
       String branch,
       String targetBranch,
       Instant publishedAt,
-      String environmentBranch,
-      String promotionError) {}
+      List<Promotion> promotions) {}
+
+  /**
+   * One deploy branch this release was pushed to, and how that went.
+   *
+   * @param branch the deploy branch
+   * @param error why the push failed, in a sentence a person can act on — <b>null when it
+   *     landed</b>. The release itself is in either way: see the class javadoc for why this is a
+   *     field rather than an exception.
+   */
+  public record Promotion(String branch, String error) {}
 
   /**
    * Run the flow for one repository.
@@ -279,13 +299,15 @@ public class ReleaseIntegrator {
       Instant publishedAt = push(worktree, targetBranch, run.mode(), version);
       pushed = true;
 
-      // [8b] the promotion: the same commit onto the environment branch, as a SECOND push. The
-      // release is already irreversible above, so this reports rather than throws.
-      String promotionTarget = run.mode() == Mode.RELEASE ? promotionTarget() : null;
-      String promotionError =
-          promotionTarget == null
-              ? null
-              : promote(worktree, promotionTarget, repoId, targetBranch, commitSha);
+      // [8b] the promotions: the same commit onto every deploy branch, as further pushes. The
+      // release is already irreversible above, so each one reports rather than throws — and a
+      // branch that refuses does not stop the branches after it.
+      List<Promotion> promotions = new ArrayList<>();
+      if (run.mode() == Mode.RELEASE) {
+        for (String branch : promotionTargets()) {
+          promotions.add(promote(worktree, branch, repoId, targetBranch, commitSha));
+        }
+      }
 
       LOG.infof(
           "landed %s on %s of %s%s (%s)",
@@ -296,8 +318,7 @@ public class ReleaseIntegrator {
           sourceBranch,
           targetBranch,
           publishedAt,
-          promotionTarget,
-          promotionError);
+          List.copyOf(promotions));
     } finally {
       // [9] cleanup. The worktree goes on every path — that is what AutoCloseable buys. What is left
       // to sweep is a tag this run created and did not manage to push: it names nothing anybody can
@@ -533,29 +554,37 @@ public class ReleaseIntegrator {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // [8b] the promotion
+  // [8b] the promotions
   // ---------------------------------------------------------------------------------------------
 
-  /** The configured environment branch, or null when promotion is switched off. */
-  private String promotionTarget() {
-    return environmentBranch.map(String::trim).filter(branch -> !branch.isEmpty()).orElse(null);
+  /**
+   * The configured deploy branches, in order and empty when promotion is switched off. Blanks are
+   * dropped so a trailing comma is not a push to {@code ""}, and duplicates are dropped so a typo
+   * cannot report the same branch twice.
+   */
+  private List<String> promotionTargets() {
+    return promotionBranches.orElseGet(List::of).stream()
+        .map(String::trim)
+        .filter(branch -> !branch.isEmpty())
+        .distinct()
+        .toList();
   }
 
   /**
-   * Push the released commit onto the environment branch — the push that deploys.
+   * Push the released commit onto one deploy branch — a push that deploys.
    *
    * <p>Creating the ref when it is absent and fast-forwarding it when it is not are the same {@code
    * git push}: receive-pack allows a create and allows a fast-forward, and refuses everything else.
    * That refusal is the answer this returns rather than the force it never asks for.
    *
-   * <p>It carries {@code -o qits.release} like the release push it follows. The environment branch
-   * is not the repository's default ref, so the git host's protection hook does not read it today —
-   * but the hook grants that option fast-forward-only, which is exactly what this push is, so
-   * carrying it costs nothing and keeps one release one push argv. No second mechanism exists.
+   * <p>It carries {@code -o qits.release} like the release push it follows. A deploy branch is not
+   * the repository's default ref, so the git host's protection hook does not read it today — but the
+   * hook grants that option fast-forward-only, which is exactly what this push is, so carrying it
+   * costs nothing and keeps one release one push argv. No second mechanism exists.
    *
-   * @return null when the promotion landed, otherwise the sentence the caller is answered with
+   * @return the branch's outcome, with a null {@code error} when the promotion landed
    */
-  private String promote(
+  private Promotion promote(
       MirrorWorktree worktree, String branch, String repoId, String target, String commitSha) {
     PushOutcome outcome;
     try {
@@ -567,7 +596,7 @@ public class ReleaseIntegrator {
     }
     if (outcome.accepted()) {
       LOG.infof("promoted %s of %s to %s", commitSha, repoId, branch);
-      return null;
+      return new Promotion(branch, null);
     }
     return promotionFailed(repoId, branch, target, commitSha, refusalOf(outcome, branch));
   }
@@ -589,11 +618,11 @@ public class ReleaseIntegrator {
   }
 
   /**
-   * The one wording, and it is loud on purpose: nothing deployed, and the release did happen. ERROR
-   * rather than WARN because a repository whose environment branch has stopped following is a
-   * platform the next release will also not deploy.
+   * The one wording, and it is loud on purpose: nothing deployed from this branch, and the release
+   * did happen. ERROR rather than WARN because a repository whose deploy branch has stopped
+   * following is a platform the next release will also not deploy.
    */
-  private static String promotionFailed(
+  private static Promotion promotionFailed(
       String repoId, String branch, String target, String commitSha, String detail) {
     String message =
         "The release landed on '"
@@ -608,7 +637,7 @@ public class ReleaseIntegrator {
             + commitSha
             + " there once the branch is sorted out.";
     LOG.errorf("%s (%s)", message, repoId);
-    return message;
+    return new Promotion(branch, message);
   }
 
   /**

@@ -145,6 +145,13 @@ components:
       properties:
         target:
           type: string
+    Promotion:
+      type: object
+      properties:
+        branch:
+          type: string
+        error:
+          type: string
     PromptAttachmentSource:
       type: string
       enum:
@@ -191,10 +198,10 @@ components:
           type: string
         branch:
           type: string
-        environmentBranch:
-          type: string
-        promotionError:
-          type: string
+        promotions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Promotion"
     Response1:
       type: object
       properties:

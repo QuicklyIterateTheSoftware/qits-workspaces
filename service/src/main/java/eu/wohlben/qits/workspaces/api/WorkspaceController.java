@@ -284,18 +284,32 @@ public class WorkspaceController {
    */
   public static record ReleaseRequest(@NotBlank @Size(max = 100) String summary) {
     /**
-     * @param environmentBranch the deploy branch this release was promoted to, {@code null} when
+     * @param promotions one entry per deploy branch this release was pushed to again, empty when
      *     promotion is disabled
-     * @param promotionError why that promotion failed, {@code null} when it landed. <b>A 200 with a
-     *     {@code promotionError} is a release that happened and did not deploy</b> — show it.
      * @see eu.wohlben.qits.workspaces.control.WorkspaceService.ReleaseResult
      */
     public record Response(
-        String version,
-        String commitSha,
-        String branch,
-        String environmentBranch,
-        String promotionError) {}
+        String version, String commitSha, String branch, List<Promotion> promotions) {
+
+      /**
+       * @param branch the deploy branch
+       * @param error why that promotion failed, {@code null} when it landed. <b>A 200 with an
+       *     {@code error} here is a release that happened and did not deploy from that branch</b> —
+       *     show it.
+       */
+      public record Promotion(String branch, String error) {}
+
+      /** The one mapping, so the two release doors cannot answer with two shapes. */
+      static Response of(WorkspaceService.ReleaseResult result) {
+        return new Response(
+            result.version(),
+            result.commitSha(),
+            result.branch(),
+            result.promotions().stream()
+                .map(promotion -> new Promotion(promotion.branch(), promotion.error()))
+                .toList());
+      }
+    }
   }
 
   /**
@@ -334,13 +348,7 @@ public class WorkspaceController {
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   public ReleaseRequest.Response release(
       @PathParam("id") Long id, @Valid ReleaseRequest request) {
-    var result = workspaceService.releaseWorkspace(id, request.summary());
-    return new ReleaseRequest.Response(
-        result.version(),
-        result.commitSha(),
-        result.branch(),
-        result.environmentBranch(),
-        result.promotionError());
+    return ReleaseRequest.Response.of(workspaceService.releaseWorkspace(id, request.summary()));
   }
 
   /** @param summary the commit's subject after the {@code integrate(<branch>)} scope. */

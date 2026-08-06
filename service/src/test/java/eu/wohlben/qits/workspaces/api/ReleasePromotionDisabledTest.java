@@ -21,14 +21,15 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
- * The off switch: {@code qits.workspaces.release.environment-branch} blank, and a release is exactly
+ * The off switch: {@code qits.workspaces.release.promotion-branches} blank, and a release is exactly
  * what it was before the promotion existed.
  *
  * <p>Its own class because the key is read at injection and a profile is per class. It is worth a
- * whole app boot for one reason: the promotion is a <b>second push into a repository</b>, and a
- * deployment that has not cut over to deploy branches must be able to switch it off without
- * switching off releases. Blank rather than a boolean, because a promotion with no target branch is
- * not configured — one key answers "where to" and "whether at all" with no way to set them apart.
+ * whole app boot for one reason: the promotion is a <b>further push into a repository</b> per deploy
+ * branch, and a deployment that has not cut over to deploy branches must be able to switch it off
+ * without switching off releases. Blank rather than a boolean, because a promotion with no target
+ * branches is not configured — one key answers "where to" and "whether at all" with no way to set
+ * them apart.
  */
 @QuarkusTest
 @TestProfile(ReleasePromotionDisabledTest.NoPromotion.class)
@@ -39,7 +40,7 @@ public class ReleasePromotionDisabledTest {
     public Map<String, String> getConfigOverrides() {
       // An EMPTY value, which is what a deployment writes to turn this off. SmallRye reads it as
       // "no value", which is what the Optional in ReleaseIntegrator is for.
-      return Map.of("qits.workspaces.release.environment-branch", "");
+      return Map.of("qits.workspaces.release.promotion-branches", "");
     }
   }
 
@@ -51,7 +52,7 @@ public class ReleasePromotionDisabledTest {
   @Inject WorkspaceService workspaceService;
 
   @Test
-  public void aBlankEnvironmentBranchReleasesAndPromotesNothing() throws Exception {
+  public void blankPromotionBranchesReleaseAndPromoteNothing() throws Exception {
     String repoId = TestOrigin.create(dataDir);
     repositories.register(repoId);
     workspaceService.createMainWorkspace(repoId, "master");
@@ -74,8 +75,7 @@ public class ReleasePromotionDisabledTest {
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
             .body("version", not(emptyOrNullString()))
-            .body("environmentBranch", nullValue())
-            .body("promotionError", nullValue())
+            .body("promotions", empty())
             .extract()
             .path("commitSha");
 
@@ -85,8 +85,14 @@ public class ReleasePromotionDisabledTest {
         "the release itself is untouched by the switch");
     assertEquals(
         "",
-        inOrigin(repoId, "git", "for-each-ref", "--format=%(refname)", "refs/heads/environment"),
-        "no environment branch was created — the second push never happened");
+        inOrigin(
+            repoId,
+            "git",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/environment",
+            "refs/heads/platform"),
+        "no deploy branch was created — none of the further pushes happened");
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {

@@ -1409,8 +1409,7 @@ public class WorkspaceService {
         landed.version(),
         landed.commitSha(),
         landed.branch(),
-        landed.environmentBranch(),
-        landed.promotionError());
+        landed.promotions());
   }
 
   /**
@@ -1505,8 +1504,7 @@ public class WorkspaceService {
         landed.version(),
         landed.commitSha(),
         landed.branch(),
-        landed.environmentBranch(),
-        landed.promotionError());
+        landed.promotions());
   }
 
   /** Best-effort, as in {@code doDiscard}: the release is in and a surviving ref must not undo it. */
@@ -1992,18 +1990,17 @@ public class WorkspaceService {
    * that was just minted, the merge commit carrying both the merge and the bump, and the source
    * branch — which the merge's parents record as a sha but never as a name.
    *
-   * <p>Plus the promotion, which is a fourth fact and a fifth: the deploy branch the release was
-   * pushed to a second time ({@code null} when promotion is disabled), and why that push failed
-   * ({@code null} when it landed). <b>A release with a {@code promotionError} still happened</b> —
-   * the version is real, the default branch has it, CI is building it, and only the deploy did not
-   * follow. {@link ReleaseIntegrator} is where that decision lives and why.
+   * <p>Plus the promotions, which are a fourth fact: one entry per deploy branch the release was
+   * pushed to again, each carrying why that push failed ({@code null} when it landed). Empty when
+   * promotion is disabled. <b>A release with a failed promotion still happened</b> — the version is
+   * real, the default branch has it, CI is building it, and only that deploy did not follow. {@link
+   * ReleaseIntegrator} is where that decision lives and why.
    */
   public record ReleaseResult(
       String version,
       String commitSha,
       String branch,
-      String environmentBranch,
-      String promotionError) {}
+      List<ReleaseIntegrator.Promotion> promotions) {}
 
   /**
    * What a successful plain integrate answers. <b>No version</b>, because none was minted — the

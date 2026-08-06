@@ -4,6 +4,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.control.FakeGitHostAddress;
@@ -16,6 +17,7 @@ import eu.wohlben.qits.workspaces.control.WorkspaceIds;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.ExtractableResponse;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import java.nio.file.Path;
@@ -136,20 +138,25 @@ public class ReleaseControllerTest {
   }
 
   /**
-   * The deploy branch a release is promoted to. The shipped default (domain's
-   * {@code microprofile-config.properties}), so this suite runs with promotion on, as a deployment
-   * does.
+   * The deploy branches a release is promoted to, in the order the shipped default lists them
+   * (domain's {@code microprofile-config.properties}), so this suite runs with promotion on, as a
+   * deployment does. Two branches because a repository listens on one and the service does not know
+   * which: an environment service deploys from the first, a platform service from the second.
    */
   private static final String ENVIRONMENT_BRANCH = "environment/dev";
 
+  private static final String PLATFORM_BRANCH = "platform/main";
+
+  private static final List<String> DEPLOY_BRANCHES =
+      List.of(ENVIRONMENT_BRANCH, PLATFORM_BRANCH);
+
   /**
-   * The environment branch's commit in the origin, or {@code ""} when the ref is absent. {@code
+   * A deploy branch's commit in the origin, or {@code ""} when the ref is absent. {@code
    * for-each-ref} rather than {@code rev-parse} because "not there" is an answer here, and a
    * non-zero exit would be an exception instead.
    */
-  private String environmentBranchInOrigin(String repoId) throws Exception {
-    return inOrigin(
-        repoId, "git", "for-each-ref", "--format=%(objectname)", "refs/heads/" + ENVIRONMENT_BRANCH);
+  private String branchInOrigin(String repoId, String branch) throws Exception {
+    return inOrigin(repoId, "git", "for-each-ref", "--format=%(objectname)", "refs/heads/" + branch);
   }
 
   private List<String> activeLabels(String repoId) {
@@ -290,40 +297,48 @@ public class ReleaseControllerTest {
   }
 
   // -----------------------------------------------------------------------------------------
-  // the promotion — the second push, which is what deploys
+  // the promotions — the further pushes, which are what deploy
   // -----------------------------------------------------------------------------------------
 
   /**
-   * The environment branch is <b>created</b> when it is absent, at the released commit exactly. A
+   * <b>Every</b> deploy branch is created when it is absent, at the released commit exactly. A
    * repository that has never deployed is the ordinary first case, not an error, and a create is
    * what receive-pack does with a push to a ref that is not there.
+   *
+   * <p>Both branches, because the repository listens on one of them and this service does not read
+   * which: an environment service deploys from {@code environment/dev}, a platform service from
+   * {@code platform/main}. The branch nothing listens to costs a CI build and no deployment.
    */
   @Test
-  public void aReleaseCreatesTheEnvironmentBranchAtTheReleasedCommit() throws Exception {
+  public void aReleaseCreatesEveryDeployBranchAtTheReleasedCommit() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "deploy", "deploy-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "deploy-b", "shipped.md", "shipped\n", "the work");
 
-    assertEquals(
-        "", environmentBranchInOrigin(repoId), "the fixture has no environment branch to start with");
+    for (String branch : DEPLOY_BRANCHES) {
+      assertEquals(
+          "", branchInOrigin(repoId, branch), "the fixture has no '" + branch + "' to start with");
+    }
 
     String commitSha =
         release(repoId, "deploy", "the first deploy of this repository")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
-            .body("environmentBranch", equalTo(ENVIRONMENT_BRANCH))
-            .body("promotionError", nullValue())
+            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .body("promotions.error", everyItem(nullValue()))
             .extract()
             .path("commitSha");
 
-    assertEquals(
-        commitSha,
-        inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
-        "the environment branch holds the released commit, which is what deploys it");
+    for (String branch : DEPLOY_BRANCHES) {
+      assertEquals(
+          commitSha,
+          inOrigin(repoId, "git", "rev-parse", branch),
+          "'" + branch + "' holds the released commit, which is what deploys it");
+    }
     assertEquals(
         inOrigin(repoId, "git", "rev-parse", "master"),
         inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
-        "the same commit on both branches: main is the trunk, this one is the deploy");
+        "the same commit on the trunk and on the deploy branch: main builds, this one ships");
   }
 
   /**
@@ -337,59 +352,62 @@ public class ReleaseControllerTest {
    * test to depend on.
    */
   @Test
-  public void thePromotionFastForwardsAnEnvironmentBranchThatAlreadyExists() throws Exception {
+  public void thePromotionFastForwardsTheDeployBranchesThatAlreadyExist() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "next", "next-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "next-b", "two.txt", "two\n", "the work");
-    // Where an earlier release left it: on the default branch, which this one builds on.
+    // Where an earlier release left them: on the default branch, which this one builds on.
     String deployedBefore = inOrigin(repoId, "git", "rev-parse", "master");
-    inOrigin(repoId, "git", "branch", ENVIRONMENT_BRANCH, "master");
+    for (String branch : DEPLOY_BRANCHES) {
+      inOrigin(repoId, "git", "branch", branch, "master");
+    }
 
     String commitSha =
         release(repoId, "next", "the next deploy")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
-            .body("environmentBranch", equalTo(ENVIRONMENT_BRANCH))
-            .body("promotionError", nullValue())
+            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .body("promotions.error", everyItem(nullValue()))
             .extract()
             .path("commitSha");
 
-    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH));
-    assertTrue(
-        inOrigin(repoId, "git", "rev-list", ENVIRONMENT_BRANCH)
-            .lines()
-            .anyMatch(deployedBefore::equals),
-        "what was deployed before is still in the branch's history, so this was a fast-forward");
+    for (String branch : DEPLOY_BRANCHES) {
+      assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", branch));
+      assertTrue(
+          inOrigin(repoId, "git", "rev-list", branch).lines().anyMatch(deployedBefore::equals),
+          "what '" + branch + "' deployed before is still in its history — a fast-forward");
+    }
   }
 
   /**
-   * The environment branch holds something the release is not built on — a hand-pushed hotfix, a
-   * rollback, a wrong ref — and the promotion is refused rather than forced.
+   * A deploy branch holds something the release is not built on — a hand-pushed hotfix, a rollback,
+   * a wrong ref — and the promotion is refused rather than forced.
    *
    * <p>What this asserts is the <b>partial success</b>: a 200 with the version and the sha, because
-   * the release really did land and no exception could take it back, plus a {@code promotionError}
-   * saying nothing deployed and which commit to push once the branch is sorted out. The alternative
-   * — throwing — would answer a caller whose work is already on the default branch with a failure,
-   * skip the {@code SCMRelease} event and leave the workspace ACTIVE on a merged branch.
+   * the release really did land and no exception could take it back, plus an {@code error} per
+   * branch saying nothing deployed and which commit to push once the branch is sorted out. The
+   * alternative — throwing — would answer a caller whose work is already on the default branch with
+   * a failure, skip the {@code SCMRelease} event and leave the workspace ACTIVE on a merged branch.
    */
   @Test
-  public void aPromotionThatIsNotAFastForwardIsReportedAndTheReleaseStillLands() throws Exception {
+  public void refusedPromotionsAreReportedAndTheReleaseStillLands() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "stuck", "stuck-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "stuck-b", "mine.txt", "mine\n", "my work");
     // feature forked before master's second commit, so no descendant of master can fast-forward
     // over it — a real divergence, not a stale copy.
     String divergent = inOrigin(repoId, "git", "rev-parse", "feature");
-    inOrigin(repoId, "git", "branch", ENVIRONMENT_BRANCH, "feature");
+    for (String branch : DEPLOY_BRANCHES) {
+      inOrigin(repoId, "git", "branch", branch, "feature");
+    }
 
     var response =
         release(repoId, "stuck", "released but not deployed")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
             .body("version", matchesRegex(VERSION.pattern()))
-            .body("environmentBranch", equalTo(ENVIRONMENT_BRANCH))
-            .body("promotionError", containsString("fast-forward"))
-            .body("promotionError", containsString(ENVIRONMENT_BRANCH))
+            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .body("promotions.error", everyItem(containsString("fast-forward")))
             .extract();
     String commitSha = response.path("commitSha");
 
@@ -397,16 +415,62 @@ public class ReleaseControllerTest {
         commitSha,
         inOrigin(repoId, "git", "rev-parse", "master"),
         "the release is in: a failed promotion never unwinds the push that already happened");
-    assertEquals(
-        divergent,
-        inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
-        "the environment branch is untouched — the promotion is never a force push");
+    for (String branch : DEPLOY_BRANCHES) {
+      assertEquals(
+          divergent,
+          inOrigin(repoId, "git", "rev-parse", branch),
+          "'" + branch + "' is untouched — the promotion is never a force push");
+    }
     assertTrue(
-        response.path("promotionError").toString().contains(commitSha),
+        errorFor(response, ENVIRONMENT_BRANCH).contains(commitSha),
         "the message names the commit to push, which is the only thing left to do by hand");
+    assertTrue(
+        errorFor(response, PLATFORM_BRANCH).contains(PLATFORM_BRANCH),
+        "and each message names its own branch, so two failures are told apart");
     assertEquals(
         1, announcer.announced().size(), "the release happened, so SCMRelease is published");
     assertTrue(!activeLabels(repoId).contains("stuck"), "and the workspace resolved");
+  }
+
+  /**
+   * One deploy branch refusing does not take the other with it — the point of promoting per branch
+   * rather than as one step. It is the shape a real cutover has: a repository whose environment
+   * branch was hand-moved still gets its platform branch, and the report says exactly which half is
+   * missing.
+   */
+  @Test
+  public void aRefusedPromotionDoesNotStopTheOtherDeployBranch() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "half", "half-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "half-b", "half.txt", "half\n", "my work");
+    String divergent = inOrigin(repoId, "git", "rev-parse", "feature");
+    inOrigin(repoId, "git", "branch", ENVIRONMENT_BRANCH, "feature");
+
+    var response =
+        release(repoId, "half", "one branch deploys")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .extract();
+    String commitSha = response.path("commitSha");
+
+    assertTrue(
+        errorFor(response, ENVIRONMENT_BRANCH).contains("fast-forward"),
+        "the branch that diverged is reported");
+    assertEquals(
+        divergent, inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH), "and left alone");
+    assertNull(errorFor(response, PLATFORM_BRANCH), "the other branch is not blamed for it");
+    assertEquals(
+        commitSha,
+        inOrigin(repoId, "git", "rev-parse", PLATFORM_BRANCH),
+        "and it was pushed: a refusal on one branch stops nothing after it");
+  }
+
+  /** One branch's {@code error} out of the promotions array, or null when that promotion landed. */
+  private static String errorFor(ExtractableResponse<?> response, String branch) {
+    List<String> branches = response.path("promotions.branch");
+    List<String> errors = response.path("promotions.error");
+    return errors.get(branches.indexOf(branch));
   }
 
   // -----------------------------------------------------------------------------------------
