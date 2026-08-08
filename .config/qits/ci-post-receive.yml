@@ -15,7 +15,7 @@
 # qits-gateway's, which carries qits-spa-home the same way; that repo is where the pattern is
 # maintained and the two should keep matching.
 #
-# Half two publishes under the tag that is the whole contract with qits-cd —
+# Half two publishes under the tag that is the whole contract with qits-deployments —
 # <registry>/<repository>/<this repo's name>:<sha>. The step's own container only drives the docker
 # CLI; the build and the push happen in the host's daemon through the socket this step declares
 # (docker: true), which is also why the native build's memory is the daemon's and not this
@@ -63,7 +63,7 @@ steps:
       # npm's own knob for exactly this, `--replace-registry-host=always`, cannot do it against a
       # registry mounted under a path. @npmcli/arborist glues rather than resolves (reify.js:
       # `registry.slice(0, -1) + resolvedURL.pathname`), so
-      # http://qits-artifacts:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz comes
+      # http://qits-platform-artifacts:8080/artifacts/npm/npmjs/ + /artifacts/npm/npmjs/zone.js/-/…tgz comes
       # out as …/artifacts/npm/npmjs/artifacts/npm/npmjs/zone.js/-/…tgz and every tarball 404s.
       #
       # The origin is derived from the injected env rather than spelled here: no repository states a
@@ -90,7 +90,7 @@ steps:
       # --- half two: the image ------------------------------------------------------------------
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspaces:$QITS_CI_SHA"
       docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-artifacts:8080/artifacts/maven/maven \
+        --build-arg QITS_MAVEN_REPOSITORY_URL=http://qits-platform-artifacts:8080/artifacts/maven/maven \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true
