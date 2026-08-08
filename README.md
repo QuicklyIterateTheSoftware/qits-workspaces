@@ -133,15 +133,31 @@ tree, rebuildable — delete it and the next request re-clones), does its merges
 mirror, and reaches the served repository only by pushing. An unreachable git host is no longer a
 one-endpoint problem.
 
-`qits.workspaces.release.promotion-branches` (default `environment/dev,platform/main`) is where a
-release is **promoted**: the same commit, pushed again onto each, and those pushes are what deploy —
-qits-cd ships an application from a green build on a deploy branch, so `main` builds and these
-branches ship. Both, because a repository listens on one and this service does not read which (a
-platform service deploys from `platform/main`, an environment service from `environment/dev`); the
-cost is a second CI build on the branch nothing listens to. Fast-forward or create, never a force;
-**blank disables promotion**. A promotion that fails does not fail the release (the release push is
-already accepted) and fails per branch: the answer is a 200 whose `promotions` entry for that branch
-carries an `error`, and the failure is logged at ERROR.
+A release is **promoted**: the same commit, pushed again onto every deploy branch, and those pushes
+are what deploy — the deployer ships an application from a green build on a deploy branch, so `main`
+builds and these branches ship. Fast-forward or create, never a force.
+
+**The repository says where.** A release reads `deploy_branches` out of the released tree's own
+`.config/qits/deployments.yml`, the same file the deployer reads:
+
+    deploy_branches: environment/prod
+
+Three answers. A spec naming the key promotes to those refs. A spec without it falls back to
+`qits.workspaces.release.promotion-branches` (default `environment/prod`), the compatibility path
+until every repository declares. **No spec file at all promotes nothing** — a library or a component
+bundle deploys from no ref, and the fixed list this replaced pushed one for it anyway, costing a CI
+build and a branch nobody reads.
+
+**Blank `promotion-branches` still disables promotion**, whatever a spec says: the switch belongs to
+the deployment.
+
+**The trunk push goes quiet when there is a deploy branch** — it carries `-o qits.no-ci`, so one sha
+does not build twice and the deploy branch's build is the release's signal. A release with nowhere
+to deploy keeps its trunk push CI-hot, because there that build is the only proof.
+
+A promotion that fails does not fail the release (the release push is already accepted) and fails
+per branch: the answer is a 200 whose `promotions` entry for that branch carries an `error`, and the
+failure is logged at ERROR.
 
 One behaviour worth knowing before you debug it: **a missing repository and an unreachable
 qits-projects are different answers.** Only a 404 becomes "no such repository" (and then a 404 from

@@ -359,8 +359,10 @@ Three kinds of git call, and the distinction decides correctness:
   to establish.
 
 Only a release's pushes carry `-o qits.release` — the default branch's, and the promotion that
-follows it; nothing else writes the default branch, so nothing else needs an option. The mirror is a
-**cache**: delete it and the next request re-clones.
+follows it; nothing else writes the default branch, so nothing else needs an option. The default
+branch's push carries a **second** option, `-o qits.no-ci`, when the release also has a deploy
+branch to push: one sha on two refs is two builds and only the deploy branch's means anything. The
+mirror is a **cache**: delete it and the next request re-clones.
 
 ## The two doors: release and integrate
 
@@ -368,7 +370,8 @@ follows it; nothing else writes the default branch, so nothing else needs an opt
 branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
 version into the same index, commits both as **one** commit — `release(<version>): <summary>` —
 **pushes** it — together with an annotated **tag** named the version — publishes `SCMRelease`, and
-**promotes** the same commit onto the environment branch, which is what deploys it.
+**promotes** the same commit onto every deploy branch the repository's own spec declares, which is
+what deploys it.
 
 **`POST /workspaces/api/workspaces/{id}/integrate`** lands a workspace on **its parent branch** — a
 `task/…` on the `epic/…` it forked from — as one pushed commit `integrate(<source>): <summary>`. No
@@ -555,21 +558,31 @@ copy.
 
 ## The promotions: the further pushes, and the ones that deploy
 
-A release pushes the released commit **again**, onto every branch in
-`qits.workspaces.release.promotion-branches` (`environment/dev,platform/main` in the shipped
-defaults). Those pushes are what ship: qits-cd registers and deploys an application from a green
-build **on a deploy branch**, so `main` is the integration trunk that builds and the deploy branches
-are what deploys. Pushing only `main` builds and deploys nothing — the same rule the direct-push
-escape hatch follows.
+A release pushes the released commit **again**, onto every deploy branch the repository declares.
+Those pushes are what ship: the deployer registers and deploys an application from a green build **on
+a deploy branch**, so `main` is the integration trunk that builds and the deploy branches are what
+deploys. Pushing only `main` builds and deploys nothing — the same rule the direct-push escape hatch
+follows.
 
-- **Every branch, because a repository listens on one and this service does not know which.** A
-  platform service deploys from `platform/main` and an environment service from `environment/dev`;
-  the repository's own spec says which it is, and reading that spec here is a **recorded debt**. The
-  price of not guessing is a second CI build on the branch nothing listens to, which is accepted.
-- **Separate pushes, in this order, never one atomic push.** The default branch first, byte for byte
-  the push it always was, then each deploy branch in the configured order. A promotion riding along
-  atomically would let a stuck deploy branch refuse the *release*, which is the one ref this flow
-  exists to move — and would let one stuck deploy branch block the other.
+- **The repository says where, and that debt is paid.** `DeploymentSpecReader` reads
+  `deploy_branches` out of the released tree's own `.config/qits/deployments.yml` — a local file by
+  then, because the merge worktree is checked out at the released tree. **A spec declaring the key
+  gets exactly those refs; a spec without it falls back to
+  `qits.workspaces.release.promotion-branches` (`environment/prod` shipped); no spec file at all
+  promotes NOTHING.** That last case is the point: a library or an SPA deploys from no ref, and the
+  fixed pair this replaced pushed one for it anyway.
+- **The reader is lenient where the deployer's `DeploymentSpecParser` is strict.** It is a *second*
+  reader of a file it does not own, so an unknown key is ignored rather than refused — a key the
+  deployer adds must not fail every release in the platform until this vendored copy catches up. It
+  is a vendored ~120-line line parser, deliberately not a dependency on qits-platform-deployments.
+- **Separate pushes, in this order, never one atomic push.** The default branch first, then each
+  deploy branch in the declared order. A promotion riding along atomically would let a stuck deploy
+  branch refuse the *release*, which is the one ref this flow exists to move — and would let one
+  stuck deploy branch block the other.
+- **The trunk push goes quiet when there is a deploy branch.** It carries `-o qits.no-ci` as well as
+  `-o qits.release`, so one sha does not build twice — the deploy branch's build is the release's
+  signal. A repository with no deploy branches keeps its trunk push CI-hot: there that build is the
+  only proof the release is sound. The promotion pushes are never quiet.
 - **Create or fast-forward, never a force.** A push to a ref that is not there is a create, which is
   the ordinary first case for a repository that has never deployed. A non-fast-forward means the
   branch holds something the release is not built on, and it is reported rather than overwritten.
@@ -578,9 +591,10 @@ escape hatch follows.
   fast-forward-only at the hook, which is exactly what these pushes are, so it costs nothing and
   keeps one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)`
   again.
-- **Blank disables all of them.** One key answers "where to" and "whether at all"; a promotion with
-  no target branches is not configured. A deployment that has not cut over to deploy branches empties
-  the key and a release is exactly what it was before.
+- **Blank `promotion-branches` disables all of them, and outranks any spec.** The key is both the
+  fallback list and the kill switch; a deployment that must stop writing deploy branches has to be
+  able to, and a switch a repository could talk its way past would not be one.
+  `ReleasePromotionDisabledTest` holds it against a repository that *does* declare its refs.
 
 **A failed promotion is a partial success, not a failed release — and it is partial per branch**,
 and that decision lives in `ReleaseIntegrator` (the class javadoc says why, beside the code). By the
@@ -593,10 +607,13 @@ A branch that refuses does not stop the branches after it. The precedent is `del
 which is best-effort for the same reason: once the release is in, nothing after it may pretend it is
 not.
 
-The response carries `promotions` for it — one `{branch, error}` per configured deploy branch, in
-the configured order, `error` null when that push landed — on the record **both** release doors
-answer with. It is empty when promotion is off, and **a plain integrate promotes nothing**: it
-released nothing to deploy.
+The response carries `promotions` for it — one `{branch, error}` per deploy branch, in the declared
+order, `error` null when that push landed — on the record **both** release doors answer with. It is
+empty when the repository declares no deploy branch, when it carries no spec, when promotion is off,
+and for **a plain integrate**, which released nothing to deploy.
+
+**This repository declares its own** in `.config/qits/deployments.yml` (`environment/prod`), so it
+releases through the mechanism it implements.
 
 ## The SCMRelease event
 
@@ -713,6 +730,12 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   suite would prove nothing about the separation. The properties files also set
   `qits.workspace.git.mirror-freshness-ms=0`, because a fixture that changes between two assertions
   must never be served from a window.
+- `TestOrigin.recordPushOptions` installs a real `pre-receive` hook on a fixture origin that logs
+  each ref with the push options it arrived under, and `pushOptionsFor` reads one back. It is the
+  only way to see a `--push-option` from outside the pushing process, and it is what makes "the
+  trunk push carries `qits.no-ci` exactly when there is a deploy branch" an assertion about the
+  shipped argv. Install it *after* the fixture commits: it records every push from then on, and the
+  reader takes the first line for a ref.
 - `TestGit.exec` is how a test runs git in one of those fixture directories. It is a thin static
   helper over `gitmirror`'s `GitCli`, and it replaced `GitExecutor` — a production CDI bean whose
   only remaining callers were tests. `GitCli`'s own properties (the per-line tap, the unterminated

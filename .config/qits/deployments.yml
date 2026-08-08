@@ -1,0 +1,12 @@
+# How qits-platform-deployments deploys this repo. It reads this file from the git host at the
+# built sha, and so does this repo's own release flow — `deploy_branches` is what a release
+# promotes to (ReleaseIntegrator, "the promotions"). A repo carrying no file at all deploys from
+# nowhere and its release is the trunk push alone.
+#
+# qits-workspaces is an ENVIRONMENT service: one instance per tier, the default target, so the
+# `deployment_target` key is left off rather than written out as its own default.
+#
+# ORDERING, and it is a hard one: qits-platform-deployments' DeploymentSpecParser is strict on
+# unknown keys, so it must learn `deploy_branches` (accept it, ignore it) BEFORE this file reaches
+# the git host, or the next deployment of this repo fails on its own spec.
+deploy_branches: environment/prod

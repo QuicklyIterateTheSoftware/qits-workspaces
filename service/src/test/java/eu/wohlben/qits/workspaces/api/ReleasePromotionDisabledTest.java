@@ -30,6 +30,11 @@ import org.junit.jupiter.api.Test;
  * without switching off releases. Blank rather than a boolean, because a promotion with no target
  * branches is not configured — one key answers "where to" and "whether at all" with no way to set
  * them apart.
+ *
+ * <p><b>The switch outranks the repository</b>, and that is what this fixture is built to show: the
+ * repository here <em>declares</em> its deploy branches in {@code .config/qits/deployments.yml}, so
+ * a release would promote to them, and the blank key stops it anyway. It belongs to the deployment;
+ * a repository that could talk its way past it would leave nothing switched off.
  */
 @QuarkusTest
 @TestProfile(ReleasePromotionDisabledTest.NoPromotion.class)
@@ -56,6 +61,14 @@ public class ReleasePromotionDisabledTest {
     String repoId = TestOrigin.create(dataDir);
     repositories.register(repoId);
     workspaceService.createMainWorkspace(repoId, "master");
+    // The repository asks to be deployed, in the file that decides it. The switch says no.
+    TestOrigin.commitOnBranch(
+        dataDir,
+        repoId,
+        "master",
+        ".config/qits/deployments.yml",
+        "deploy_branches: environment/prod\n",
+        "declare how this deploys");
 
     given()
         .contentType(ContentType.JSON)
@@ -65,6 +78,7 @@ public class ReleasePromotionDisabledTest {
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
     TestOrigin.commitOnBranch(dataDir, repoId, "solo-b", "shipped.md", "shipped\n", "the work");
+    TestOrigin.recordPushOptions(dataDir, repoId);
 
     String commitSha =
         given()
@@ -93,6 +107,11 @@ public class ReleasePromotionDisabledTest {
             "refs/heads/environment",
             "refs/heads/platform"),
         "no deploy branch was created — none of the further pushes happened");
+    assertEquals(
+        java.util.List.of("qits.release"),
+        TestOrigin.pushOptionsFor(dataDir, repoId, "refs/heads/master"),
+        "and the trunk push stays CI-hot: with the switch on there is no deploy branch to build"
+            + " this sha instead");
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {

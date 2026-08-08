@@ -4,6 +4,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -106,9 +108,70 @@ public final class TestOrigin {
 
   private static void commit(Path work, String file, String content, String message)
       throws Exception {
-    Files.writeString(work.resolve(file), content);
+    Path target = work.resolve(file);
+    // Nested on purpose: `.config/qits/deployments.yml` is a fixture this suite writes, and a
+    // fixture helper that only handled a top-level file would push that directory arithmetic into
+    // every caller.
+    Files.createDirectories(target.getParent());
+    Files.writeString(target, content);
     run(work.toFile(), "git", "add", file);
     run(work.toFile(), "git", "commit", "-q", "-m", message);
+  }
+
+  /**
+   * Install a {@code pre-receive} hook on the origin that appends {@code <ref> <options>} to {@code
+   * push-options.log} for every ref a push moves.
+   *
+   * <p>This is the only way to see a {@code --push-option} from outside the pushing process, and it
+   * is what makes "the trunk push carries {@code qits.no-ci} exactly when there is a deploy branch"
+   * an assertion about the argv that ships rather than about a field. Real receive-pack, real hook,
+   * real environment variables — the same ones the git host's own hook reads.
+   *
+   * <p>Install it before the push under test; it records every push after that, workspace branch
+   * creates included, so read it back by ref.
+   */
+  public static void recordPushOptions(String dataDir, String repoId) throws Exception {
+    Path origin = Path.of(dataDir, repoId, "origin").toAbsolutePath();
+    Path log = origin.resolve("push-options.log");
+    Path hook = origin.resolve("hooks").resolve("pre-receive");
+    Files.createDirectories(hook.getParent());
+    Files.writeString(
+        hook,
+        """
+        #!/bin/sh
+        opts=""
+        i=0
+        while [ "$i" -lt "${GIT_PUSH_OPTION_COUNT:-0}" ]; do
+          eval "value=\\$GIT_PUSH_OPTION_$i"
+          opts="$opts $value"
+          i=$((i + 1))
+        done
+        while read -r old new ref; do
+          echo "$ref$opts" >> LOG
+        done
+        exit 0
+        """
+            .replace("LOG", log.toString()));
+    Files.setPosixFilePermissions(hook, PosixFilePermissions.fromString("rwxr-xr-x"));
+  }
+
+  /**
+   * The push options one ref was moved with, or null when no recorded push moved it. Empty when it
+   * was pushed with none.
+   */
+  public static List<String> pushOptionsFor(String dataDir, String repoId, String ref)
+      throws Exception {
+    Path log = Path.of(dataDir, repoId, "origin", "push-options.log").toAbsolutePath();
+    if (!Files.exists(log)) {
+      return null;
+    }
+    for (String line : Files.readAllLines(log)) {
+      String[] words = line.trim().split("\\s+");
+      if (words.length > 0 && words[0].equals(ref)) {
+        return List.of(words).subList(1, words.length);
+      }
+    }
+    return null;
   }
 
   /** Run a git command, failing the test with its combined output when it exits non-zero. */

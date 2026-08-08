@@ -138,17 +138,36 @@ public class ReleaseControllerTest {
   }
 
   /**
-   * The deploy branches a release is promoted to, in the order the shipped default lists them
-   * (domain's {@code microprofile-config.properties}), so this suite runs with promotion on, as a
-   * deployment does. Two branches because a repository listens on one and the service does not know
-   * which: an environment service deploys from the first, a platform service from the second.
+   * The deploy branches the fixture repositories <b>declare</b>, in the order they declare them.
+   *
+   * <p>Two of them, and mid-cutover is what that shape is: a repository moving onto the platform's
+   * one deploy ref while it still ships from the old one names both. Two is also what makes the
+   * per-branch reporting below mean anything — one refusing while the other lands cannot be told
+   * apart with a single branch.
+   *
+   * <p>Nothing about this pair comes from configuration any more. It is written into each fixture's
+   * own {@code .config/qits/deployments.yml} by {@link #declareDeployBranches}, which is the whole
+   * change: the repository says where it deploys.
    */
-  private static final String ENVIRONMENT_BRANCH = "environment/dev";
+  private static final String ENVIRONMENT_BRANCH = "environment/prod";
 
   private static final String PLATFORM_BRANCH = "platform/main";
 
-  private static final List<String> DEPLOY_BRANCHES =
-      List.of(ENVIRONMENT_BRANCH, PLATFORM_BRANCH);
+  private static final List<String> DEPLOY_BRANCHES = List.of(ENVIRONMENT_BRANCH, PLATFORM_BRANCH);
+
+  /** The fallback list, read from the same key a deployment sets — see the fallback test below. */
+  @ConfigProperty(name = "qits.workspaces.release.promotion-branches")
+  java.util.Optional<List<String>> configuredBranches;
+
+  /** Commit a deployments spec declaring these refs onto {@code master}. */
+  private void declareDeployBranches(String repoId, List<String> branches) throws Exception {
+    writeSpec(repoId, "deploy_branches: " + String.join(",", branches) + "\n");
+  }
+
+  private void writeSpec(String repoId, String yaml) throws Exception {
+    TestOrigin.commitOnBranch(
+        dataDir, repoId, "master", ".config/qits/deployments.yml", yaml, "declare how this deploys");
+  }
 
   /**
    * A deploy branch's commit in the origin, or {@code ""} when the ref is absent. {@code
@@ -305,13 +324,13 @@ public class ReleaseControllerTest {
    * repository that has never deployed is the ordinary first case, not an error, and a create is
    * what receive-pack does with a push to a ref that is not there.
    *
-   * <p>Both branches, because the repository listens on one of them and this service does not read
-   * which: an environment service deploys from {@code environment/dev}, a platform service from
-   * {@code platform/main}. The branch nothing listens to costs a CI build and no deployment.
+   * <p>Both branches, and both of them because <b>the repository's spec names both</b> — not
+   * because the service pushes a fixed pair and hopes one is listened to.
    */
   @Test
   public void aReleaseCreatesEveryDeployBranchAtTheReleasedCommit() throws Exception {
     String repoId = seedRepository();
+    declareDeployBranches(repoId, DEPLOY_BRANCHES);
     createWorkspace(repoId, "deploy", "deploy-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "deploy-b", "shipped.md", "shipped\n", "the work");
 
@@ -354,6 +373,7 @@ public class ReleaseControllerTest {
   @Test
   public void thePromotionFastForwardsTheDeployBranchesThatAlreadyExist() throws Exception {
     String repoId = seedRepository();
+    declareDeployBranches(repoId, DEPLOY_BRANCHES);
     createWorkspace(repoId, "next", "next-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "next-b", "two.txt", "two\n", "the work");
     // Where an earlier release left them: on the default branch, which this one builds on.
@@ -392,6 +412,7 @@ public class ReleaseControllerTest {
   @Test
   public void refusedPromotionsAreReportedAndTheReleaseStillLands() throws Exception {
     String repoId = seedRepository();
+    declareDeployBranches(repoId, DEPLOY_BRANCHES);
     createWorkspace(repoId, "stuck", "stuck-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "stuck-b", "mine.txt", "mine\n", "my work");
     // feature forked before master's second commit, so no descendant of master can fast-forward
@@ -441,6 +462,7 @@ public class ReleaseControllerTest {
   @Test
   public void aRefusedPromotionDoesNotStopTheOtherDeployBranch() throws Exception {
     String repoId = seedRepository();
+    declareDeployBranches(repoId, DEPLOY_BRANCHES);
     createWorkspace(repoId, "half", "half-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "half-b", "half.txt", "half\n", "my work");
     String divergent = inOrigin(repoId, "git", "rev-parse", "feature");
@@ -471,6 +493,159 @@ public class ReleaseControllerTest {
     List<String> branches = response.path("promotions.branch");
     List<String> errors = response.path("promotions.error");
     return errors.get(branches.indexOf(branch));
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // where the deploy branches come from: the repository, not the configuration
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * The change itself. A repository declaring {@code deploy_branches} is promoted to <b>those</b>
+   * refs, and the configured list is not consulted — asserted by declaring a ref the shipped default
+   * does not name and checking the default's own ref never appears.
+   *
+   * <p>The spec is read out of the <b>released tree</b>: the merge worktree is checked out at it
+   * when the promotions run, so the answer is the file as this release leaves it, never a stale
+   * copy of it.
+   */
+  @Test
+  public void aDeclaredDeployBranchIsWhereTheReleaseGoes() throws Exception {
+    String repoId = seedRepository();
+    declareDeployBranches(repoId, List.of("environment/canary"));
+    createWorkspace(repoId, "declared", "declared-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "declared-b", "one.txt", "one\n", "the work");
+
+    String commitSha =
+        release(repoId, "declared", "the repository says where")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("promotions.branch", equalTo(List.of("environment/canary")))
+            .body("promotions.error", everyItem(nullValue()))
+            .extract()
+            .path("commitSha");
+
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", "environment/canary"));
+    assertEquals(
+        "",
+        branchInOrigin(repoId, ENVIRONMENT_BRANCH),
+        "the configured default is not pushed to a repository that named a different ref");
+  }
+
+  /**
+   * The compatibility path. A repository that has a spec but has not declared its deploy refs yet is
+   * promoted to the configured list, so the cutover does not need every repository edited on one
+   * day.
+   */
+  @Test
+  public void aSpecWithoutDeployBranchesFallsBackToTheConfiguredList() throws Exception {
+    String repoId = seedRepository();
+    writeSpec(repoId, "deployment_target: environment\n");
+    createWorkspace(repoId, "fallback", "fallback-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "fallback-b", "two.txt", "two\n", "the work");
+
+    List<String> configured = configuredBranches.orElseThrow();
+    String commitSha =
+        release(repoId, "fallback", "not declared yet")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("promotions.branch", equalTo(configured))
+            .body("promotions.error", everyItem(nullValue()))
+            .extract()
+            .path("commitSha");
+
+    for (String branch : configured) {
+      assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", branch));
+    }
+  }
+
+  /**
+   * A repository with no spec at all deploys from nowhere, and that is the point of reading the spec
+   * rather than a fixed list: a library or a component bundle has no deploy ref, and the old
+   * behaviour pushed one for it anyway — a CI build and a branch nobody reads, on every release.
+   *
+   * <p>The release itself is untouched by it. The trunk push is the whole release here, which is
+   * also why it stays CI-hot below.
+   */
+  @Test
+  public void aRepositoryWithNoSpecPromotesNothing() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "library", "library-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "library-b", "lib.txt", "lib\n", "the work");
+
+    String commitSha =
+        release(repoId, "library", "a library releases and deploys nothing")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("version", not(emptyOrNullString()))
+            .body("promotions", empty())
+            .extract()
+            .path("commitSha");
+
+    assertEquals(
+        commitSha,
+        inOrigin(repoId, "git", "rev-parse", "master"),
+        "the release is exactly what it was — only the further pushes are gone");
+    assertEquals(
+        "",
+        inOrigin(
+            repoId,
+            "git",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/environment",
+            "refs/heads/platform"),
+        "no deploy branch was created");
+    assertEquals(1, announcer.announced().size(), "and the release was announced");
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // the quiet trunk push
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * One sha must not build twice. A release with a deploy branch pushes the trunk with {@code -o
+   * qits.no-ci}, because the deploy branch's build is the one that signals anything; a release with
+   * nowhere to deploy leaves the trunk push CI-hot, because there that build is the release's only
+   * proof.
+   *
+   * <p>Read off a real {@code pre-receive} hook on the fixture origin rather than off a field, so
+   * what is asserted is the argv that ships — the same environment variables the git host's own hook
+   * reads.
+   */
+  @Test
+  public void theTrunkPushIsQuietOnlyWhenTheReleaseHasSomewhereToDeploy() throws Exception {
+    String deploying = seedRepository();
+    declareDeployBranches(deploying, List.of(ENVIRONMENT_BRANCH));
+    createWorkspace(deploying, "ships", "ships-b");
+    TestOrigin.commitOnBranch(dataDir, deploying, "ships-b", "a.txt", "a\n", "the work");
+
+    String library = seedRepository();
+    createWorkspace(library, "ships-nowhere", "nowhere-b");
+    TestOrigin.commitOnBranch(dataDir, library, "nowhere-b", "b.txt", "b\n", "the work");
+
+    // After every fixture push, so the first recorded line for a ref is the release's own.
+    TestOrigin.recordPushOptions(dataDir, deploying);
+    TestOrigin.recordPushOptions(dataDir, library);
+
+    release(deploying, "ships", "one sha, one build")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+    release(library, "ships-nowhere", "the trunk build is the proof")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+
+    assertEquals(
+        List.of("qits.release", "qits.no-ci"),
+        TestOrigin.pushOptionsFor(dataDir, deploying, "refs/heads/master"),
+        "the deploy branch is about to build this sha, so the trunk push does not");
+    assertEquals(
+        List.of("qits.release"),
+        TestOrigin.pushOptionsFor(dataDir, deploying, "refs/heads/" + ENVIRONMENT_BRANCH),
+        "the promotion is never quiet — its build is the release's signal");
+    assertEquals(
+        List.of("qits.release"),
+        TestOrigin.pushOptionsFor(dataDir, library, "refs/heads/master"),
+        "with nowhere to deploy, the trunk build is the only proof the release is sound");
   }
 
   // -----------------------------------------------------------------------------------------
