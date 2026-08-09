@@ -30,7 +30,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     String mainBranch = mainBranches.get(repoId);
     return mainBranch == null
         ? Optional.empty()
-        : Optional.of(new RepositoryView(repoId, PROJECT_ID, mainBranch));
+        : Optional.of(new RepositoryView(repoId, repoId, PROJECT_ID, mainBranch));
   }
 
   /** Make {@code repoId} resolvable, with {@code master} as its main branch. */

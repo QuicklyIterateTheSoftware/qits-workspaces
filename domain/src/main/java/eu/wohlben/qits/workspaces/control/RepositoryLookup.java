@@ -5,7 +5,8 @@ import java.util.Optional;
 
 /**
  * The owning application's repository registry, narrowed to what the workspaces context actually
- * needs of it: does this repository exist, which project owns it, and what is its main branch.
+ * needs of it: does this repository exist, what project-scoped name addresses it, and what is its
+ * main branch.
  *
  * <p>A workspace has no meaning without a repository to branch from, but this context deliberately
  * holds no foreign key into the repositories tables (see {@link
@@ -23,12 +24,12 @@ public interface RepositoryLookup {
   /**
    * The repository facts this context reads.
    *
-   * <p>{@code projectId} is here for one caller and one reason: {@code SCMRelease} names the
-   * project a release belongs to, and the flow that publishes it holds a repository id and nothing
-   * else. It is nullable — a registry that does not answer with one costs the event a field, never
-   * the release.
+   * <p>{@code projectId} and {@code name} together are the git host's project-scoped address. The
+   * workspace daemon needs both so a wrapper clone's relative submodule urls resolve to sibling
+   * repositories. {@code projectId} also names the project in {@code SCMRelease}. Both remain
+   * nullable for registries that cannot answer them.
    */
-  record RepositoryView(String id, String projectId, String mainBranch) {}
+  record RepositoryView(String id, String name, String projectId, String mainBranch) {}
 
   /** The repository behind {@code repoId}, or empty when it does not exist. */
   Optional<RepositoryView> find(String repoId);

@@ -4,6 +4,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
@@ -93,6 +94,55 @@ public class WorkspacePromptAttachmentControllerTest {
         // one thing the compose UI can rebuild its thumbnails from after a reload.
         .body("attachments[0].dataBase64", equalTo(PromptAttachmentFixtures.ONE_PIXEL_PNG))
         .body("attachments[1].label", equalTo("Sketch 1"));
+  }
+
+  @Test
+  public void contentHasAStableBrowserUrlWhenTheSketchIsUpdated() throws Exception {
+    Long id = workspace("attachment-content");
+    String attachmentId =
+        given()
+            .contentType(ContentType.JSON)
+            .body(paste("Sketch 1", PromptAttachmentFixtures.ONE_PIXEL_PNG))
+            .post(base(id))
+            .then()
+            .statusCode(201)
+            .extract()
+            .path("id");
+    String contentUrl = base(id) + "/" + attachmentId + "/content";
+
+    byte[] first =
+        given()
+            .get(contentUrl)
+            .then()
+            .statusCode(200)
+            .contentType("image/png")
+            .header("Cache-Control", "no-cache")
+            .extract()
+            .asByteArray();
+    assertArrayEquals(
+        Base64.getDecoder().decode(PromptAttachmentFixtures.ONE_PIXEL_PNG), first);
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new WorkspacePromptAttachmentController.AddAttachmentRequest(
+                "image/png", "Sketch 1", "SKETCH", PromptAttachmentFixtures.ONE_PIXEL_JPEG))
+        .put(base(id) + "/" + attachmentId)
+        .then()
+        .statusCode(200)
+        .body("id", equalTo(attachmentId))
+        .body("mimeType", equalTo("image/jpeg"));
+
+    byte[] updated =
+        given()
+            .get(contentUrl)
+            .then()
+            .statusCode(200)
+            .contentType("image/jpeg")
+            .extract()
+            .asByteArray();
+    assertArrayEquals(
+        Base64.getDecoder().decode(PromptAttachmentFixtures.ONE_PIXEL_JPEG), updated);
   }
 
   @Test

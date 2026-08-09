@@ -75,18 +75,19 @@ public class HttpRepositoryLookupTest {
   }
 
   @Test
-  public void aKnownRepositoryYieldsItsIdProjectAndMainBranch() throws Exception {
+  public void aKnownRepositoryYieldsItsIdNameProjectAndMainBranch() throws Exception {
     String base =
         serve(
             200,
             """
-            {"repository":{"id":"repo-1","url":"file:///origin","mainBranch":"main",\
+            {"repository":{"id":"repo-1","name":"qits-qits","backupUrl":"file:///origin","mainBranch":"main",\
             "archetype":"NONE","projectId":"p-1"}}""");
 
     Optional<RepositoryLookup.RepositoryView> found = lookupAgainst(base).find("repo-1");
 
     assertTrue(found.isPresent());
     assertEquals("repo-1", found.get().id());
+    assertEquals("qits-qits", found.get().name(), "the daemon needs the addressable name");
     assertEquals("main", found.get().mainBranch());
     assertEquals("p-1", found.get().projectId(), "SCMRelease names the project");
   }

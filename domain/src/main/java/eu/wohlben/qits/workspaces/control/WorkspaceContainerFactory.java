@@ -156,24 +156,47 @@ public class WorkspaceContainerFactory {
    * committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part 1).
    * Injected as {@code QITS_WORKSPACE_DAEMON_PROJECT_ID}/{@code …_REPO_NAME}.
    *
-   * <p>Optional: with no implementation present both env vars stay blank and the daemon
-   * id-addresses instead, which is the same fallback an unresolvable repo already takes.
+   * <p>Optional: the ordinary production path reads the same pair from {@link RepositoryLookup}; a
+   * resolver can override it for an embedding that owns a different address registry.
    */
   @Inject Instance<RepositoryAddressResolver> nameResolver;
 
   /**
    * The owning project id, for {@code QITS_WORKSPACE_DAEMON_PROJECT_ID} and the {@code
    * qits.project} labels. No {@link RepositoryAddressResolver} implementation exists in the
-   * deployable (name-addressing never shipped), so before this port was consulted the env var
-   * shipped <b>empty</b> — and the daemon's agent launch validates that id, so every launch failed
-   * on "Invalid project id" (D2). {@code RepositoryLookup} has carried {@code projectId} since the
-   * SCMRelease work; an {@code Instance<>} so the hand-built unit-test factory can leave it empty.
+   * deployable, so {@link RepositoryLookup} supplies both this id and the repository name. An
+   * {@code Instance<>} lets the hand-built unit-test factory leave the registry empty.
    */
   @Inject Instance<RepositoryLookup> repositories;
 
-  /** The repo's project-scoped name, or empty when unresolvable or no resolver is installed. */
+  /** The repo's project-scoped name, from an override resolver or the repository registry. */
   private Optional<RepositoryAddressResolver.ProjectScopedName> scopedName(String repoId) {
-    return nameResolver.isResolvable() ? nameResolver.get().resolve(repoId) : Optional.empty();
+    if (nameResolver.isResolvable()) {
+      Optional<RepositoryAddressResolver.ProjectScopedName> resolved =
+          nameResolver.get().resolve(repoId);
+      if (resolved.isPresent()) {
+        return resolved;
+      }
+    }
+    if (!repositories.isResolvable()) {
+      return Optional.empty();
+    }
+    try {
+      return repositories
+          .get()
+          .find(repoId)
+          .filter(view -> present(view.projectId()) && present(view.name()))
+          .map(
+              view ->
+                  new RepositoryAddressResolver.ProjectScopedName(
+                      view.projectId(), view.name()));
+    } catch (RuntimeException e) {
+      return Optional.empty(); // address enrichment never prevents container creation
+    }
+  }
+
+  private static boolean present(String value) {
+    return value != null && !value.isBlank();
   }
 
   /**
@@ -366,7 +389,10 @@ public class WorkspaceContainerFactory {
     // (the volume labels carry it for dangling-volume reconcile; the container carries it for
     // symmetry). Resolved through projectIdFor — the RepositoryLookup fallback is what stopped
     // this env var from shipping empty (D2). Blank only when no registry answers.
-    String projectId = projectIdFor(repoId);
+    String projectId =
+        scopedName
+            .map(RepositoryAddressResolver.ProjectScopedName::projectId)
+            .orElseGet(() -> projectIdFor(repoId));
     container.label("qits.project", projectId);
     container.env("QITS_WORKSPACE_DAEMON_PROJECT_ID", projectId);
     container.env(

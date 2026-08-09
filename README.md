@@ -75,7 +75,7 @@ the consuming application implements:
 | Port | Required? | Absent means |
 |---|---|---|
 | `RepositoryLookup` | **yes** | won't start — an app without it is misconfigured |
-| `RepositoryAddressResolver` | no | the daemon id-addresses `/git/<repositoryId>` (its own fallback) |
+| `RepositoryAddressResolver` | no | `RepositoryLookup` supplies the ordinary project-scoped git address |
 | `WorkspaceCommandHistory` | no | a workspace's history shows no commands |
 | `AgentSessionReporter` | no | `SessionStart` lineage is not forwarded |
 | `WorkspaceTerminalSessions` | no | the interactive service terminal refuses the upgrade; the live log is unaffected |

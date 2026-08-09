@@ -129,7 +129,11 @@ public class HttpRepositoryLookup implements RepositoryLookup {
       return Optional.empty();
     }
     return Optional.of(
-        new RepositoryView(id, answer.repository().projectId(), answer.repository().mainBranch()));
+        new RepositoryView(
+            id,
+            answer.repository().name(),
+            answer.repository().projectId(),
+            answer.repository().mainBranch()));
   }
 
   /** The configured address, or null when this service is unwired. */

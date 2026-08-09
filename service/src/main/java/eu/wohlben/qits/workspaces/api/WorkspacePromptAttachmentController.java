@@ -11,6 +11,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -93,9 +94,8 @@ public class WorkspacePromptAttachmentController {
    * Attach one image. 400 for anything that is not valid base64 or not a PNG or JPEG (the sniff, not
    * the claim), 413 over the per-image cap ({@code qits.workspace.prompt-attachment-max-bytes}).
    *
-   * <p>201, and no {@code Location}: the id the caller needs is in the body (the draft blob is
-   * written against it), and there is no single-attachment GET to point a header at — the list is
-   * the only read, because the compose UI rehydrates all of them at once or none.
+   * <p>201, with the id the caller needs in the body. The binary content resource is stable at that
+   * id and is what durable markdown documents reference.
    */
   @POST
   @APIResponse(
@@ -128,6 +128,56 @@ public class WorkspacePromptAttachmentController {
                 attachment.label,
                 attachment.source,
                 attachment.createdAt))
+        .build();
+  }
+
+  /** Replace an image in place so documents that reference its content URL keep working. */
+  @PUT
+  @Path("/{attachmentId}")
+  @APIResponse(responseCode = "200", description = "Updated; the same row id is preserved.")
+  @APIResponse(
+      responseCode = "400",
+      description = "Not valid base64, not a PNG or JPEG, or an unknown source.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(
+      responseCode = "404",
+      description = "No such ACTIVE workspace, or no such attachment on it.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  @APIResponse(responseCode = "413", description = "The image exceeds the configured limit.")
+  public AddAttachmentRequest.Response update(
+      @PathParam("id") Long id,
+      @PathParam("attachmentId") String attachmentId,
+      @Valid AddAttachmentRequest request) {
+    WorkspacePromptAttachment attachment =
+        promptAttachments.updateAttachment(
+            id,
+            attachmentId,
+            request.mimeType(),
+            request.label(),
+            request.source(),
+            request.dataBase64());
+    return new AddAttachmentRequest.Response(
+        attachment.id,
+        attachment.mimeType,
+        attachment.label,
+        attachment.source,
+        attachment.createdAt);
+  }
+
+  /** Raw image bytes for normal browser and markdown image URLs. */
+  @GET
+  @Path("/{attachmentId}/content")
+  @Produces({"image/png", "image/jpeg"})
+  @APIResponse(responseCode = "200", description = "The stored PNG or JPEG bytes.")
+  @APIResponse(
+      responseCode = "404",
+      description = "No such ACTIVE workspace, or no such attachment on it.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  public Response content(
+      @PathParam("id") Long id, @PathParam("attachmentId") String attachmentId) {
+    WorkspacePromptAttachment attachment = promptAttachments.getAttachment(id, attachmentId);
+    return Response.ok(attachment.bytes, attachment.mimeType)
+        .header("Cache-Control", "no-cache")
         .build();
   }
 

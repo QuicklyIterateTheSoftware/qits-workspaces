@@ -255,13 +255,6 @@ components:
     Response17:
       type: object
       properties:
-        attachments:
-          type: array
-          items:
-            $ref: "#/components/schemas/WorkspacePromptAttachmentDataDto"
-    Response18:
-      type: object
-      properties:
         id:
           type: string
         mimeType:
@@ -272,6 +265,13 @@ components:
           $ref: "#/components/schemas/PromptAttachmentSource"
         createdAt:
           $ref: "#/components/schemas/Instant"
+    Response18:
+      type: object
+      properties:
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspacePromptAttachmentDataDto"
     Response19:
       type: object
       properties:
@@ -1092,7 +1092,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response17"
+                $ref: "#/components/schemas/Response18"
         "404":
           description: No such ACTIVE workspace.
           content:
@@ -1122,7 +1122,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response18"
+                $ref: "#/components/schemas/Response17"
         "400":
           description: "Not valid base64, not a PNG or JPEG, or an unknown source."
           content:
@@ -1145,6 +1145,49 @@ paths:
       tags:
       - Workspace Prompt Attachment Controller
   /workspaces/api/workspaces/{id}/prompt-attachments/{attachmentId}:
+    put:
+      parameters:
+      - name: attachmentId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddAttachmentRequest"
+        required: true
+      responses:
+        "200":
+          description: Updated; the same row id is preserved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response17"
+        "400":
+          description: "Not valid base64, not a PNG or JPEG, or an unknown source."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: "No such ACTIVE workspace, or no such attachment on it."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "413":
+          description: The image exceeds the configured limit.
+      summary: Update
+      tags:
+      - Workspace Prompt Attachment Controller
     delete:
       parameters:
       - name: attachmentId
@@ -1168,6 +1211,38 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
       summary: Delete
+      tags:
+      - Workspace Prompt Attachment Controller
+  /workspaces/api/workspaces/{id}/prompt-attachments/{attachmentId}/content:
+    get:
+      parameters:
+      - name: attachmentId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: The stored PNG or JPEG bytes.
+          content:
+            image/png: {}
+            image/jpeg: {}
+        "404":
+          description: "No such ACTIVE workspace, or no such attachment on it."
+          content:
+            image/png:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+            image/jpeg:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+      summary: Content
       tags:
       - Workspace Prompt Attachment Controller
   /workspaces/api/workspaces/{id}/prompt-draft:
@@ -1342,4 +1417,4 @@ paths:
       - Workspace Controller
 info:
   title: qits-workspaces API
-  version: 2026.802.191320
+  version: 2026.807.124350
