@@ -41,8 +41,8 @@ builder stage in `docker/Dockerfile`, and that is where the two
 `domain/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary.
 `domain` owns its **own datasource, persistence unit and Flyway lineage**
-(`db/workspaces/migration`, a separate H2), which is what makes this a standalone deployable rather
-than a checkout of the monorepo.
+(`db/workspaces/migration`, its own PostgreSQL database), which is what makes this a standalone
+deployable rather than a checkout of the monorepo.
 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar
@@ -133,15 +133,32 @@ tree, rebuildable — delete it and the next request re-clones), does its merges
 mirror, and reaches the served repository only by pushing. An unreachable git host is no longer a
 one-endpoint problem.
 
-`qits.workspaces.release.promotion-branches` (default `environment/dev,platform/main`) is where a
-release is **promoted**: the same commit, pushed again onto each, and those pushes are what deploy —
-qits-cd ships an application from a green build on a deploy branch, so `main` builds and these
-branches ship. Both, because a repository listens on one and this service does not read which (a
-platform service deploys from `platform/main`, an environment service from `environment/dev`); the
-cost is a second CI build on the branch nothing listens to. Fast-forward or create, never a force;
-**blank disables promotion**. A promotion that fails does not fail the release (the release push is
-already accepted) and fails per branch: the answer is a 200 whose `promotions` entry for that branch
-carries an `error`, and the failure is logged at ERROR.
+A release is **promoted**: the same commit, pushed again onto the entry branch, and that push is what
+deploys — the deployer ships an application from a green build on a branch an environment listens to,
+so `main` builds and the entry branch ships. Fast-forward or create, never a force.
+
+**One entry branch, and it is the platform's answer.** `qits.workspaces.release.entry-branch`
+(default `environment/prod`) names it, and every repository releases onto it: it is the deploy ref of
+the environment the platform serves from. It was a per-repository `deploy_branches` list, and that
+was wrong twice — every repository named the same single ref, and a release pushed onto *every*
+entry, so three tiers listed would have shipped into all three at once. Advancing a release from one
+tier to the next is a separate operation over the deployer's environment rows, and it does not exist
+yet.
+
+**What the repository decides is whether it deploys at all**, and it says so by carrying
+`.config/qits/deployments.yml` — the same file the deployer reads, whose contents are all the
+deployer's. **No spec file, no promotion**: a library or a component bundle deploys from no ref, and
+pushing one for it costs a CI build and a branch nobody reads.
+
+**A blank `entry-branch` disables promotion**, whatever a repository carries: the switch belongs to
+the deployment.
+
+**The trunk push goes quiet when there is somewhere to promote to** — it carries `-o qits.no-ci`, so
+one sha does not build twice and the entry branch's build is the release's signal. A release with
+nowhere to deploy keeps its trunk push CI-hot, because there that build is the only proof.
+
+A promotion that fails does not fail the release (the release push is already accepted): the answer
+is a 200 whose `promotions` entry carries an `error`, and the failure is logged at ERROR.
 
 One behaviour worth knowing before you debug it: **a missing repository and an unreachable
 qits-projects are different answers.** Only a 404 becomes "no such repository" (and then a 404 from
@@ -160,17 +177,25 @@ Nothing here wrote to it once every ref move became a push, and its last reader 
 workspace metadata sidecars written before they moved to this service's own tree — went once no
 ACTIVE workspace still had one there. `qits.workspaces.data-dir` is the only tree this service opens.
 
-**The event bus needs nothing.** A release publishes `SCMRelease` through the `qits-eventstream`
-jar, which ships every key it needs as a default: `qits.events.url` is the qits-net alias, and
-`docker/Dockerfile` names the outbox's database (`/data/eventstream`) because the jar's own
-`${user.home}` default has nowhere to land in an image with no passwd entry. So the image boots
-unchanged and a deployment overrides only what it wants moved:
+**Two databases, and the deployment supplies both.** `.config/qits/deployments.yml` declares
+
+    resources: postgresql:db, postgresql:eventstream:qits_workspaces_eventstream
+
+and qits-deployments creates a role and a database for each before the successor container starts,
+injecting `QITS_RESOURCE_DB_URL` / `_USERNAME` / `_PASSWORD` and the matching
+`QITS_RESOURCE_EVENTSTREAM_*` triple. `db` is this context's store, read by the `domain` jar's
+shipped defaults; `eventstream` is the outbox's, read by the `qits-eventstream` jar's. Neither has a
+default behind it: an unset variable is an unresolvable expression and the process dies at Flyway
+naming what is missing, rather than opening a store nobody meant.
+
+The `eventstream` database is named explicitly because the derived default would collide with every
+other consumer of that library on the same postgres; `db` takes the derived `qits_workspaces`.
+
+**The event bus needs nothing else.** A release publishes `SCMRelease` through the `qits-eventstream`
+jar, which ships every remaining key as a default — `qits.events.url` is the qits-net alias. Set it
+when the bus lives somewhere else:
 
     QITS_EVENTS_URL=http://qits-events:8080
-    QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL=jdbc:h2:file:/data/eventstream/h2/eventstream
-
-Both are the shipped values written out; set them when the bus lives somewhere else. The outbox is
-durable, so whatever path it ends up on must be on the data volume — `/data` already is.
 
 ## Where it answers
 

@@ -44,11 +44,14 @@ public interface ProjectsRepositories {
 
   /**
    * The four fields this context is entitled to. qits-projects' {@code RepositoryDto} also carries
-   * backup and archetype data; not binding to them is what keeps that service free to change them,
-   * and {@code ignoreUnknown} is what makes that true rather than aspirational.
+   * {@code backupUrl}, {@code archetype} and {@code lastBackup}; not binding to them is what keeps
+   * that service free to change them, and {@code ignoreUnknown} is what makes that true rather than
+   * aspirational.
    *
    * <p>{@code projectId} joined when {@code SCMRelease} landed: the event names the project a
-   * release belongs to, and this is the only place the workspaces context can learn it.
+   * release belongs to, and this is the only place the workspaces context can learn it. {@code
+   * name} joined for the same event, one defect later — {@code id} is per-platform (a self-seeded
+   * repository's is a UUID) and a committed CI selection can only name the registered name.
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
   record Repository(String id, String name, String mainBranch, String projectId) {}

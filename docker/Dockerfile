@@ -13,22 +13,24 @@
 #     docker build -t qits/workspaces:latest -f docker/Dockerfile .
 #
 # --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
-# `docker run --rm qits/workspaces:latest` dies before the HTTP listener with
+# `docker run --rm qits/workspaces:latest` dies before the HTTP listener, at Flyway, because both of
+# its datasources are the platform's generic resource contract and nothing else:
+# ${QITS_RESOURCE_DB_URL} for this context's store and ${QITS_RESOURCE_EVENTSTREAM_URL} for the
+# outbox, with no defaults behind them. An unset variable is an unresolvable expression, and the
+# process says which one is missing.
 #
-#   Unable to obtain connection from database: A file path that is implicitly relative to the current
-#   working directory is not allowed in the database URL
-#   "jdbc:h2:file:?/.qits/data/workspaces/h2/workspaces"
+# That is the refuse-to-boot stance, and it is deliberate: a database this service opens is provided
+# by the deployment or the service does not run. qits-deployments creates the role and the database
+# for each resource named in .config/qits/deployments.yml and injects the triples into the container
+# it starts, so on the platform this is arranged before the process exists.
 #
-# That `?` is `${user.home}`. UID 1001 has no /etc/passwd entry in ubi-minimal, and a native image
-# resolves user.home through getpwuid(2) rather than $HOME — so setting HOME does not fix it, and
-# both of the paths the `domain` jar defaults are `${user.home}`-rooted and have nowhere to land.
+# IT USED TO FAIL HERE FOR A WORSE REASON, kept because the shape recurs. The store was a file H2
+# whose default url was `jdbc:h2:file:${user.home}/...`, and UID 1001 has no /etc/passwd entry in
+# ubi-minimal while a native image resolves user.home through getpwuid(2) rather than $HOME — so
+# `${user.home}` became `?`, setting HOME did not fix it, and the message was about a relative path
+# rather than about a missing setting. A default with no feature in it cannot lose one.
 #
-# An /etc/passwd line for 1001 would make it boot with no environment at all. It is deliberately not
-# here, for a reason about this service rather than about images: the H2-on-local-disk arrangement is
-# a prototype, not a decided data architecture, and an image that boots out of the box and starts
-# writing a database bakes that prototype in and makes it look settled.
-#
-# So this image names one of its two `${user.home}`-rooted paths and not the other:
+# One `${user.home}`-rooted path is left, and this image names it:
 #
 #   this service's    the git mirrors (one bare per repository, plus the worktrees a merge runs in)
 #   own tree          and the workspace metadata sidecars. Named here —
@@ -36,22 +38,23 @@
 #                     the volume this image already owns, with no contract to agree with anybody
 #                     about. It is rebuildable: delete it and the next request re-clones.
 #
-#   the H2 database   is the prototype, so it is deliberately NOT named here and the service will
-#                     not start until a deployment says where it goes.
-#
-# There used to be a third, naming the shared volume of bare origins qits-artifacts serves, mounted
+# There used to be another, naming the shared volume of bare origins qits-artifacts serves, mounted
 # here so this service could write refs into them directly. That is what made a branch create, a
 # merge or a cleanup fire no post-receive and so produce no CI run. Every one of them is a push to
 # the git host over HTTP now, the sidecars this service used to keep on that volume moved to its own
 # tree, and the key is gone from the config with them — nothing here opens the shared volume, so
 # nothing here mounts it.
 #
-# So a deployment mounts a volume at /data (which this image owns, see the runtime stage) and names
-# the database, plus the one address this service cannot invent:
+# So a deployment mounts a volume at /data (which this image owns, see the runtime stage) for that
+# tree, and supplies the two database triples plus the one address this service cannot invent:
 #
 #   docker run -v qits-workspaces-data:/data \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
-#     -e QUARKUS_DATASOURCE_WORKSPACES_JDBC_URL=jdbc:h2:file:/data/workspaces/h2/workspaces \
+#     -e QITS_RESOURCE_DB_URL=jdbc:postgresql://qits-oci-postgresql:5432/qits_workspaces \
+#     -e QITS_RESOURCE_DB_USERNAME=qits_workspaces -e QITS_RESOURCE_DB_PASSWORD=… \
+#     -e QITS_RESOURCE_EVENTSTREAM_URL=jdbc:postgresql://qits-oci-postgresql:5432/qits_workspaces_eventstream \
+#     -e QITS_RESOURCE_EVENTSTREAM_USERNAME=qits_workspaces_eventstream \
+#     -e QITS_RESOURCE_EVENTSTREAM_PASSWORD=… \
 #     -e QITS_PROJECTS_URL=http://qits-projects:8080 \
 #     qits/workspaces:latest
 #
@@ -234,35 +237,33 @@ RUN chmod +x /work/qits-workspaces
 # still takes its ownership from the host — nothing in an image can fix that.)
 #
 # Creating the mount point is not the same as defaulting a data directory into existence: nothing
-# writes here until a deployment has named the database, and with no volume mounted the service still
-# refuses to start.
+# writes here until a deployment has supplied the database triples, and with no volume mounted the
+# service still refuses to start.
 RUN mkdir -p /data && chown -R 1001:root /data && chmod -R 775 /data
 
 # This service's OWN tree, on the volume mounted at /data: the per-repository git mirrors, the
 # worktrees a merge is built in, and the workspace metadata sidecars. Private and rebuildable, and
 # deliberately NOT the bare origins qits-artifacts serves — that separation is what makes
-# receive-pack the sole writer of every ref in a served repository. Not in the RUN mkdir above for
-# the same reason the H2 directory is not: a named volume mounted at /data masks whatever the image
-# put there, so the code creates it on first use.
+# receive-pack the sole writer of every ref in a served repository. Not in the RUN mkdir above: a
+# named volume mounted at /data masks whatever the image put there, so the code creates it on first
+# use.
 ENV QITS_WORKSPACES_DATA_DIR=/data/workspaces
 
-# The event outbox's database, and it IS named here, which looks like the opposite of the line above
-# until you ask whose data it is. It is not this service's: it is the qits-eventstream library's
-# private durability for events it has accepted but not yet delivered, with its own schema and its
-# own lineage, and this service reads none of it. There is no data-architecture decision to leave
-# open, so there is nothing for a deployment to declare on purpose.
+# The event outbox's database WAS named here, and the line is gone rather than moved.
 #
-# And leaving it unset is not "refuses to start" here, it is "refuses to start LATER": the jar's own
-# default roots the file at `${user.home}`, which in this image resolves to `?` (no passwd entry for
-# uid 1001 — the header argues that at length), so an unnamed outbox is a boot failure on the next
-# redeploy rather than a prompt to configure something. A service whose release door is what
-# publishes the event must not be the service the event's plumbing bricks.
+# It had to be named while the outbox was a file H2: the qits-eventstream jar's own default rooted
+# that file at `${user.home}`, which in this image resolves to `?` (no passwd entry for uid 1001 —
+# the header argues that at length), so an unnamed outbox was a boot failure on the next redeploy.
+# Naming it here was the fix, and it was an image working around a library's default.
 #
-# H2 creates the directory itself; it is not in the RUN above because a named volume mounted at /data
-# masks whatever the image put there, so a mkdir would only help the first container ever to run.
-# A deployment that wants the outbox elsewhere still overrides QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL
-# exactly as qits-ci's does.
-ENV QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL=jdbc:h2:file:/data/eventstream/h2/eventstream
+# The outbox is a PostgreSQL database of its own now, and the library reads
+# QITS_RESOURCE_EVENTSTREAM_URL / _USERNAME / _PASSWORD — injected by qits-deployments from the
+# `resources: … postgresql:eventstream:qits_workspaces_eventstream` line in .config/qits/deployments.yml.
+# There is no file, no `${user.home}`, and nothing for this image to declare. An ENV here would be
+# worse than redundant: it would override the injected credential with a dead one.
+#
+# The same is now true of this service's own store, which is why no datasource url is set anywhere in
+# this file. Both refuse to boot on an unset variable, naming what is missing.
 
 EXPOSE 8080
 USER 1001

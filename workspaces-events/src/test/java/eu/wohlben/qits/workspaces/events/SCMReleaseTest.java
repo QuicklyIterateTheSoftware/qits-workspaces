@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
  *
  * <p>These assertions are the contract qits-events and every release-train trigger were written
  * against, so a change here that is not also a change there is a cross-repo break rather than a
- * refactor. The payload's four keys are the frozen shape.
+ * refactor. The payload's five keys are the frozen shape.
  *
  * <p><b>The wire name is the class name</b> — {@code QitsEvent.signature()} returns the simple class
  * name — so this class renaming from {@code SoftwareRelease} to {@code SCMRelease} <i>is</i> the wire
@@ -33,8 +33,19 @@ class SCMReleaseTest {
 
   private static final Instant PUSHED = Instant.parse("2026-08-01T12:46:03Z");
 
+  /**
+   * A UUID row id with a name beside it — the case the {@code repositoryName} field exists for.
+   * Every fixture here uses it rather than a repository whose id happens to equal its name, because
+   * a payload where the two strings are the same cannot show which one a reader got.
+   */
   private static SCMRelease anEvent() {
-    return new SCMRelease("qits", "qits-workspaces", "release-flow", "2026.801.124603", PUSHED);
+    return new SCMRelease(
+        "qits",
+        "2af61b61-fe61-47e7-805e-48dfd6b181fa",
+        "qits-workspace-daemon",
+        "release-flow",
+        "2026.801.124603",
+        PUSHED);
   }
 
   @Test
@@ -73,9 +84,10 @@ class SCMReleaseTest {
     assertEquals("2026-08-01T12:46:03Z", json.get("occurredAt").asText());
     assertEquals(
         "{\"branch\":\"release-flow\",\"projectId\":\"qits\","
-            + "\"repository\":\"qits-workspaces\",\"version\":\"2026.801.124603\"}",
+            + "\"repository\":\"2af61b61-fe61-47e7-805e-48dfd6b181fa\","
+            + "\"repositoryName\":\"qits-workspace-daemon\",\"version\":\"2026.801.124603\"}",
         json.get("payload").asText(),
-        "four fields and no target: a release lands on the default branch by construction");
+        "five fields and no target: a release lands on the default branch by construction");
     assertEquals(true, json.get("parentId").isNull(), "a human-initiated release is a chain root");
   }
 
@@ -92,7 +104,7 @@ class SCMReleaseTest {
   }
 
   @Test
-  void aSubscriberReadsTheFourPayloadFieldsBack() {
+  void aSubscriberReadsTheFivePayloadFieldsBack() {
     SCMRelease published = anEvent();
 
     SCMRelease received =
@@ -100,7 +112,41 @@ class SCMReleaseTest {
 
     assertEquals(published.projectId(), received.projectId());
     assertEquals(published.repository(), received.repository());
+    assertEquals(published.repositoryName(), received.repositoryName());
     assertEquals(published.branch(), received.branch());
     assertEquals(published.version(), received.version());
+  }
+
+  /**
+   * The defect this field closed, stated as an assertion. A repository the projects self-seed
+   * registered carries a UUID row id, minted per platform instance, so a committed {@code
+   * repository: { exact: <name> }} could never address it — and CI logs matches only, so the
+   * pipeline silently never ran. {@code repositoryName} is the coordinate a config can hold.
+   */
+  @Test
+  void theNameIsCarriedBesideTheRowIdRatherThanInsteadOfIt() {
+    SCMRelease event = anEvent();
+
+    assertEquals("2af61b61-fe61-47e7-805e-48dfd6b181fa", event.repository());
+    assertEquals("qits-workspace-daemon", event.repositoryName());
+    assertNotEquals(
+        event.repository(),
+        event.repositoryName(),
+        "the two are different coordinates and only one of them is writable in a config");
+  }
+
+  /** A registry that answers with no name costs the event a field, never the release. */
+  @Test
+  void aMissingNameIsOmittedFromThePayloadRatherThanFailingThePublish() {
+    SCMRelease event =
+        new SCMRelease("qits", "repo-1", null, "release-flow", "2026.801.124603", PUSHED);
+
+    String payload = CanonicalJson.payload(event);
+
+    assertFalse(payload.contains("repositoryName"), payload);
+    assertEquals(
+        "{\"branch\":\"release-flow\",\"projectId\":\"qits\","
+            + "\"repository\":\"repo-1\",\"version\":\"2026.801.124603\"}",
+        payload);
   }
 }

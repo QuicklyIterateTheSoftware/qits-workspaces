@@ -21,15 +21,19 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 /**
- * The off switch: {@code qits.workspaces.release.promotion-branches} blank, and a release is exactly
- * what it was before the promotion existed.
+ * The off switch: {@code qits.workspaces.release.entry-branch} blank, and a release is exactly what
+ * it was before the promotion existed.
  *
  * <p>Its own class because the key is read at injection and a profile is per class. It is worth a
- * whole app boot for one reason: the promotion is a <b>further push into a repository</b> per deploy
- * branch, and a deployment that has not cut over to deploy branches must be able to switch it off
- * without switching off releases. Blank rather than a boolean, because a promotion with no target
- * branches is not configured — one key answers "where to" and "whether at all" with no way to set
- * them apart.
+ * whole app boot for one reason: the promotion is a <b>further push into a repository</b>, and a
+ * deployment that must stop writing deploy branches has to be able to switch it off without
+ * switching off releases. Blank rather than a boolean, because a promotion with no target branch is
+ * not configured — one key answers "where to" and "whether at all" with no way to set them apart.
+ *
+ * <p><b>The switch outranks the repository</b>, and that is what this fixture is built to show: the
+ * repository here carries {@code .config/qits/deployments.yml}, which is how it says it deploys, so
+ * a release would promote it — and the blank key stops it anyway. It belongs to the deployment; a
+ * repository that could talk its way past it would leave nothing switched off.
  */
 @QuarkusTest
 @TestProfile(ReleasePromotionDisabledTest.NoPromotion.class)
@@ -40,7 +44,7 @@ public class ReleasePromotionDisabledTest {
     public Map<String, String> getConfigOverrides() {
       // An EMPTY value, which is what a deployment writes to turn this off. SmallRye reads it as
       // "no value", which is what the Optional in ReleaseIntegrator is for.
-      return Map.of("qits.workspaces.release.promotion-branches", "");
+      return Map.of("qits.workspaces.release.entry-branch", "");
     }
   }
 
@@ -52,10 +56,18 @@ public class ReleasePromotionDisabledTest {
   @Inject WorkspaceService workspaceService;
 
   @Test
-  public void blankPromotionBranchesReleaseAndPromoteNothing() throws Exception {
+  public void aBlankEntryBranchReleasesAndPromotesNothing() throws Exception {
     String repoId = TestOrigin.create(dataDir);
     repositories.register(repoId);
     workspaceService.createMainWorkspace(repoId, "master");
+    // The repository asks to be deployed, in the file that decides it. The switch says no.
+    TestOrigin.commitOnBranch(
+        dataDir,
+        repoId,
+        "master",
+        ".config/qits/deployments.yml",
+        "deployment_target: environment\n",
+        "declare how this deploys");
 
     given()
         .contentType(ContentType.JSON)
@@ -65,6 +77,7 @@ public class ReleasePromotionDisabledTest {
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
     TestOrigin.commitOnBranch(dataDir, repoId, "solo-b", "shipped.md", "shipped\n", "the work");
+    TestOrigin.recordPushOptions(dataDir, repoId);
 
     String commitSha =
         given()
@@ -92,7 +105,12 @@ public class ReleasePromotionDisabledTest {
             "--format=%(refname)",
             "refs/heads/environment",
             "refs/heads/platform"),
-        "no deploy branch was created — none of the further pushes happened");
+        "no deploy branch was created — the further push did not happen");
+    assertEquals(
+        java.util.List.of("qits.release"),
+        TestOrigin.pushOptionsFor(dataDir, repoId, "refs/heads/master"),
+        "and the trunk push stays CI-hot: with the switch on there is no deploy branch to build"
+            + " this sha instead");
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {

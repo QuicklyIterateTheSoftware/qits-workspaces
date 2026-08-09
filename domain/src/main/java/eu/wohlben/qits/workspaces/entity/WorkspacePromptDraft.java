@@ -4,7 +4,6 @@ import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import org.hibernate.annotations.UpdateTimestamp;
@@ -35,13 +34,17 @@ public class WorkspacePromptDraft extends PanacheEntityBase {
   /**
    * Opaque composition JSON (picks, references, canvas, chat draft, …), never read by the server.
    */
-  @Lob
-  @Column(nullable = false)
+  /*
+   * `text`/`bytea` via columnDefinition, and NOT @Lob — the one entity mapping the move to postgres
+   * had to change. On H2 a @Lob String was a clob and the two agreed; on postgres @Lob means a LARGE
+   * OBJECT, so Hibernate binds an oid and the insert fails against the column V1 declares. Unbounded
+   * either way, which is what these fields need.
+   */
+  @Column(columnDefinition = "text", nullable = false)
   public String content;
 
   /** The launch-ready markdown the client serialized — served verbatim to the agent, nullable. */
-  @Lob
-  @Column(name = "serialized_prompt")
+  @Column(name = "serialized_prompt", columnDefinition = "text")
   public String serializedPrompt;
 
   /**

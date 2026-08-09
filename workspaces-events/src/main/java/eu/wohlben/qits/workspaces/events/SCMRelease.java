@@ -30,16 +30,33 @@ import java.util.UUID;
  * and stamps no version; there is no release to announce, and an event that fired for both would
  * make "a release happened" unlistenable.
  *
+ * <p><b>{@code repositoryName} is what a committed selection can address, and {@code repository}
+ * cannot.</b> A repository's row id is whatever its registry minted: for a repository the platform
+ * manifest declares it happens to equal the name, but a repository registered by the projects
+ * self-seed reconcile gets a UUID — minted per platform instance, different on every one. A CI
+ * trigger matching {@code repository: { exact: qits-projects-daemon }} therefore matched nothing on
+ * a platform where that repository is a UUID row, and matched silently: CI logs matches, never
+ * non-matches, so the daemons' release pipelines simply never fired. The name is the stable
+ * coordinate a repository can write down about itself, so the event carries both — the id for
+ * anyone joining back to the registry, the name for anyone selecting on it.
+ *
+ * <p><b>{@code repository} is unchanged and stays.</b> Every existing consumer selects on it and
+ * every one of them names a manifest repository, where id and name are the same string; removing or
+ * repointing the field would break those for nothing.
+ *
  * <p><b>{@code eventId} and {@code occurredAt} are components and stay out of the payload.</b> The
  * library's canonical serializer excludes everything {@link QitsEvent} declares, and these two
  * accessors are those declarations — so identity and time travel in the envelope and the payload is
- * exactly the four fields the platform specified: {@code projectId}, {@code repository}, {@code
- * branch}, {@code version}. Reading a payload back therefore yields a fresh id and a null time,
- * which is correct: a received event's identity and clock are the envelope's.
+ * exactly the five fields: {@code branch}, {@code projectId}, {@code repository}, {@code
+ * repositoryName}, {@code version}. Reading a payload back therefore yields a fresh id and a null
+ * time, which is correct: a received event's identity and clock are the envelope's.
  *
  * @param projectId the project the repository belongs to, as qits-projects names it
  * @param repository the repository that released, by string id — never a reference into another
  *     context's tables
+ * @param repositoryName the same repository by its registered name, the coordinate a committed CI
+ *     selection can carry. Nullable: a registry that does not answer with one costs the event a
+ *     field, never the release
  * @param branch the SOURCE branch that was released
  * @param version the release stamp, {@code YYYY.MMDD.HHMMSS} — also the name of the tag the release
  *     push created
@@ -49,6 +66,7 @@ public record SCMRelease(
     UUID eventId,
     String projectId,
     String repository,
+    String repositoryName,
     String branch,
     String version,
     Instant occurredAt)
@@ -62,7 +80,12 @@ public record SCMRelease(
 
   /** The constructor a publisher uses: the facts, with the identity taken care of. */
   public SCMRelease(
-      String projectId, String repository, String branch, String version, Instant occurredAt) {
-    this(null, projectId, repository, branch, version, occurredAt);
+      String projectId,
+      String repository,
+      String repositoryName,
+      String branch,
+      String version,
+      Instant occurredAt) {
+    this(null, projectId, repository, repositoryName, branch, version, occurredAt);
   }
 }

@@ -98,18 +98,30 @@ id; the two are in different databases and a foreign key cannot span them.
 `domain/src/main/resources/db/workspaces/migration/`, hand-written, its own lineage on its own
 datasource. Never touch the monorepo's `db/migration` — that is a different database.
 
-The lineage is `V1` (workspace, workspace_event), `V2` (service_event, workspace_bootstrap_run,
-workspace_prompt_draft, workspace_prompt_attachment), `V3` (one active workspace per branch),
-then `V4` (service_event.workspace_row_id).
-`V1`'s header says the `V2` tables were deliberately left out; that was true when it was written and
-is not any more — `V2`'s header explains why. Likewise `V1`'s "no unique constraint" note is
-superseded by `V3` for the branch. Extend, never renumber, and never edit an applied file's body:
-Flyway checksums it.
+**The lineage is one `V1`, and it starts again there.** The four H2 files (`V1` workspace +
+workspace_event, `V2` the four host tables, `V3` one active workspace per branch, `V4`
+service_event.workspace_row_id) were deleted rather than continued when the store moved to
+PostgreSQL: the move is an unwrap and a re-bootstrap, so no postgres database ever ran them and no
+`V5__move_to_postgres.sql` had a reader. `V1`'s header records what the translation changed and what
+it deliberately kept. **From here the ordinary rule is back**: extend, never renumber, and never edit
+an applied file's body — Flyway checksums it.
 
-**H2 has no partial indexes.** `create unique index … where …` is a syntax error, so a rule that
-only applies to some rows carries its predicate in a generated column instead and relies on unique
-indexes ignoring NULLs — see `V3`'s `active_branch`. Verify any index syntax against the H2 version
-actually on the classpath before writing the migration; it is the only target.
+**The target is PostgreSQL 18.4** — the tag `images/qits-oci-postgresql` is built from, and the
+version the suites' embedded binaries are, so a migration is proved against the engine it ships on.
+Two H2 habits are gone with it: a rule that applies to some rows is a **partial unique index** now
+(`create unique index … where …`, which is what `uq_workspace_active_branch` finally is, instead of
+the generated column H2 forced), and `clob`/`blob` are `text`/`bytea`. The second is also an entity
+rule — see below.
+
+**`@Lob` is banned on this context's entities.** On H2 a `@Lob String` was a clob and the two agreed;
+on postgres `@Lob` means a LARGE OBJECT, so Hibernate binds an oid and the insert fails against the
+column the migration declares. Spell it `@Column(columnDefinition = "text")` — or `"bytea"` for
+bytes — as `Workspace.preamble`, `WorkspacePromptDraft.content`, `ServiceEvent.logExcerpt` and
+`WorkspacePromptAttachment.bytes` do.
+
+**Native SQL is postgres SQL.** `WorkspacePromptDraftRepository.upsert` is the only place this repo
+writes any, and it is `insert … on conflict (…) do update` — H2's `merge into … key (…)` until the
+move.
 
 Remember that workspace rows are **soft-deleted**. A child table in another context gets no cascade;
 publish through `WorkspaceResolved` instead, and fire it synchronously inside the resolving
@@ -359,8 +371,10 @@ Three kinds of git call, and the distinction decides correctness:
   to establish.
 
 Only a release's pushes carry `-o qits.release` — the default branch's, and the promotion that
-follows it; nothing else writes the default branch, so nothing else needs an option. The mirror is a
-**cache**: delete it and the next request re-clones.
+follows it; nothing else writes the default branch, so nothing else needs an option. The default
+branch's push carries a **second** option, `-o qits.no-ci`, when the release also has a deploy
+branch to push: one sha on two refs is two builds and only the deploy branch's means anything. The
+mirror is a **cache**: delete it and the next request re-clones.
 
 ## The two doors: release and integrate
 
@@ -368,7 +382,8 @@ follows it; nothing else writes the default branch, so nothing else needs an opt
 branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
 version into the same index, commits both as **one** commit — `release(<version>): <summary>` —
 **pushes** it — together with an annotated **tag** named the version — publishes `SCMRelease`, and
-**promotes** the same commit onto the environment branch, which is what deploys it.
+**promotes** the same commit onto every deploy branch the repository's own spec declares, which is
+what deploys it.
 
 **`POST /workspaces/api/workspaces/{id}/integrate`** lands a workspace on **its parent branch** — a
 `task/…` on the `epic/…` it forked from — as one pushed commit `integrate(<source>): <summary>`. No
@@ -555,54 +570,70 @@ copy.
 
 ## The promotions: the further pushes, and the ones that deploy
 
-A release pushes the released commit **again**, onto every branch in
-`qits.workspaces.release.promotion-branches` (`environment/dev,platform/main` in the shipped
-defaults). Those pushes are what ship: qits-cd registers and deploys an application from a green
-build **on a deploy branch**, so `main` is the integration trunk that builds and the deploy branches
-are what deploys. Pushing only `main` builds and deploys nothing — the same rule the direct-push
-escape hatch follows.
+A release pushes the released commit **again**, onto the **entry branch**. That push is what ships:
+the deployer registers and deploys an application from a green build on a branch an environment
+listens to, so `main` is the integration trunk that builds and the entry branch is what deploys.
+Pushing only `main` builds and deploys nothing — the same rule the direct-push escape hatch follows.
 
-- **Every branch, because a repository listens on one and this service does not know which.** A
-  platform service deploys from `platform/main` and an environment service from `environment/dev`;
-  the repository's own spec says which it is, and reading that spec here is a **recorded debt**. The
-  price of not guessing is a second CI build on the branch nothing listens to, which is accepted.
-- **Separate pushes, in this order, never one atomic push.** The default branch first, byte for byte
-  the push it always was, then each deploy branch in the configured order. A promotion riding along
-  atomically would let a stuck deploy branch refuse the *release*, which is the one ref this flow
-  exists to move — and would let one stuck deploy branch block the other.
+- **One branch, and it is the platform's answer.** `qits.workspaces.release.entry-branch`
+  (`environment/prod` shipped) names it, and it is the same for every repository: the deploy ref of
+  the environment the platform serves from. It was a per-repository list read out of each spec's
+  `deploy_branches`, and that was wrong twice — every repository named the same single ref, so it
+  was one answer copied into thirteen files, and a release pushed its sha onto *every* entry, so
+  three tiers listed would have shipped into all three in the same second. A fan-out, not a ladder.
+  Advancing a release up a ladder of tiers is a separate operation over the deployer's environment
+  rows and does not exist yet.
+- **What the repository still decides is whether it deploys at all**, and it says so by carrying
+  `.config/qits/deployments.yml`. No file, no promotion: a library or an SPA deploys from no ref,
+  and pushing one for it buys a CI build and a branch nobody reads. Everything *inside* the file is
+  the deployer's, and `DeploymentSpecReader` opens none of it — it is a five-line `isRegularFile`
+  check now, down from a vendored ~120-line line parser.
+- **Separate pushes, in this order, never one atomic push.** The default branch first, then the
+  entry branch. A promotion riding along atomically would let a stuck deploy branch refuse the
+  *release*, which is the one ref this flow exists to move.
+- **The trunk push goes quiet when there is somewhere to promote to.** It carries `-o qits.no-ci` as
+  well as `-o qits.release`, so one sha does not build twice — the entry branch's build is the
+  release's signal. A repository that promotes nowhere keeps its trunk push CI-hot: there that build
+  is the only proof the release is sound. The promotion push is never quiet.
 - **Create or fast-forward, never a force.** A push to a ref that is not there is a create, which is
   the ordinary first case for a repository that has never deployed. A non-fast-forward means the
   branch holds something the release is not built on, and it is reported rather than overwritten.
-- **Each push carries `-o qits.release` like the release push it follows.** A deploy branch is not
+- **The push carries `-o qits.release` like the release push it follows.** A deploy branch is not
   the repository's default ref, so the protection hook does not read it today; the option is
-  fast-forward-only at the hook, which is exactly what these pushes are, so it costs nothing and
-  keeps one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)`
-  again.
-- **Blank disables all of them.** One key answers "where to" and "whether at all"; a promotion with
-  no target branches is not configured. A deployment that has not cut over to deploy branches empties
-  the key and a release is exactly what it was before.
+  fast-forward-only at the hook, which is exactly what this push is, so it costs nothing and keeps
+  one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)` again.
+- **A blank `entry-branch` disables promotion, and outranks the repository.** The key is both the
+  destination and the kill switch; a deployment that must stop writing deploy branches has to be
+  able to, and a switch a repository could talk its way past would not be one.
+  `ReleasePromotionDisabledTest` holds it against a repository that *does* carry a spec.
+- **`ReleaseIntegrator` says where releases land, once, at boot.** Both states it reports are
+  otherwise silent: a release that promotes nowhere is a 200 with an empty `promotions`, and an
+  entry branch no environment listens to builds and deploys nothing at all.
 
-**A failed promotion is a partial success, not a failed release — and it is partial per branch**,
-and that decision lives in `ReleaseIntegrator` (the class javadoc says why, beside the code). By the
-time it runs receive-pack has accepted the release: the commit is on the default branch, the tag is
-on the host, post-receive has fired and CI is building. Throwing there would cost the caller its
-version and its sha, skip `SCMRelease` and leave the workspace ACTIVE on a branch that is already
-merged — and undo none of the push. So it is **200 with an `error` on that branch's entry**: the
-sentence naming what refused it and which sha to push once the branch is sorted out, logged at ERROR.
-A branch that refuses does not stop the branches after it. The precedent is `deleteLandedBranch`,
-which is best-effort for the same reason: once the release is in, nothing after it may pretend it is
-not.
+**A failed promotion is a partial success, not a failed release**, and that decision lives in
+`ReleaseIntegrator` (the class javadoc says why, beside the code). By the time it runs receive-pack
+has accepted the release: the commit is on the default branch, the tag is on the host, post-receive
+has fired and CI is building. Throwing there would cost the caller its version and its sha, skip
+`SCMRelease` and leave the workspace ACTIVE on a branch that is already merged — and undo none of the
+push. So it is **200 with an `error` on that branch's entry**: the sentence naming what refused it
+and which sha to push once the branch is sorted out, logged at ERROR. The precedent is
+`deleteLandedBranch`, which is best-effort for the same reason: once the release is in, nothing after
+it may pretend it is not.
 
-The response carries `promotions` for it — one `{branch, error}` per configured deploy branch, in
-the configured order, `error` null when that push landed — on the record **both** release doors
-answer with. It is empty when promotion is off, and **a plain integrate promotes nothing**: it
-released nothing to deploy.
+The response carries `promotions` for it — `{branch, error}`, `error` null when the push landed — on
+the record **both** release doors answer with. **A list holding at most one entry**: it stays a list
+because the tier ladder will make it plural again, for a reason the old per-repository list never
+had. It is empty when the repository carries no spec, when promotion is off, and for **a plain
+integrate**, which released nothing to deploy.
+
+**This repository carries its own** `.config/qits/deployments.yml`, so it releases through the
+mechanism it implements.
 
 ## The SCMRelease event
 
-A **release** publishes `SCMRelease {projectId, repository, branch, version}` the instant the push is
-accepted. A plain integrate publishes nothing — an event that fired for both would make "a release
-happened" unlistenable, which is the one thing this event exists to be.
+A **release** publishes `SCMRelease {projectId, repository, repositoryName, branch, version}` the
+instant the push is accepted. A plain integrate publishes nothing — an event that fired for both
+would make "a release happened" unlistenable, which is the one thing this event exists to be.
 
 **It means source control has this release, and nothing more.** It does not mean an artifact exists:
 that statement is qits-ci's own `SoftwareRelease`, published once per artifact when a repository's
@@ -610,7 +641,7 @@ release pipeline goes green, and the gap between the two is a whole build. The e
 `SoftwareRelease` until 2026-08-01 and was read as a statement about a package, which worked by
 timing rather than by design — see the superproject's `docs/scm-release-split-notes.md`. **The wire name is
 the class name** (`QitsEvent.signature()` returns the simple class name), so the class rename was the
-wire rename; the payload's four fields did not change.
+wire rename; the payload's fields did not change.
 
 `ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SCMReleaseAnnouncer` is
 the implementation, so the domain module stays free of the bus and its transport (the `RunAnnouncer`
@@ -618,7 +649,7 @@ precedent in qits-ci, copied down to the package name). It is announced **after 
 the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
 statement conditional on the transaction would be silent about a release that really happened.
 
-Four things about it are easy to undo by accident:
+Five things about it are easy to undo by accident:
 
 - **`SCMReleaseAnnouncer` is a `@DefaultBean`.** The suite's `FakeReleaseAnnouncer` must win,
   and two unqualified beans of one type fail the build at `ArcProcessor#validate` — for every test at
@@ -628,12 +659,21 @@ Four things about it are easy to undo by accident:
   qits-ci measured both halves of that on deployed binaries: without the targets every publish dies
   with Jackson's "no serializer found" and the event never even reaches the outbox; without the
   mix-in `classNames` entry the payload silently gains `eventId`. A JVM suite cannot see either.
-- **The payload is four fields and stays four.** `eventId` and `occurredAt` are record components
-  and are excluded by the library's mix-in, which is why they can be components at all;
-  `SCMReleaseTest` asserts the exact canonical string.
-- **`RepositoryLookup.RepositoryView` widened to `(id, projectId, mainBranch)`** for this and for
-  nothing else. `projectId` is nullable: a registry that does not answer with one costs the event a
-  field, never the release.
+- **`eventId` and `occurredAt` stay out of the payload.** They are record components and are
+  excluded by the library's mix-in, which is why they can be components at all; `SCMReleaseTest`
+  asserts the exact canonical string, so a field added here is a deliberate edit there.
+- **`repositoryName` is the field a committed CI selection can address, and `repository` is not.**
+  A row id is whatever the platform instance's registry minted: for a repository the platform
+  manifest declares it equals the name, but a repository the projects self-seed reconcile
+  registered gets a **UUID**, different on every instance. So
+  `repository: { exact: qits-projects-daemon }` in a `.config/qits/ci-event-*.yml` matched nothing
+  on this platform, and matched **silently** — CI logs matches and never non-matches, so the two
+  daemons' release pipelines simply never fired. Both fields ship: the id for anyone joining back
+  to the registry, the name for anyone selecting on it. A selection that names a manifest
+  repository keeps matching `repository` and is honest doing so.
+- **`RepositoryLookup.RepositoryView` widened to `(id, name, projectId, mainBranch)`** for this and
+  for nothing else. `name` and `projectId` are both nullable: a registry that does not answer with
+  one costs the event a field, never the release.
 
 ## Authentication
 
@@ -664,7 +704,7 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
 
 - **App-level config lives in `service/src/main/resources/application.properties`, and the tests
   inherit it.** That file is on the test classpath and Quarkus merges it, so
-  `service/src/test/resources/application.properties` holds test-only *overrides* (in-memory H2,
+  `service/src/test/resources/application.properties` holds test-only *overrides* (the test port,
   `flyway…clean-at-start`, the on-disk trees under `target/`) and nothing else. Never
   re-declare a shipped setting such as `quarkus.rest.path` there: the copy is free to drift from
   what ships, and then a green suite proves nothing.
@@ -680,17 +720,28 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   closed the first of those; nothing closes the second, and the native build widened the gap —
   see "the two rules" above for what else only the artifact can tell you.
 - `NativeImageContractTest` (one per module) holds the native-image invariants a JVM run *can*
-  hold: no `AUTO_SERVER` in the shipped datasource url, every nested record of `QitsConfig` and of
+  hold: the shipped datasource being the bare `QITS_RESOURCE_DB_*` contract with no `${user.home}`
+  anywhere behind it — the two spellings of "config the binary cannot boot on" this repo paid for,
+  `AUTO_SERVER` and a home-rooted file path — every nested record of `QitsConfig` and of
   `CaptureResource`'s payloads present in its `@RegisterForReflection(targets)`, and
   `CaptureCorsRoute` reading an application-owned config key. None of them proves a binary works —
   they prevent the silent re-introduction of what booting one already caught.
+- **The suites run on a real postgres they spawn themselves.** Zonky resolves the binaries as
+  ordinary Maven artifacts and `EmbeddedPg` starts one child process per surefire JVM — never
+  Testcontainers, never a dev service, so the clone-alone no-docker rule survives the move off H2.
+  Its port is chosen at run time, which is why the url/username/password are not in any properties
+  file: `EmbeddedPgConfigSource` supplies them at ordinal 500, registered through
+  `META-INF/services`. Both classes are **copied per module** (`domain`'s `…workspaces.testdb`,
+  `service`'s `…workspaces.wiring.testdb`), because sharing them would mean a test-jar dependency
+  between two modules that deliberately have none — the same reason the `Fake*` doubles are
+  duplicated. **Every (module, datasource) pair names a distinct database** so two suites on one host
+  cannot mean the same one.
 - **The event bus is dark in `%dev` and `%test`, but its datasource is not.**
   `qits.eventstream.enabled=false` stops publishing and sweeping; Quarkus still opens the connection
-  and runs Flyway at boot, so `service/src/test/resources/application.properties` points the
-  `eventstream` datasource at in-memory H2. Without it every run would create and migrate a real
-  `~/.qits/data/eventstream` and two builds on one host would race for its single-writer file. A test
-  that wants the bus real turns it back on for itself against a stub, never against a live
-  qits-events.
+  and runs Flyway at boot, so `service`'s `EmbeddedPgConfigSource` supplies the `eventstream`
+  datasource's triple beside the `workspaces` one. Without it every run would try to open the
+  database a deployment injects, and fail on an unresolvable expression. A test that wants the bus
+  real turns it back on for itself against a stub, never against a live qits-events.
 - `FakeRepositoryLookup` still wins over `wiring/HttpRepositoryLookup` with no change on your part:
   the latter is `@DefaultBean`, which yields to any other bean of the type. **Keep that annotation.**
   Drop it and the two are an ambiguous dependency — the build fails at `ArcProcessor#validate`, not
@@ -702,9 +753,12 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   left its `.class` in `target/`, and the next `-Dnative` run failed with an ambiguous
   `RepositoryLookup` naming a class no longer in `src/`. `mvn clean` — the symptom names a file you
   cannot find, which is the confusing part.
-- A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
-  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first,
-  or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.
+- `Port already bound: 8081` is settled rather than flaky now: `service`'s test properties set
+  `quarkus.http.test-port=0`, so the OS picks and RestAssured is told. It was two failures wearing
+  one message — `@QuarkusTest` restarts racing each other for the default test port
+  (`migration-plan.md` §9 item 14), and 8081 being where the platform's own npm registry answers on
+  the machine this repo is most likely built on. Keep the line; it is a test-only value and belongs
+  in that file.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
   returns a repo id; pair it with `FakeRepositoryLookup.register`. Where those origins go is
   **`qits.test.origins-dir`, a key no deployment has** — the suite needs somewhere to put a fixture
@@ -713,6 +767,12 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   suite would prove nothing about the separation. The properties files also set
   `qits.workspace.git.mirror-freshness-ms=0`, because a fixture that changes between two assertions
   must never be served from a window.
+- `TestOrigin.recordPushOptions` installs a real `pre-receive` hook on a fixture origin that logs
+  each ref with the push options it arrived under, and `pushOptionsFor` reads one back. It is the
+  only way to see a `--push-option` from outside the pushing process, and it is what makes "the
+  trunk push carries `qits.no-ci` exactly when there is a deploy branch" an assertion about the
+  shipped argv. Install it *after* the fixture commits: it records every push from then on, and the
+  reader takes the first line for a ref.
 - `TestGit.exec` is how a test runs git in one of those fixture directories. It is a thin static
   helper over `gitmirror`'s `GitCli`, and it replaced `GitExecutor` — a production CDI bean whose
   only remaining callers were tests. `GitCli`'s own properties (the per-line tap, the unterminated
@@ -738,3 +798,11 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   `./mvnw verify -DskipITs=false`. Keep both properties: the default keeps `mvn verify` runnable
   anywhere, and the self-skip keeps a deliberate `-DskipITs=false` from failing on a machine that
   simply has no image.
+  - Their image name comes from `-Dqits.workspace.image=`, falling back to `qits/workspace:latest`.
+    That fallback is a *local-store* name and stays one: the check is `docker image inspect`, which
+    never pulls. The service itself no longer runs that tag — it runs the pinned, published
+    `localhost:8081/qits/workspace:<calver>` from `microprofile-config.properties` — so to exercise
+    the ITs against the shipped image, pull it and pass it:
+    `./mvnw verify -DskipITs=false -Dqits.workspace.image=localhost:8081/qits/workspace:<calver>`.
+    The fallback is deliberately not a copy of the pin; the release train moves the pin and would
+    not move five test literals.

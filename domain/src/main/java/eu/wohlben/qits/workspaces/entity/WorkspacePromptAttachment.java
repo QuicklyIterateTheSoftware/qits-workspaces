@@ -6,7 +6,6 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import org.hibernate.annotations.CreationTimestamp;
@@ -48,8 +47,13 @@ public class WorkspacePromptAttachment extends PanacheEntityBase {
   public PromptAttachmentSource source;
 
   /** The raw image bytes (already base64-decoded), served to the agent as an image block. */
-  @Lob
-  @Column(nullable = false)
+  /*
+   * `text`/`bytea` via columnDefinition, and NOT @Lob — the one entity mapping the move to postgres
+   * had to change. On H2 a @Lob String was a clob and the two agreed; on postgres @Lob means a LARGE
+   * OBJECT, so Hibernate binds an oid and the insert fails against the column V1 declares. Unbounded
+   * either way, which is what these fields need.
+   */
+  @Column(columnDefinition = "bytea", nullable = false)
   public byte[] bytes;
 
   @CreationTimestamp

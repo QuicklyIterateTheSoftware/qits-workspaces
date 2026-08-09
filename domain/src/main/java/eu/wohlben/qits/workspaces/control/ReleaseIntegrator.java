@@ -11,7 +11,9 @@ import eu.wohlben.qits.workspaces.gitmirror.PushOutcome;
 import eu.wohlben.qits.workspaces.gitmirror.PushSpec;
 import eu.wohlben.qits.workspaces.gitmirror.RepoMirror;
 import eu.wohlben.qits.workspaces.gitmirror.TagOutcome;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -109,22 +111,39 @@ import org.jboss.logging.Logger;
  *
  * <h2>The promotions, and why a failed one does not fail the release</h2>
  *
- * A release pushes the same commit again onto <b>every</b> deploy branch
- * ({@code qits.workspaces.release.promotion-branches}, {@code environment/dev,platform/main} by
- * default). Those pushes are what deploy: qits-cd registers and deploys an application from a green
- * build on a deploy branch, so the default branch builds and the deploy branches ship. A plain
- * integrate promotes nothing — it released nothing to deploy.
+ * A release pushes the same commit again onto the <b>entry branch</b>. That push is what deploys:
+ * the deployer registers and deploys an application from a green build on a branch an environment
+ * listens to, so the default branch builds and the entry branch ships. A plain integrate promotes
+ * nothing — it released nothing to deploy.
  *
- * <p><b>Every branch, because a repository listens on one and this flow does not know which.</b> A
- * platform service deploys from {@code platform/main} and an environment service from {@code
- * environment/dev}; the repository's own spec says which it is, and reading that spec here is a
- * recorded debt. Pushing both costs a second CI build on the branch nothing listens to, which is the
- * accepted price of not guessing.
+ * <p><b>One branch, and it is the platform's answer.</b> {@code
+ * qits.workspaces.release.entry-branch} names it, and it is the same for every repository: the
+ * deploy ref of the environment the platform serves from. This was a per-repository list read out of
+ * each spec's {@code deploy_branches}, and it was wrong twice — every repository named the same
+ * single ref, so it was one answer copied into thirteen files, and a release pushed its sha onto
+ * <em>every</em> entry, so three tiers listed would have shipped into all three in the same second.
+ * A fan-out, not a ladder. Advancing a release up a ladder of tiers is a separate operation over the
+ * deployer's environment rows, and it does not exist yet.
+ *
+ * <p><b>What the repository still decides is whether it deploys at all</b>, and it says so by
+ * carrying {@code .config/qits/deployments.yml} — the merge worktree is checked out at the released
+ * tree by the time the promotions run, so {@link DeploymentSpecReader} only has to look. No file, no
+ * promotion: a library or a client bundle deploys from no ref, and pushing one for it buys a second
+ * build and a branch nobody reads.
+ *
+ * <p><b>Blank config is the kill switch, and it wins.</b> A deployment that must stop writing deploy
+ * branches has to be able to stop, and a switch a repository can talk its way past is not one.
+ *
+ * <p><b>The trunk push goes quiet when there is somewhere to promote to.</b> One commit reaching two
+ * refs is two CI runs of one sha, and only one of them signals anything — so the default branch's
+ * push carries {@code -o qits.no-ci} and the entry branch's build is the release's signal. A
+ * repository that promotes nowhere keeps its trunk push CI-hot, because there that build is the only
+ * proof the release is sound.
  *
  * <p>Separate pushes, not one atomic push, and the order is fixed: the default branch first, byte
- * for byte the push it always was, then each deploy branch in the configured order. A promotion that
- * rode along atomically would let a stuck deploy branch refuse the <i>release</i>, which is the one
- * ref this flow exists to move — and would let one stuck deploy branch block the other.
+ * for byte the push it always was, then the entry branch. A promotion that rode along atomically
+ * would let a stuck deploy branch refuse the <i>release</i>, which is the one ref this flow exists
+ * to move.
  *
  * <p><b>A failed promotion is a partial success, not a failed release, and it is partial per
  * branch.</b> By the time it runs, receive-pack has accepted the release: the commit is on the
@@ -150,21 +169,50 @@ public class ReleaseIntegrator {
   static final String RELEASE_PUSH_OPTION = "qits.release";
 
   /**
-   * The deploy branches a release is promoted to once the default branch has it — {@code
-   * environment/dev,platform/main} in the shipped defaults (domain's {@code
-   * microprofile-config.properties}). <b>Blank or absent disables promotion altogether</b> and a
-   * release is then exactly what it was before.
+   * The push option the git host reads as "move this ref without firing a CI build". It rides the
+   * <b>trunk</b> push of a release that has deploy branches, so one sha does not build twice.
+   */
+  static final String NO_CI_PUSH_OPTION = "qits.no-ci";
+
+  /**
+   * <b>The entry branch: where a release lands.</b> One branch, and the same one for every
+   * repository on the platform — the deploy ref of the environment the platform serves from.
    *
-   * <p>A list because a repository deploys from exactly one of them and this service does not know
-   * which: the deploy target is the repository's own spec, which is a debt to read here. Both are
-   * pushed, one is listened to.
+   * <p>It was a per-repository list until it was neither. Each spec named {@code deploy_branches},
+   * every one of them named the same single ref, and a release pushed its sha onto <em>every</em>
+   * entry — so with three tiers a release would have shipped into dev, preprod and prod in the same
+   * second. That is a fan-out, not a ladder, and the list only ever behaved because it had one
+   * element. Advancing a release from one tier to the next is a separate operation over the
+   * environment rows and is not this.
+   *
+   * <p><b>Blank is the kill switch</b>, and it keeps that job: a deployment that must stop writing
+   * deploy branches has to be able to, and a switch a repository could talk its way past would not
+   * be one. A repository with no spec file at all is still promoted nowhere and never reads this —
+   * a library or an SPA declares no deploy ref, and pushing one for it buys a CI build and a branch
+   * nobody reads.
    *
    * <p>{@code Optional} rather than a {@code defaultValue}, because SmallRye reads an empty property
-   * value as "no value" — which is the off switch — and would fail a plain {@code List}. Same
-   * arrangement, same reason, as {@code WorkspaceContainerFactory}'s resource caps.
+   * value as "no value" — which is the off switch. Same arrangement, same reason, as {@code
+   * WorkspaceContainerFactory}'s resource caps.
    */
-  @ConfigProperty(name = "qits.workspaces.release.promotion-branches")
-  Optional<List<String>> promotionBranches;
+  @ConfigProperty(name = "qits.workspaces.release.entry-branch")
+  Optional<String> entryBranch;
+
+  /**
+   * Say where releases land, once, at boot.
+   *
+   * <p>Both states this reports are otherwise silent. A release that promotes nowhere is a 200 with
+   * an empty {@code promotions} — indistinguishable, from the outside, from a repository that
+   * declares no deployment — and an entry branch pointing at a ref no environment listens to builds
+   * and deploys nothing at all. Neither shows up until someone wonders why a release did not ship,
+   * and by then the line that would have answered it is a boot ago.
+   */
+  void onStart(@Observes StartupEvent event) {
+    configuredEntryBranch()
+        .ifPresentOrElse(
+            branch -> LOG.infof("Releases land on %s", branch),
+            () -> LOG.warn("No release entry branch is configured: a release promotes nowhere"));
+  }
 
   @Inject GitMirrorRegistry mirrors;
 
@@ -213,9 +261,11 @@ public class ReleaseIntegrator {
    *     as a name
    * @param targetBranch what it landed on
    * @param publishedAt when the push was accepted
-   * @param promotions one entry per configured deploy branch, in the configured order — <b>empty
-   *     when promotion is disabled</b> and for every {@link Mode#PLAIN} run. An entry exists whether
-   *     that promotion landed or not; its {@code error} is what tells those apart.
+   * @param promotions one entry per deploy branch this repository declares, in the order it
+   *     declares them — <b>empty when the repository declares none</b>, when it carries no
+   *     deployments spec at all, when promotion is switched off, and for every {@link Mode#PLAIN}
+   *     run. An entry exists whether that promotion landed or not; its {@code error} is what tells
+   *     those apart.
    */
   public record Landed(
       String version,
@@ -294,19 +344,24 @@ public class ReleaseIntegrator {
         tagged = true;
       }
 
+      // [7b] whether this repository deploys, answered off the released tree itself — the worktree
+      // is checked out at it, so its spec is a local file. Before the push, so the trunk push
+      // already knows whether it should go quiet.
+      List<String> entryBranches =
+          run.mode() == Mode.RELEASE ? promotionTargets(worktree, repoId) : List.of();
+
       // [8] the push, which is the compare-and-swap — and, with the tag riding along, the
-      // uniqueness check too.
-      Instant publishedAt = push(worktree, targetBranch, run.mode(), version);
+      // uniqueness check too. Quiet when the entry branch is about to build the same sha.
+      Instant publishedAt =
+          push(worktree, targetBranch, run.mode(), version, !entryBranches.isEmpty());
       pushed = true;
 
-      // [8b] the promotions: the same commit onto every deploy branch, as further pushes. The
-      // release is already irreversible above, so each one reports rather than throws — and a
-      // branch that refuses does not stop the branches after it.
+      // [8b] the promotion: the same commit onto the entry branch, as a further push. The release
+      // is already irreversible above, so it reports rather than throws. A loop over at most one
+      // entry, because the response shape is a list and a tier ladder will make it plural again.
       List<Promotion> promotions = new ArrayList<>();
-      if (run.mode() == Mode.RELEASE) {
-        for (String branch : promotionTargets()) {
-          promotions.add(promote(worktree, branch, repoId, targetBranch, commitSha));
-        }
+      for (String branch : entryBranches) {
+        promotions.add(promote(worktree, branch, repoId, targetBranch, commitSha));
       }
 
       LOG.infof(
@@ -491,7 +546,16 @@ public class ReleaseIntegrator {
   // [8] the push
   // ---------------------------------------------------------------------------------------------
 
-  private Instant push(MirrorWorktree worktree, String target, Mode mode, String version) {
+  /**
+   * The trunk push.
+   *
+   * @param quiet whether this sha is about to reach a deploy branch too. It carries {@code -o
+   *     qits.no-ci} when it is: one commit on two refs is two builds of one sha, and the deploy
+   *     branch's is the one that means something. A release with nowhere to deploy stays CI-hot,
+   *     because there that build is the only proof the release is sound.
+   */
+  private Instant push(
+      MirrorWorktree worktree, String target, Mode mode, String version, boolean quiet) {
     PushSpec spec = PushSpec.of(PushSpec.Ref.branch("HEAD", target));
     if (version != null) {
       // All or nothing. A refused tag must not leave the branch advanced, and a refused branch must
@@ -507,6 +571,9 @@ public class ReleaseIntegrator {
     // else, so a plain integrate's target is an ordinary ref and an ordinary push moves it.
     if (mode == Mode.RELEASE) {
       spec = spec.withOption(RELEASE_PUSH_OPTION);
+    }
+    if (quiet) {
+      spec = spec.withOption(NO_CI_PUSH_OPTION);
     }
     PushOutcome outcome;
     try {
@@ -558,16 +625,41 @@ public class ReleaseIntegrator {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * The configured deploy branches, in order and empty when promotion is switched off. Blanks are
-   * dropped so a trailing comma is not a push to {@code ""}, and duplicates are dropped so a typo
-   * cannot report the same branch twice.
+   * Where this release deploys to: the entry branch, or nothing.
+   *
+   * <p><b>At most one, and a list all the same.</b> The repository no longer names refs, so there is
+   * one answer for every release on the platform and the loop below it runs at most once. It stays a
+   * list because the response's {@code promotions} is one, and because advancing a release up a
+   * ladder of tiers will make it plural again for a reason the old list never had.
+   *
+   * <p>Two checks, in this order, and the order is the contract:
+   *
+   * <ul>
+   *   <li><b>The blank config is read first</b>, so the kill switch wins. It is the deployment's
+   *       switch, and a repository must not be able to talk its way past it.
+   *   <li><b>An absent spec file deploys nowhere.</b> That is the one thing the repository still
+   *       decides, and it decides it by the file's <em>presence</em>: a library or an SPA declares
+   *       no deployment at all, and pushing a deploy branch for it buys a CI build and a branch
+   *       nobody reads. A spec whose keys are all the deployer's still means "this deploys".
+   * </ul>
    */
-  private List<String> promotionTargets() {
-    return promotionBranches.orElseGet(List::of).stream()
-        .map(String::trim)
-        .filter(branch -> !branch.isEmpty())
-        .distinct()
-        .toList();
+  private List<String> promotionTargets(MirrorWorktree worktree, String repoId) {
+    Optional<String> configured = configuredEntryBranch();
+    if (configured.isEmpty()) {
+      return List.of();
+    }
+    if (!DeploymentSpecReader.exists(worktree.path())) {
+      LOG.debugf(
+          "%s carries no %s, so this release deploys nowhere",
+          repoId, DeploymentSpecReader.SPEC_PATH);
+      return List.of();
+    }
+    return List.of(configured.get());
+  }
+
+  /** The configured entry branch, trimmed; empty is the kill switch. */
+  private Optional<String> configuredEntryBranch() {
+    return entryBranch.map(String::trim).filter(branch -> !branch.isEmpty());
   }
 
   /**
@@ -581,6 +673,9 @@ public class ReleaseIntegrator {
    * the repository's default ref, so the git host's protection hook does not read it today — but the
    * hook grants that option fast-forward-only, which is exactly what this push is, so carrying it
    * costs nothing and keeps one release one push argv. No second mechanism exists.
+   *
+   * <p>It never carries {@code -o qits.no-ci}: this is the push whose build is the release's signal.
+   * The quiet one is the trunk push above.
    *
    * @return the branch's outcome, with a null {@code error} when the promotion landed
    */

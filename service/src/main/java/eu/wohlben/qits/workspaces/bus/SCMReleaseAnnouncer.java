@@ -47,12 +47,13 @@ public class SCMReleaseAnnouncer implements ReleaseAnnouncer {
   public void onReleasePublished(
       String projectId,
       String repoId,
+      String repoName,
       String branch,
       String version,
       String commitSha,
       Instant publishedAt) {
-    // commitSha is not in the payload: the platform specified four fields, and a consumer that wants
-    // the commit has BuildSuccessful, which carries one for the build this release triggers.
-    bus.publish(new SCMRelease(projectId, repoId, branch, version, publishedAt));
+    // commitSha is not in the payload: a consumer that wants the commit has BuildSuccessful, which
+    // carries one for the build this release triggers.
+    bus.publish(new SCMRelease(projectId, repoId, repoName, branch, version, publishedAt));
   }
 }

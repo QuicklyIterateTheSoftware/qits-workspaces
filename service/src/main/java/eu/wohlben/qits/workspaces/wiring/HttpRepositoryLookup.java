@@ -23,7 +23,7 @@ import org.jboss.logging.Logger;
  * holds no foreign key into the repositories tables — {@code Workspace.repositoryId} is a plain
  * String column, and the two contexts own separate physical databases with separate Flyway
  * lineages. There is no join to make. The port is what replaces it, and it stays deliberately
- * narrow: does this repository exist, and what is its main branch.
+ * narrow: does this repository exist, what is it called, and what is its main branch.
  *
  * <p><b>Addressing</b> is one explicit key, {@code qits.projects.url}, naming the SERVICE — scheme,
  * host and port, no path. It is derived from nothing: deriving one service's address from another's

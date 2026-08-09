@@ -1,0 +1,69 @@
+# Follow the workspace image.
+#
+# qits-workspaces launches every workspace container from a pinned, registry-qualified reference
+# (qits.workspace.image, in domain/.../META-INF/microprofile-config.properties). A pin does not
+# follow anything by itself, so this is what moves it: qits-workspace-daemon releases, this rewrites
+# the tag, and the bump goes onto maintenance/ where ci-post-receive.yml releases it like any other
+# change.
+#
+# THE RACE, recorded rather than fixed. SCMRelease fires when qits-workspace-daemon is TAGGED. That
+# repo then spends several minutes building and pushing the workspace image — roughly 3.4 GB of
+# toolchain — so this train can bump the pin to a version whose image is still uploading. The window
+# is nearly always harmless: the bump only edits a properties file, nothing here pulls or inspects
+# the image, and the reference is not dereferenced until a container launches, which is after this
+# repo's own release and deploy. Closing it properly means triggering on SoftwareRelease (fired when
+# the artifact is PUBLISHED, the way ci-event-upstream-eventstream.yml does) instead of SCMRelease.
+# That is the correct shape and the reason it is not here yet is only that the workspace image's
+# publish event was not wired when this train was written. Prefer it when it is.
+event: SCMRelease
+when:
+  # matching repositoryName because this repository's row id is a per-platform UUID.
+  - repositoryName: { exact: qits-workspace-daemon }
+steps:
+  - image: qits/build-images/node-base:latest
+    timeout-seconds: 300
+    script: |
+      set -eu
+      properties=domain/src/main/resources/META-INF/microprofile-config.properties
+
+      version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
+      # Digits and dots, nothing else. The version reaches a `sed` s### expression, and `#` is that
+      # expression's own delimiter — a version carrying one closes it, and GNU sed's `e` command
+      # then runs a shell. It also becomes part of an image reference and part of a commit message.
+      # Refused rather than quoted: this is a calver, and nothing legitimate needs a character
+      # outside the set. Validate before the value goes near a file or a reference, not after.
+      case "$version" in
+        ''|*[!0-9.]*) echo "refusing an implausible version: $version" >&2; exit 1 ;;
+      esac
+
+      current=$(sed -n -E 's#^qits\.workspace\.image=##p' "$properties")
+      [ -n "$current" ] || { echo "no qits.workspace.image line in $properties" >&2; exit 1; }
+
+      # Only the TAG moves. The registry host and repository path stay exactly as committed, because
+      # this train has no business deciding how the host daemon spells the registry — that decision
+      # is made once, in the properties file, and it is spelled for the host rather than for this
+      # step container. Rebuilding the reference here would quietly re-decide it.
+      #
+      # `${current%:*}` cuts at the LAST colon, which is the tag separator only if the final path
+      # segment has a colon at all. A value with no tag would otherwise get cut at the registry
+      # port, so check the segment first and refuse rather than write nonsense.
+      case "${current##*/}" in
+        *:*) ;;
+        *) echo "refusing: $current carries no tag" >&2; exit 1 ;;
+      esac
+      reference="${current%:*}:$version"
+
+      # Already there. Exit clean and commit nothing: a release that changes no file must not push a
+      # branch, or the maintenance leg cuts an empty release on every daemon tag.
+      [ "$reference" != "$current" ] || exit 0
+
+      sed -i -E "s#^qits\.workspace\.image=.*#qits.workspace.image=$reference#" "$properties"
+      after=$(sed -n -E 's#^qits\.workspace\.image=##p' "$properties")
+      # A sed that matched nothing exits 0. Read the line back, so a reshaped properties file fails
+      # here loudly instead of pushing a bump that bumped nothing.
+      [ "$after" = "$reference" ] || { echo "rewrite did not take: $after" >&2; exit 1; }
+
+      git add "$properties"
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \
+        -m "bump(qits-workspace-daemon@$version): follow the workspace image"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-workspace-daemon

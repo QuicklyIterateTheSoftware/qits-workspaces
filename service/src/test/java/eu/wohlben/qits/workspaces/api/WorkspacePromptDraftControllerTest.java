@@ -182,7 +182,8 @@ public class WorkspacePromptDraftControllerTest {
   }
 
   /**
-   * The reason the repository's upsert is an H2 {@code MERGE} rather than a read-then-insert: the
+   * The reason the repository's upsert is one {@code insert … on conflict} rather than a
+   * read-then-insert: the
    * draft's primary key <em>is</em> the workspace id, so two concurrent first-saves for a draftless
    * workspace both find no row, both insert the same key, and the loser's insert violates the
    * constraint. That is not a hypothetical — it is the cross-device flow this feature is for.
