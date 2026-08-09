@@ -23,6 +23,16 @@ public class FakeRepositoryLookup implements RepositoryLookup {
    */
   public static final String PROJECT_ID = "test-project";
 
+  /**
+   * How a fake repository's name is derived from its id. A registered id is opaque here — {@code
+   * TestOrigin} mints one — so the name is derived rather than stored, which is enough to prove
+   * the release flow carries a name that is NOT the id. That is the whole defect the field exists
+   * for: on a real platform a self-seeded repository's id is a UUID and its name is not.
+   */
+  public static String nameOf(String repoId) {
+    return "name-of-" + repoId;
+  }
+
   private final Map<String, String> mainBranches = new ConcurrentHashMap<>();
 
   @Override
@@ -30,7 +40,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     String mainBranch = mainBranches.get(repoId);
     return mainBranch == null
         ? Optional.empty()
-        : Optional.of(new RepositoryView(repoId, PROJECT_ID, mainBranch));
+        : Optional.of(new RepositoryView(repoId, nameOf(repoId), PROJECT_ID, mainBranch));
   }
 
   /** Make {@code repoId} resolvable, with {@code master} as its main branch. */

@@ -1687,6 +1687,7 @@ public class WorkspaceService {
         .onReleasePublished(
             repo.projectId(),
             repo.id(),
+            repo.name(),
             release.branch(),
             release.version(),
             release.commitSha(),

@@ -22,6 +22,7 @@ public class FakeReleaseAnnouncer implements ReleaseAnnouncer {
   public record Announced(
       String projectId,
       String repoId,
+      String repoName,
       String branch,
       String version,
       String commitSha,
@@ -33,11 +34,13 @@ public class FakeReleaseAnnouncer implements ReleaseAnnouncer {
   public void onReleasePublished(
       String projectId,
       String repoId,
+      String repoName,
       String branch,
       String version,
       String commitSha,
       Instant publishedAt) {
-    announced.add(new Announced(projectId, repoId, branch, version, commitSha, publishedAt));
+    announced.add(
+        new Announced(projectId, repoId, repoName, branch, version, commitSha, publishedAt));
   }
 
   public List<Announced> announced() {

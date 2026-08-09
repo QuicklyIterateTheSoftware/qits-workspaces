@@ -7,7 +7,7 @@ import java.time.Instant;
  * SCMRelease} event will hang off, and the only reason it exists today.
  *
  * <p>{@code bus/SCMReleaseAnnouncer} in the deployable is the implementation, and it publishes
- * {@code SCMRelease {projectId, repository, branch, version}}. The split is the {@code
+ * {@code SCMRelease {projectId, repository, repositoryName, branch, version}}. The split is the {@code
  * RunAnnouncer} precedent from qits-ci, down to being declared in the domain module and implemented
  * in the deployable so the domain stays free of the bus and its transport.
  *
@@ -40,7 +40,11 @@ public interface ReleaseAnnouncer {
    *     RepositoryLookup.RepositoryView}. Passed rather than looked up again: the caller already
    *     holds the view, and a publisher that re-asked would make the event's project a second
    *     question with a second answer
-   * @param repoId the repository the release landed in
+   * @param repoId the repository the release landed in, by row id
+   * @param repoName the same repository by its registered name, read off the same {@link
+   *     RepositoryLookup.RepositoryView}. The event carries both because a row id is per-platform —
+   *     a self-seeded repository's is a UUID — and a committed CI selection can only name something
+   *     stable
    * @param branch the <b>source</b> branch that was released. There is no target parameter: the
    *     target is always the default branch, which is the whole feature
    * @param version the stamp this release carries, {@code YYYY.MMDD.HHMMSS}
@@ -51,6 +55,7 @@ public interface ReleaseAnnouncer {
   void onReleasePublished(
       String projectId,
       String repoId,
+      String repoName,
       String branch,
       String version,
       String commitSha,

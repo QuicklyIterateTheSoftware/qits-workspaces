@@ -631,9 +631,9 @@ mechanism it implements.
 
 ## The SCMRelease event
 
-A **release** publishes `SCMRelease {projectId, repository, branch, version}` the instant the push is
-accepted. A plain integrate publishes nothing — an event that fired for both would make "a release
-happened" unlistenable, which is the one thing this event exists to be.
+A **release** publishes `SCMRelease {projectId, repository, repositoryName, branch, version}` the
+instant the push is accepted. A plain integrate publishes nothing — an event that fired for both
+would make "a release happened" unlistenable, which is the one thing this event exists to be.
 
 **It means source control has this release, and nothing more.** It does not mean an artifact exists:
 that statement is qits-ci's own `SoftwareRelease`, published once per artifact when a repository's
@@ -641,7 +641,7 @@ release pipeline goes green, and the gap between the two is a whole build. The e
 `SoftwareRelease` until 2026-08-01 and was read as a statement about a package, which worked by
 timing rather than by design — see the superproject's `docs/scm-release-split-notes.md`. **The wire name is
 the class name** (`QitsEvent.signature()` returns the simple class name), so the class rename was the
-wire rename; the payload's four fields did not change.
+wire rename; the payload's fields did not change.
 
 `ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SCMReleaseAnnouncer` is
 the implementation, so the domain module stays free of the bus and its transport (the `RunAnnouncer`
@@ -649,7 +649,7 @@ precedent in qits-ci, copied down to the package name). It is announced **after 
 the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
 statement conditional on the transaction would be silent about a release that really happened.
 
-Four things about it are easy to undo by accident:
+Five things about it are easy to undo by accident:
 
 - **`SCMReleaseAnnouncer` is a `@DefaultBean`.** The suite's `FakeReleaseAnnouncer` must win,
   and two unqualified beans of one type fail the build at `ArcProcessor#validate` — for every test at
@@ -659,12 +659,21 @@ Four things about it are easy to undo by accident:
   qits-ci measured both halves of that on deployed binaries: without the targets every publish dies
   with Jackson's "no serializer found" and the event never even reaches the outbox; without the
   mix-in `classNames` entry the payload silently gains `eventId`. A JVM suite cannot see either.
-- **The payload is four fields and stays four.** `eventId` and `occurredAt` are record components
-  and are excluded by the library's mix-in, which is why they can be components at all;
-  `SCMReleaseTest` asserts the exact canonical string.
-- **`RepositoryLookup.RepositoryView` widened to `(id, projectId, mainBranch)`** for this and for
-  nothing else. `projectId` is nullable: a registry that does not answer with one costs the event a
-  field, never the release.
+- **`eventId` and `occurredAt` stay out of the payload.** They are record components and are
+  excluded by the library's mix-in, which is why they can be components at all; `SCMReleaseTest`
+  asserts the exact canonical string, so a field added here is a deliberate edit there.
+- **`repositoryName` is the field a committed CI selection can address, and `repository` is not.**
+  A row id is whatever the platform instance's registry minted: for a repository the platform
+  manifest declares it equals the name, but a repository the projects self-seed reconcile
+  registered gets a **UUID**, different on every instance. So
+  `repository: { exact: qits-projects-daemon }` in a `.config/qits/ci-event-*.yml` matched nothing
+  on this platform, and matched **silently** — CI logs matches and never non-matches, so the two
+  daemons' release pipelines simply never fired. Both fields ship: the id for anyone joining back
+  to the registry, the name for anyone selecting on it. A selection that names a manifest
+  repository keeps matching `repository` and is honest doing so.
+- **`RepositoryLookup.RepositoryView` widened to `(id, name, projectId, mainBranch)`** for this and
+  for nothing else. `name` and `projectId` are both nullable: a registry that does not answer with
+  one costs the event a field, never the release.
 
 ## Authentication
 

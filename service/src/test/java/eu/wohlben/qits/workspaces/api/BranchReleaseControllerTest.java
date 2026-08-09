@@ -197,6 +197,7 @@ public class BranchReleaseControllerTest {
     FakeReleaseAnnouncer.Announced announced = announcer.announced().get(0);
     assertEquals(FakeRepositoryLookup.PROJECT_ID, announced.projectId());
     assertEquals(repoId, announced.repoId());
+    assertEquals(FakeRepositoryLookup.nameOf(repoId), announced.repoName());
     assertEquals(MAINTENANCE, announced.branch(), "the SOURCE branch — there is no target field");
     assertEquals(version, announced.version());
     assertEquals(commitSha, announced.commitSha());

@@ -17,7 +17,8 @@
 # publish event was not wired when this train was written. Prefer it when it is.
 event: SCMRelease
 when:
-  - repository: { exact: qits-workspace-daemon }
+  # matching repositoryName because this repository's row id is a per-platform UUID.
+  - repositoryName: { exact: qits-workspace-daemon }
 steps:
   - image: qits/build-images/node-base:latest
     timeout-seconds: 300

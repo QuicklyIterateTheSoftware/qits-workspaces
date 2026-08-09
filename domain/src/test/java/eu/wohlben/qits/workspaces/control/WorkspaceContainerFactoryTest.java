@@ -200,7 +200,10 @@ class WorkspaceContainerFactoryTest {
             repoId ->
                 Optional.of(
                     new RepositoryLookup.RepositoryView(
-                        repoId, "53c78589-6af3-4221-b3ef-315c867b0863", "main")));
+                        repoId,
+                        "the-repo",
+                        "53c78589-6af3-4221-b3ef-315c867b0863",
+                        "main")));
 
     List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
 

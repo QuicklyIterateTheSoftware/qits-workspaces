@@ -282,6 +282,10 @@ public class ReleaseControllerTest {
     FakeReleaseAnnouncer.Announced announced = announcer.announced().get(0);
     assertEquals(FakeRepositoryLookup.PROJECT_ID, announced.projectId());
     assertEquals(repoId, announced.repoId());
+    assertEquals(
+        FakeRepositoryLookup.nameOf(repoId),
+        announced.repoName(),
+        "the name too: a row id is per-platform, and a committed CI selection can only name a name");
     assertEquals("work-b", announced.branch(), "the SOURCE branch — there is no target field");
     assertEquals(version, announced.version());
     assertEquals(commitSha, announced.commitSha());

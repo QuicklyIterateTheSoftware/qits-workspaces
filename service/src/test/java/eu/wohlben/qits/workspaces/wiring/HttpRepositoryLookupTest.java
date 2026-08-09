@@ -74,21 +74,41 @@ public class HttpRepositoryLookupTest {
     return lookup;
   }
 
+  /**
+   * The row id and the name are read as two separate answers, and the fixture makes them differ on
+   * purpose: a repository the projects self-seed registered carries a UUID id, so a view that
+   * quietly reported the id as the name would publish an SCMRelease no committed CI selection can
+   * address — which is the defect {@code repositoryName} closed.
+   */
   @Test
-  public void aKnownRepositoryYieldsItsIdProjectAndMainBranch() throws Exception {
+  public void aKnownRepositoryYieldsItsIdNameProjectAndMainBranch() throws Exception {
     String base =
         serve(
             200,
             """
-            {"repository":{"id":"repo-1","url":"file:///origin","mainBranch":"main",\
+            {"repository":{"id":"7d45ae57-8cab-49dd-afbd-ac82c720ec6e",\
+            "name":"qits-projects-daemon","url":"file:///origin","mainBranch":"main",\
             "archetype":"NONE","projectId":"p-1"}}""");
+
+    Optional<RepositoryLookup.RepositoryView> found =
+        lookupAgainst(base).find("7d45ae57-8cab-49dd-afbd-ac82c720ec6e");
+
+    assertTrue(found.isPresent());
+    assertEquals("7d45ae57-8cab-49dd-afbd-ac82c720ec6e", found.get().id());
+    assertEquals("qits-projects-daemon", found.get().name(), "SCMRelease names the repository");
+    assertEquals("main", found.get().mainBranch());
+    assertEquals("p-1", found.get().projectId(), "SCMRelease names the project");
+  }
+
+  /** A registry answering with no name resolves anyway: the release must not depend on the field. */
+  @Test
+  public void aRepositoryWithNoNameStillResolves() throws Exception {
+    String base = serve(200, "{\"repository\":{\"id\":\"repo-1\",\"mainBranch\":\"main\"}}");
 
     Optional<RepositoryLookup.RepositoryView> found = lookupAgainst(base).find("repo-1");
 
     assertTrue(found.isPresent());
-    assertEquals("repo-1", found.get().id());
-    assertEquals("main", found.get().mainBranch());
-    assertEquals("p-1", found.get().projectId(), "SCMRelease names the project");
+    assertEquals(null, found.get().name());
   }
 
   /**
