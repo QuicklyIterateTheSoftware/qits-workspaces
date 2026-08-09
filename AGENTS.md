@@ -558,62 +558,64 @@ copy.
 
 ## The promotions: the further pushes, and the ones that deploy
 
-A release pushes the released commit **again**, onto every deploy branch the repository declares.
-Those pushes are what ship: the deployer registers and deploys an application from a green build **on
-a deploy branch**, so `main` is the integration trunk that builds and the deploy branches are what
-deploys. Pushing only `main` builds and deploys nothing — the same rule the direct-push escape hatch
-follows.
+A release pushes the released commit **again**, onto the **entry branch**. That push is what ships:
+the deployer registers and deploys an application from a green build on a branch an environment
+listens to, so `main` is the integration trunk that builds and the entry branch is what deploys.
+Pushing only `main` builds and deploys nothing — the same rule the direct-push escape hatch follows.
 
-- **The repository says where, and that debt is paid.** `DeploymentSpecReader` reads
-  `deploy_branches` out of the released tree's own `.config/qits/deployments.yml` — a local file by
-  then, because the merge worktree is checked out at the released tree. **A spec declaring the key
-  gets exactly those refs; a spec without it falls back to
-  `qits.workspaces.release.promotion-branches` (`environment/prod` shipped); no spec file at all
-  promotes NOTHING.** That last case is the point: a library or an SPA deploys from no ref, and the
-  fixed pair this replaced pushed one for it anyway.
-- **The reader is lenient where the deployer's `DeploymentSpecParser` is strict.** It is a *second*
-  reader of a file it does not own, so an unknown key is ignored rather than refused — a key the
-  deployer adds must not fail every release in the platform until this vendored copy catches up. It
-  is a vendored ~120-line line parser, deliberately not a dependency on qits-platform-deployments.
-- **Separate pushes, in this order, never one atomic push.** The default branch first, then each
-  deploy branch in the declared order. A promotion riding along atomically would let a stuck deploy
-  branch refuse the *release*, which is the one ref this flow exists to move — and would let one
-  stuck deploy branch block the other.
-- **The trunk push goes quiet when there is a deploy branch.** It carries `-o qits.no-ci` as well as
-  `-o qits.release`, so one sha does not build twice — the deploy branch's build is the release's
-  signal. A repository with no deploy branches keeps its trunk push CI-hot: there that build is the
-  only proof the release is sound. The promotion pushes are never quiet.
+- **One branch, and it is the platform's answer.** `qits.workspaces.release.entry-branch`
+  (`environment/prod` shipped) names it, and it is the same for every repository: the deploy ref of
+  the environment the platform serves from. It was a per-repository list read out of each spec's
+  `deploy_branches`, and that was wrong twice — every repository named the same single ref, so it
+  was one answer copied into thirteen files, and a release pushed its sha onto *every* entry, so
+  three tiers listed would have shipped into all three in the same second. A fan-out, not a ladder.
+  Advancing a release up a ladder of tiers is a separate operation over the deployer's environment
+  rows and does not exist yet.
+- **What the repository still decides is whether it deploys at all**, and it says so by carrying
+  `.config/qits/deployments.yml`. No file, no promotion: a library or an SPA deploys from no ref,
+  and pushing one for it buys a CI build and a branch nobody reads. Everything *inside* the file is
+  the deployer's, and `DeploymentSpecReader` opens none of it — it is a five-line `isRegularFile`
+  check now, down from a vendored ~120-line line parser.
+- **Separate pushes, in this order, never one atomic push.** The default branch first, then the
+  entry branch. A promotion riding along atomically would let a stuck deploy branch refuse the
+  *release*, which is the one ref this flow exists to move.
+- **The trunk push goes quiet when there is somewhere to promote to.** It carries `-o qits.no-ci` as
+  well as `-o qits.release`, so one sha does not build twice — the entry branch's build is the
+  release's signal. A repository that promotes nowhere keeps its trunk push CI-hot: there that build
+  is the only proof the release is sound. The promotion push is never quiet.
 - **Create or fast-forward, never a force.** A push to a ref that is not there is a create, which is
   the ordinary first case for a repository that has never deployed. A non-fast-forward means the
   branch holds something the release is not built on, and it is reported rather than overwritten.
-- **Each push carries `-o qits.release` like the release push it follows.** A deploy branch is not
+- **The push carries `-o qits.release` like the release push it follows.** A deploy branch is not
   the repository's default ref, so the protection hook does not read it today; the option is
-  fast-forward-only at the hook, which is exactly what these pushes are, so it costs nothing and
-  keeps one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)`
-  again.
-- **Blank `promotion-branches` disables all of them, and outranks any spec.** The key is both the
-  fallback list and the kill switch; a deployment that must stop writing deploy branches has to be
+  fast-forward-only at the hook, which is exactly what this push is, so it costs nothing and keeps
+  one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)` again.
+- **A blank `entry-branch` disables promotion, and outranks the repository.** The key is both the
+  destination and the kill switch; a deployment that must stop writing deploy branches has to be
   able to, and a switch a repository could talk its way past would not be one.
-  `ReleasePromotionDisabledTest` holds it against a repository that *does* declare its refs.
+  `ReleasePromotionDisabledTest` holds it against a repository that *does* carry a spec.
+- **`ReleaseIntegrator` says where releases land, once, at boot.** Both states it reports are
+  otherwise silent: a release that promotes nowhere is a 200 with an empty `promotions`, and an
+  entry branch no environment listens to builds and deploys nothing at all.
 
-**A failed promotion is a partial success, not a failed release — and it is partial per branch**,
-and that decision lives in `ReleaseIntegrator` (the class javadoc says why, beside the code). By the
-time it runs receive-pack has accepted the release: the commit is on the default branch, the tag is
-on the host, post-receive has fired and CI is building. Throwing there would cost the caller its
-version and its sha, skip `SCMRelease` and leave the workspace ACTIVE on a branch that is already
-merged — and undo none of the push. So it is **200 with an `error` on that branch's entry**: the
-sentence naming what refused it and which sha to push once the branch is sorted out, logged at ERROR.
-A branch that refuses does not stop the branches after it. The precedent is `deleteLandedBranch`,
-which is best-effort for the same reason: once the release is in, nothing after it may pretend it is
-not.
+**A failed promotion is a partial success, not a failed release**, and that decision lives in
+`ReleaseIntegrator` (the class javadoc says why, beside the code). By the time it runs receive-pack
+has accepted the release: the commit is on the default branch, the tag is on the host, post-receive
+has fired and CI is building. Throwing there would cost the caller its version and its sha, skip
+`SCMRelease` and leave the workspace ACTIVE on a branch that is already merged — and undo none of the
+push. So it is **200 with an `error` on that branch's entry**: the sentence naming what refused it
+and which sha to push once the branch is sorted out, logged at ERROR. The precedent is
+`deleteLandedBranch`, which is best-effort for the same reason: once the release is in, nothing after
+it may pretend it is not.
 
-The response carries `promotions` for it — one `{branch, error}` per deploy branch, in the declared
-order, `error` null when that push landed — on the record **both** release doors answer with. It is
-empty when the repository declares no deploy branch, when it carries no spec, when promotion is off,
-and for **a plain integrate**, which released nothing to deploy.
+The response carries `promotions` for it — `{branch, error}`, `error` null when the push landed — on
+the record **both** release doors answer with. **A list holding at most one entry**: it stays a list
+because the tier ladder will make it plural again, for a reason the old per-repository list never
+had. It is empty when the repository carries no spec, when promotion is off, and for **a plain
+integrate**, which released nothing to deploy.
 
-**This repository declares its own** in `.config/qits/deployments.yml` (`environment/prod`), so it
-releases through the mechanism it implements.
+**This repository carries its own** `.config/qits/deployments.yml`, so it releases through the
+mechanism it implements.
 
 ## The SCMRelease event
 

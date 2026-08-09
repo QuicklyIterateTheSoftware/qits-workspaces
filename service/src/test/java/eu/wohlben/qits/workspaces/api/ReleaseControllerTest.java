@@ -138,30 +138,27 @@ public class ReleaseControllerTest {
   }
 
   /**
-   * The deploy branches the fixture repositories <b>declare</b>, in the order they declare them.
+   * Where a release lands — <b>one</b> branch, read from the same key a deployment sets, because the
+   * platform has one answer and no repository states it.
    *
-   * <p>Two of them, and mid-cutover is what that shape is: a repository moving onto the platform's
-   * one deploy ref while it still ships from the old one names both. Two is also what makes the
-   * per-branch reporting below mean anything — one refusing while the other lands cannot be told
-   * apart with a single branch.
-   *
-   * <p>Nothing about this pair comes from configuration any more. It is written into each fixture's
-   * own {@code .config/qits/deployments.yml} by {@link #declareDeployBranches}, which is the whole
-   * change: the repository says where it deploys.
+   * <p>The fixtures used to declare two refs each ({@code environment/prod} and {@code
+   * platform/main}) in their own {@code deploy_branches}, and the pair carried two claims: that a
+   * repository chose its refs, and that one refusing while the other landed could be told apart.
+   * Neither survives. A release pushed onto <em>every</em> declared ref, which is a fan-out and not
+   * a ladder, so the list went and the per-branch reporting has one branch to report on. The
+   * response is still a list and {@code promote} is still called in a loop — the ladder will make
+   * that plural again, for a reason the old list never had — but nothing here can exercise a second
+   * entry, and a test pretending otherwise would be testing its own fixture.
    */
-  private static final String ENVIRONMENT_BRANCH = "environment/prod";
+  @ConfigProperty(name = "qits.workspaces.release.entry-branch")
+  String entryBranch;
 
-  private static final String PLATFORM_BRANCH = "platform/main";
-
-  private static final List<String> DEPLOY_BRANCHES = List.of(ENVIRONMENT_BRANCH, PLATFORM_BRANCH);
-
-  /** The fallback list, read from the same key a deployment sets — see the fallback test below. */
-  @ConfigProperty(name = "qits.workspaces.release.promotion-branches")
-  java.util.Optional<List<String>> configuredBranches;
-
-  /** Commit a deployments spec declaring these refs onto {@code master}. */
-  private void declareDeployBranches(String repoId, List<String> branches) throws Exception {
-    writeSpec(repoId, "deploy_branches: " + String.join(",", branches) + "\n");
+  /**
+   * Make this repository one that deploys. It says so by carrying the file at all; what is inside is
+   * the deployer's and this service reads none of it.
+   */
+  private void declareDeployable(String repoId) throws Exception {
+    writeSpec(repoId, "deployment_target: environment\n");
   }
 
   private void writeSpec(String repoId, String yaml) throws Exception {
@@ -320,44 +317,36 @@ public class ReleaseControllerTest {
   // -----------------------------------------------------------------------------------------
 
   /**
-   * <b>Every</b> deploy branch is created when it is absent, at the released commit exactly. A
-   * repository that has never deployed is the ordinary first case, not an error, and a create is
-   * what receive-pack does with a push to a ref that is not there.
-   *
-   * <p>Both branches, and both of them because <b>the repository's spec names both</b> — not
-   * because the service pushes a fixed pair and hopes one is listened to.
+   * The entry branch is created when it is absent, at the released commit exactly. A repository that
+   * has never deployed is the ordinary first case, not an error, and a create is what receive-pack
+   * does with a push to a ref that is not there.
    */
   @Test
-  public void aReleaseCreatesEveryDeployBranchAtTheReleasedCommit() throws Exception {
+  public void aReleaseCreatesTheEntryBranchAtTheReleasedCommit() throws Exception {
     String repoId = seedRepository();
-    declareDeployBranches(repoId, DEPLOY_BRANCHES);
+    declareDeployable(repoId);
     createWorkspace(repoId, "deploy", "deploy-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "deploy-b", "shipped.md", "shipped\n", "the work");
 
-    for (String branch : DEPLOY_BRANCHES) {
-      assertEquals(
-          "", branchInOrigin(repoId, branch), "the fixture has no '" + branch + "' to start with");
-    }
+    assertEquals("", branchInOrigin(repoId, entryBranch), "the fixture has no entry branch yet");
 
     String commitSha =
         release(repoId, "deploy", "the first deploy of this repository")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
-            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .body("promotions.branch", equalTo(List.of(entryBranch)))
             .body("promotions.error", everyItem(nullValue()))
             .extract()
             .path("commitSha");
 
-    for (String branch : DEPLOY_BRANCHES) {
-      assertEquals(
-          commitSha,
-          inOrigin(repoId, "git", "rev-parse", branch),
-          "'" + branch + "' holds the released commit, which is what deploys it");
-    }
+    assertEquals(
+        commitSha,
+        inOrigin(repoId, "git", "rev-parse", entryBranch),
+        "the entry branch holds the released commit, which is what deploys it");
     assertEquals(
         inOrigin(repoId, "git", "rev-parse", "master"),
-        inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH),
-        "the same commit on the trunk and on the deploy branch: main builds, this one ships");
+        inOrigin(repoId, "git", "rev-parse", entryBranch),
+        "the same commit on the trunk and on the entry branch: main builds, this one ships");
   }
 
   /**
@@ -371,63 +360,57 @@ public class ReleaseControllerTest {
    * test to depend on.
    */
   @Test
-  public void thePromotionFastForwardsTheDeployBranchesThatAlreadyExist() throws Exception {
+  public void thePromotionFastForwardsAnEntryBranchThatAlreadyExists() throws Exception {
     String repoId = seedRepository();
-    declareDeployBranches(repoId, DEPLOY_BRANCHES);
+    declareDeployable(repoId);
     createWorkspace(repoId, "next", "next-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "next-b", "two.txt", "two\n", "the work");
-    // Where an earlier release left them: on the default branch, which this one builds on.
+    // Where an earlier release left it: on the default branch, which this one builds on.
     String deployedBefore = inOrigin(repoId, "git", "rev-parse", "master");
-    for (String branch : DEPLOY_BRANCHES) {
-      inOrigin(repoId, "git", "branch", branch, "master");
-    }
+    inOrigin(repoId, "git", "branch", entryBranch, "master");
 
     String commitSha =
         release(repoId, "next", "the next deploy")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
-            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .body("promotions.branch", equalTo(List.of(entryBranch)))
             .body("promotions.error", everyItem(nullValue()))
             .extract()
             .path("commitSha");
 
-    for (String branch : DEPLOY_BRANCHES) {
-      assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", branch));
-      assertTrue(
-          inOrigin(repoId, "git", "rev-list", branch).lines().anyMatch(deployedBefore::equals),
-          "what '" + branch + "' deployed before is still in its history — a fast-forward");
-    }
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", entryBranch));
+    assertTrue(
+        inOrigin(repoId, "git", "rev-list", entryBranch).lines().anyMatch(deployedBefore::equals),
+        "what the entry branch deployed before is still in its history — a fast-forward");
   }
 
   /**
-   * A deploy branch holds something the release is not built on — a hand-pushed hotfix, a rollback,
+   * The entry branch holds something the release is not built on — a hand-pushed hotfix, a rollback,
    * a wrong ref — and the promotion is refused rather than forced.
    *
    * <p>What this asserts is the <b>partial success</b>: a 200 with the version and the sha, because
-   * the release really did land and no exception could take it back, plus an {@code error} per
-   * branch saying nothing deployed and which commit to push once the branch is sorted out. The
-   * alternative — throwing — would answer a caller whose work is already on the default branch with
-   * a failure, skip the {@code SCMRelease} event and leave the workspace ACTIVE on a merged branch.
+   * the release really did land and no exception could take it back, plus an {@code error} saying
+   * nothing deployed and which commit to push once the branch is sorted out. The alternative —
+   * throwing — would answer a caller whose work is already on the default branch with a failure,
+   * skip the {@code SCMRelease} event and leave the workspace ACTIVE on a merged branch.
    */
   @Test
-  public void refusedPromotionsAreReportedAndTheReleaseStillLands() throws Exception {
+  public void aRefusedPromotionIsReportedAndTheReleaseStillLands() throws Exception {
     String repoId = seedRepository();
-    declareDeployBranches(repoId, DEPLOY_BRANCHES);
+    declareDeployable(repoId);
     createWorkspace(repoId, "stuck", "stuck-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "stuck-b", "mine.txt", "mine\n", "my work");
     // feature forked before master's second commit, so no descendant of master can fast-forward
     // over it — a real divergence, not a stale copy.
     String divergent = inOrigin(repoId, "git", "rev-parse", "feature");
-    for (String branch : DEPLOY_BRANCHES) {
-      inOrigin(repoId, "git", "branch", branch, "feature");
-    }
+    inOrigin(repoId, "git", "branch", entryBranch, "feature");
 
     var response =
         release(repoId, "stuck", "released but not deployed")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
             .body("version", matchesRegex(VERSION.pattern()))
-            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
+            .body("promotions.branch", equalTo(List.of(entryBranch)))
             .body("promotions.error", everyItem(containsString("fast-forward")))
             .extract();
     String commitSha = response.path("commitSha");
@@ -436,56 +419,19 @@ public class ReleaseControllerTest {
         commitSha,
         inOrigin(repoId, "git", "rev-parse", "master"),
         "the release is in: a failed promotion never unwinds the push that already happened");
-    for (String branch : DEPLOY_BRANCHES) {
-      assertEquals(
-          divergent,
-          inOrigin(repoId, "git", "rev-parse", branch),
-          "'" + branch + "' is untouched — the promotion is never a force push");
-    }
+    assertEquals(
+        divergent,
+        inOrigin(repoId, "git", "rev-parse", entryBranch),
+        "the entry branch is untouched — the promotion is never a force push");
     assertTrue(
-        errorFor(response, ENVIRONMENT_BRANCH).contains(commitSha),
+        errorFor(response, entryBranch).contains(commitSha),
         "the message names the commit to push, which is the only thing left to do by hand");
     assertTrue(
-        errorFor(response, PLATFORM_BRANCH).contains(PLATFORM_BRANCH),
-        "and each message names its own branch, so two failures are told apart");
+        errorFor(response, entryBranch).contains(entryBranch),
+        "and it names the branch, which is where that push goes");
     assertEquals(
         1, announcer.announced().size(), "the release happened, so SCMRelease is published");
     assertTrue(!activeLabels(repoId).contains("stuck"), "and the workspace resolved");
-  }
-
-  /**
-   * One deploy branch refusing does not take the other with it — the point of promoting per branch
-   * rather than as one step. It is the shape a real cutover has: a repository whose environment
-   * branch was hand-moved still gets its platform branch, and the report says exactly which half is
-   * missing.
-   */
-  @Test
-  public void aRefusedPromotionDoesNotStopTheOtherDeployBranch() throws Exception {
-    String repoId = seedRepository();
-    declareDeployBranches(repoId, DEPLOY_BRANCHES);
-    createWorkspace(repoId, "half", "half-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "half-b", "half.txt", "half\n", "my work");
-    String divergent = inOrigin(repoId, "git", "rev-parse", "feature");
-    inOrigin(repoId, "git", "branch", ENVIRONMENT_BRANCH, "feature");
-
-    var response =
-        release(repoId, "half", "one branch deploys")
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .body("promotions.branch", equalTo(DEPLOY_BRANCHES))
-            .extract();
-    String commitSha = response.path("commitSha");
-
-    assertTrue(
-        errorFor(response, ENVIRONMENT_BRANCH).contains("fast-forward"),
-        "the branch that diverged is reported");
-    assertEquals(
-        divergent, inOrigin(repoId, "git", "rev-parse", ENVIRONMENT_BRANCH), "and left alone");
-    assertNull(errorFor(response, PLATFORM_BRANCH), "the other branch is not blamed for it");
-    assertEquals(
-        commitSha,
-        inOrigin(repoId, "git", "rev-parse", PLATFORM_BRANCH),
-        "and it was pushed: a refusal on one branch stops nothing after it");
   }
 
   /** One branch's {@code error} out of the promotions array, or null when that promotion landed. */
@@ -496,72 +442,65 @@ public class ReleaseControllerTest {
   }
 
   // -----------------------------------------------------------------------------------------
-  // where the deploy branches come from: the repository, not the configuration
+  // whether a repository deploys at all: the spec's presence, and nothing inside it
   // -----------------------------------------------------------------------------------------
 
   /**
-   * The change itself. A repository declaring {@code deploy_branches} is promoted to <b>those</b>
-   * refs, and the configured list is not consulted — asserted by declaring a ref the shipped default
-   * does not name and checking the default's own ref never appears.
+   * A repository that carries a spec is promoted to the configured entry branch — the platform's
+   * answer, not the repository's, and read from the same key a deployment sets.
    *
-   * <p>The spec is read out of the <b>released tree</b>: the merge worktree is checked out at it
-   * when the promotions run, so the answer is the file as this release leaves it, never a stale
-   * copy of it.
+   * <p>The spec here declares nothing but a target the deployer reads. That used to be the
+   * "compatibility path until every repository declares its refs"; it is now the only path, because
+   * every repository named the same ref and a per-repository list turned out to be a fan-out rather
+   * than a ladder.
    */
   @Test
-  public void aDeclaredDeployBranchIsWhereTheReleaseGoes() throws Exception {
-    String repoId = seedRepository();
-    declareDeployBranches(repoId, List.of("environment/canary"));
-    createWorkspace(repoId, "declared", "declared-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "declared-b", "one.txt", "one\n", "the work");
-
-    String commitSha =
-        release(repoId, "declared", "the repository says where")
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .body("promotions.branch", equalTo(List.of("environment/canary")))
-            .body("promotions.error", everyItem(nullValue()))
-            .extract()
-            .path("commitSha");
-
-    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", "environment/canary"));
-    assertEquals(
-        "",
-        branchInOrigin(repoId, ENVIRONMENT_BRANCH),
-        "the configured default is not pushed to a repository that named a different ref");
-  }
-
-  /**
-   * The compatibility path. A repository that has a spec but has not declared its deploy refs yet is
-   * promoted to the configured list, so the cutover does not need every repository edited on one
-   * day.
-   */
-  @Test
-  public void aSpecWithoutDeployBranchesFallsBackToTheConfiguredList() throws Exception {
+  public void aSpecMeansTheReleasePromotesToTheConfiguredEntryBranch() throws Exception {
     String repoId = seedRepository();
     writeSpec(repoId, "deployment_target: environment\n");
-    createWorkspace(repoId, "fallback", "fallback-b");
-    TestOrigin.commitOnBranch(dataDir, repoId, "fallback-b", "two.txt", "two\n", "the work");
+    createWorkspace(repoId, "configured", "configured-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "configured-b", "two.txt", "two\n", "the work");
 
-    List<String> configured = configuredBranches.orElseThrow();
     String commitSha =
-        release(repoId, "fallback", "not declared yet")
+        release(repoId, "configured", "the platform says where")
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
-            .body("promotions.branch", equalTo(configured))
+            .body("promotions.branch", equalTo(List.of(entryBranch)))
             .body("promotions.error", everyItem(nullValue()))
             .extract()
             .path("commitSha");
 
-    for (String branch : configured) {
-      assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", branch));
-    }
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", entryBranch));
   }
 
   /**
-   * A repository with no spec at all deploys from nowhere, and that is the point of reading the spec
-   * rather than a fixed list: a library or a component bundle has no deploy ref, and the old
-   * behaviour pushed one for it anyway — a CI build and a branch nobody reads, on every release.
+   * A spec whose keys are all the deployer's — or none at all — still says "this deploys". The file
+   * is read for its <b>presence</b>, and a repository taking every default has nothing to write in
+   * it but a comment, which is exactly the shape the specs took when {@code deploy_branches} went.
+   */
+  @Test
+  public void aSpecOfNothingButCommentsStillDeploys() throws Exception {
+    String repoId = seedRepository();
+    writeSpec(repoId, "# every default: deployed wherever a tier listens to the built branch.\n");
+    createWorkspace(repoId, "comments", "comments-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "comments-b", "three.txt", "three\n", "the work");
+
+    String commitSha =
+        release(repoId, "comments", "an empty spec is still a spec")
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("promotions.branch", equalTo(List.of(entryBranch)))
+            .body("promotions.error", everyItem(nullValue()))
+            .extract()
+            .path("commitSha");
+
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", entryBranch));
+  }
+
+  /**
+   * A repository with no spec at all deploys from nowhere, and that is the one thing the repository
+   * still decides: a library or a component bundle has no deploy ref, and pushing one for it buys a
+   * CI build and a branch nobody reads, on every release.
    *
    * <p>The release itself is untouched by it. The trunk push is the whole release here, which is
    * also why it stays CI-hot below.
@@ -584,7 +523,7 @@ public class ReleaseControllerTest {
     assertEquals(
         commitSha,
         inOrigin(repoId, "git", "rev-parse", "master"),
-        "the release is exactly what it was — only the further pushes are gone");
+        "the release is exactly what it was — only the further push is gone");
     assertEquals(
         "",
         inOrigin(
@@ -603,10 +542,10 @@ public class ReleaseControllerTest {
   // -----------------------------------------------------------------------------------------
 
   /**
-   * One sha must not build twice. A release with a deploy branch pushes the trunk with {@code -o
-   * qits.no-ci}, because the deploy branch's build is the one that signals anything; a release with
-   * nowhere to deploy leaves the trunk push CI-hot, because there that build is the release's only
-   * proof.
+   * One sha must not build twice. A release with somewhere to promote to pushes the trunk with
+   * {@code -o qits.no-ci}, because the entry branch's build is the one that signals anything; a
+   * release with nowhere to deploy leaves the trunk push CI-hot, because there that build is the
+   * release's only proof.
    *
    * <p>Read off a real {@code pre-receive} hook on the fixture origin rather than off a field, so
    * what is asserted is the argv that ships — the same environment variables the git host's own hook
@@ -615,7 +554,7 @@ public class ReleaseControllerTest {
   @Test
   public void theTrunkPushIsQuietOnlyWhenTheReleaseHasSomewhereToDeploy() throws Exception {
     String deploying = seedRepository();
-    declareDeployBranches(deploying, List.of(ENVIRONMENT_BRANCH));
+    declareDeployable(deploying);
     createWorkspace(deploying, "ships", "ships-b");
     TestOrigin.commitOnBranch(dataDir, deploying, "ships-b", "a.txt", "a\n", "the work");
 
@@ -640,7 +579,7 @@ public class ReleaseControllerTest {
         "the deploy branch is about to build this sha, so the trunk push does not");
     assertEquals(
         List.of("qits.release"),
-        TestOrigin.pushOptionsFor(dataDir, deploying, "refs/heads/" + ENVIRONMENT_BRANCH),
+        TestOrigin.pushOptionsFor(dataDir, deploying, "refs/heads/" + entryBranch),
         "the promotion is never quiet — its build is the release's signal");
     assertEquals(
         List.of("qits.release"),
