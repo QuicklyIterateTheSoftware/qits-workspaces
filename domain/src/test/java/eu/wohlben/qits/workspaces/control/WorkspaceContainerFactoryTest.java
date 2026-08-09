@@ -18,9 +18,22 @@ import org.junit.jupiter.api.Test;
  */
 class WorkspaceContainerFactoryTest {
 
+  /**
+   * A stand-in for {@code qits.workspace.image}, in the shape the service now ships: registry host
+   * with a port, repository path, calver tag. The shape is what earns its keep here — the reference
+   * carries two colons, so anything that ever tried to split it into name and tag would fail on
+   * this argv rather than on a container launch.
+   *
+   * <p>The version is invented, and stays invented. The real pin lives in {@code
+   * META-INF/microprofile-config.properties} and the release train moves it; a test that copied it
+   * would only add a place the train forgets. This test proves the factory renders whatever image
+   * it is handed, which is a claim no particular version makes truer.
+   */
+  private static final String IMAGE = "localhost:8081/qits/workspace:2026.101.1";
+
   private WorkspaceContainerFactory factory() {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
-    f.image = "qits/workspace:latest";
+    f.image = IMAGE;
     f.network = "qits-net";
     f.claudeVolume = "qits_shared_dot_claude";
     f.claudeMount = "/claude-home";
@@ -102,13 +115,13 @@ class WorkspaceContainerFactoryTest {
     assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
     assertTrue(argv.contains("--user"), argv.toString());
     assertSequence(argv, "--name", "qits-ws-work-repo1234");
-    assertTrue(argv.contains("qits/workspace:latest"), argv.toString());
+    assertTrue(argv.contains(IMAGE), argv.toString());
     // The container runs qits-workspace-daemon via the image ENTRYPOINT (docker/qits/Dockerfile),
     // with no `docker run` command and — deliberately — no `sleep infinity` fallback: the image is
     // the LAST token (no trailing command), the run argv carries no daemon path, and a container
     // that can't run the daemon fails to start rather than lingering
     // (docs/epics/qits-workspace-daemon/).
-    assertEquals("qits/workspace:latest", argv.get(argv.size() - 1), argv.toString());
+    assertEquals(IMAGE, argv.get(argv.size() - 1), argv.toString());
     assertFalse(argv.contains("sleep"), argv.toString());
     assertFalse(argv.contains("infinity"), argv.toString());
     assertFalse(argv.contains("/usr/local/bin/qits-workspace-daemon"), argv.toString());

@@ -1024,6 +1024,13 @@ public class WorkspaceService {
    * the old container down and provisions a fresh one, so a {@code docker run} picks up whatever
    * {@code qits.workspace.image} now resolves to.
    *
+   * <p><b>That now resolves to a pinned, published release</b> rather than a local {@code :latest}
+   * tag, which narrows what a recreate can reach. It rolls a workspace forward exactly as far as
+   * the pin this qits-workspaces build carries, and no further: reaching a newer daemon takes the
+   * pin moving first (the qits-workspace-daemon release train rewrites it, then qits-workspaces
+   * releases and deploys). Recreate is still the operation that applies a new image — it just no
+   * longer picks up a rebuild nobody released.
+   *
    * <p><b>Requires a provably clean working tree.</b> Recreating is lossy for uncommitted work, so
    * the gate is stricter than {@link #requireCleanWorkingTree}: it consults the daemon-reported
    * tri-state ({@link WorkspaceGitStatus#isClean}) and admits only an explicit clean. A dirty tree

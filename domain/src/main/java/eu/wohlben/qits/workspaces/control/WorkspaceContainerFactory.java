@@ -20,7 +20,21 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @ApplicationScoped
 public class WorkspaceContainerFactory {
 
-  @ConfigProperty(name = "qits.workspace.image", defaultValue = "qits/workspace:latest")
+  /**
+   * The image every workspace container runs — registry-qualified and pinned to a released version
+   * ({@code localhost:8081/qits/workspace:<calver>}). The value ships in this library's {@code
+   * META-INF/microprofile-config.properties}, which carries the reasoning for both halves of that
+   * shape, and which is also the single file the release train rewrites.
+   *
+   * <p><b>No {@code defaultValue}</b>, deliberately, and unlike every other key on this class. A
+   * default here would be a second copy of the pin that the train does not move, so it would be
+   * stale from the first bump onward — and it would be a stale copy of the exact thing the pin
+   * exists to end: an unqualified {@code qits/workspace:latest} resolving to whatever a host
+   * happens to have lying in its local image store. A deployment that loses the property should
+   * fail at startup and say which key is missing, not quietly launch a hand-built tag. Same
+   * arrangement, same reason, as {@code ReleaseIntegrator.entryBranch}.
+   */
+  @ConfigProperty(name = "qits.workspace.image")
   String image;
 
   /**

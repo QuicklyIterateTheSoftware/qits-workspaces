@@ -763,3 +763,11 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   `./mvnw verify -DskipITs=false`. Keep both properties: the default keeps `mvn verify` runnable
   anywhere, and the self-skip keeps a deliberate `-DskipITs=false` from failing on a machine that
   simply has no image.
+  - Their image name comes from `-Dqits.workspace.image=`, falling back to `qits/workspace:latest`.
+    That fallback is a *local-store* name and stays one: the check is `docker image inspect`, which
+    never pulls. The service itself no longer runs that tag — it runs the pinned, published
+    `localhost:8081/qits/workspace:<calver>` from `microprofile-config.properties` — so to exercise
+    the ITs against the shipped image, pull it and pass it:
+    `./mvnw verify -DskipITs=false -Dqits.workspace.image=localhost:8081/qits/workspace:<calver>`.
+    The fallback is deliberately not a copy of the pin; the release train moves the pin and would
+    not move five test literals.
