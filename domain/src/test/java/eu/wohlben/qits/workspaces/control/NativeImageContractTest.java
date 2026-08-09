@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.control;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -18,31 +19,71 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Neither assertion can prove a native image works — that needs the binary, and both defects
  * below were found by running one. What they prevent is the silent re-introduction: the suite runs
- * on in-memory H2 and needs no reflection registration, so the shipped datasource url and the
- * {@code @RegisterForReflection} lists are exactly the code no other test looks at.
+ * against a postgres it spawns itself and needs no reflection registration, so the shipped
+ * datasource url and the {@code @RegisterForReflection} lists are exactly the code no other test
+ * looks at.
  */
 public class NativeImageContractTest {
 
   /**
-   * The shipped url must not ask H2 to start its TCP server. {@code AUTO_SERVER=TRUE} loads {@code
-   * org.h2.server.TcpServer} by name, which is not in the image, and the binary died on its first
-   * connection — see this file's header comment for why registering the server was the wrong fix.
-   * Read from the resource rather than from the config, because the suite overrides the url.
+   * The shipped datasource must be nothing but the platform's generic resource contract: {@code
+   * db-kind=postgresql} and the three {@code QITS_RESOURCE_DB_*} expressions, unresolved, with no
+   * default behind them.
+   *
+   * <p>The intent is unchanged from what this assertion pinned when the store was H2 — <b>the
+   * shipped config must never regress to something the native image cannot boot</b> — and both
+   * spellings of that regression are what the deployed binary taught this repo. {@code AUTO_SERVER}
+   * loaded {@code org.h2.server.TcpServer} by name, which is not in the image, and the process died
+   * on its first connection. {@code ${user.home}} resolved to {@code ?} for a uid with no
+   * {@code /etc/passwd} entry, because a native image reads it through {@code getpwuid(2)}, and the
+   * process died at Flyway. Both were green through every JVM test, because the suite overrides this
+   * url and never opens the shipped one — which is still true and is why this is read from the
+   * resource rather than from the config.
+   *
+   * <p>An unresolved expression is not a weaker default than a file path: it is the refuse-to-boot
+   * stance. A container with no {@code QITS_RESOURCE_DB_URL} dies naming what is missing, instead of
+   * opening a store nobody meant.
    */
   @Test
-  public void shippedDatasourceUrlDoesNotStartH2sTcpServer() throws Exception {
+  public void shippedDatasourceIsTheGenericResourceContractAndNothingElse() throws Exception {
     Properties shipped = new Properties();
     try (InputStream in =
         getClass().getClassLoader().getResourceAsStream("META-INF/microprofile-config.properties")) {
       shipped.load(in);
     }
-    String url = shipped.getProperty("quarkus.datasource.workspaces.jdbc.url");
-    assertTrue(url != null && url.startsWith("jdbc:h2:file:"), "expected a file H2 url, got " + url);
-    assertFalse(
-        url.toUpperCase().contains("AUTO_SERVER"),
-        "AUTO_SERVER makes the native binary die on `Class \"org.h2.server.TcpServer\" not found`,"
-            + " and opens a database port to every workspace container on qits-net: "
-            + url);
+    assertEquals(
+        "postgresql",
+        shipped.getProperty("quarkus.datasource.workspaces.db-kind"),
+        "the shipped datasource must be postgres — the store the platform provisions");
+    assertEquals(
+        "${QITS_RESOURCE_DB_URL}",
+        shipped.getProperty("quarkus.datasource.workspaces.jdbc.url"),
+        "the shipped url must be the injected resource variable, with no default behind it");
+    assertEquals(
+        "${QITS_RESOURCE_DB_USERNAME}",
+        shipped.getProperty("quarkus.datasource.workspaces.username"),
+        "the shipped username must be the injected resource variable");
+    assertEquals(
+        "${QITS_RESOURCE_DB_PASSWORD}",
+        shipped.getProperty("quarkus.datasource.workspaces.password"),
+        "the shipped password must be the injected resource variable");
+
+    // No datasource key may root anything at ${user.home} again. The one remaining ${user.home}
+    // default in this file — qits.workspaces.data-dir — is deliberate and docker/Dockerfile names it
+    // explicitly for exactly this reason; a database is the case that has no such answer.
+    for (String key : shipped.stringPropertyNames()) {
+      if (!key.startsWith("quarkus.datasource.")) {
+        continue;
+      }
+      String value = shipped.getProperty(key);
+      assertFalse(
+          value.contains("${user.home}"),
+          key
+              + " roots a shipped datasource at ${user.home}, which a native image resolves through"
+              + " getpwuid(2) — `?` for uid 1001, and a boot failure only the packaged artifact ever"
+              + " sees: "
+              + value);
+    }
   }
 
   /**

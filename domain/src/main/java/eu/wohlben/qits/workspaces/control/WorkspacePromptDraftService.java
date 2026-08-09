@@ -101,11 +101,11 @@ public class WorkspacePromptDraftService {
     Workspace workspace = workspaceResolver.resolveActive(id);
     String repoId = workspace.repositoryId;
     String workspaceId = workspace.workspaceId;
-    // Atomic DB-level upsert (H2 MERGE) rather than a read-then-insert: the draft's PK *is* the
+    // Atomic DB-level upsert (`insert … on conflict`) rather than a read-then-insert: the PK *is* the
     // workspace id (shared 1:1 PK/FK), so two concurrent first-saves for a draftless workspace —
     // the exact cross-device flow this feature targets — would both find no row and both insert the
-    // same PK, and the loser's insert would 500 on the constraint violation. MERGE serializes them
-    // under the row lock (last write wins), so a first-insert race is a clean upsert, not a 500.
+    // same PK, and the loser's insert would 500 on the constraint violation. The upsert serializes
+    // them under the row lock (last write wins), so a first-insert race is clean, not a 500.
     // See docs/issues/resolved/2026-07-20_prompt-draft-concurrent-first-insert-500.md.
     draftRepository.upsert(workspace.id, content, serializedPrompt);
     // Notify other open clients (another device/browser) to rehydrate — they apply the refetched

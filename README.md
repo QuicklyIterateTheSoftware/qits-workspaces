@@ -41,8 +41,8 @@ builder stage in `docker/Dockerfile`, and that is where the two
 `domain/` is a library jar. **`service/` is the application** — it carries
 `<packaging>quarkus</packaging>` and produces a process, as a JVM fast-jar or as a native binary.
 `domain` owns its **own datasource, persistence unit and Flyway lineage**
-(`db/workspaces/migration`, a separate H2), which is what makes this a standalone deployable rather
-than a checkout of the monorepo.
+(`db/workspaces/migration`, its own PostgreSQL database), which is what makes this a standalone
+deployable rather than a checkout of the monorepo.
 
     ./mvnw verify
     java -jar service/target/quarkus-app/quarkus-run.jar
@@ -177,17 +177,25 @@ Nothing here wrote to it once every ref move became a push, and its last reader 
 workspace metadata sidecars written before they moved to this service's own tree — went once no
 ACTIVE workspace still had one there. `qits.workspaces.data-dir` is the only tree this service opens.
 
-**The event bus needs nothing.** A release publishes `SCMRelease` through the `qits-eventstream`
-jar, which ships every key it needs as a default: `qits.events.url` is the qits-net alias, and
-`docker/Dockerfile` names the outbox's database (`/data/eventstream`) because the jar's own
-`${user.home}` default has nowhere to land in an image with no passwd entry. So the image boots
-unchanged and a deployment overrides only what it wants moved:
+**Two databases, and the deployment supplies both.** `.config/qits/deployments.yml` declares
+
+    resources: postgresql:db, postgresql:eventstream:qits_workspaces_eventstream
+
+and qits-deployments creates a role and a database for each before the successor container starts,
+injecting `QITS_RESOURCE_DB_URL` / `_USERNAME` / `_PASSWORD` and the matching
+`QITS_RESOURCE_EVENTSTREAM_*` triple. `db` is this context's store, read by the `domain` jar's
+shipped defaults; `eventstream` is the outbox's, read by the `qits-eventstream` jar's. Neither has a
+default behind it: an unset variable is an unresolvable expression and the process dies at Flyway
+naming what is missing, rather than opening a store nobody meant.
+
+The `eventstream` database is named explicitly because the derived default would collide with every
+other consumer of that library on the same postgres; `db` takes the derived `qits_workspaces`.
+
+**The event bus needs nothing else.** A release publishes `SCMRelease` through the `qits-eventstream`
+jar, which ships every remaining key as a default — `qits.events.url` is the qits-net alias. Set it
+when the bus lives somewhere else:
 
     QITS_EVENTS_URL=http://qits-events:8080
-    QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL=jdbc:h2:file:/data/eventstream/h2/eventstream
-
-Both are the shipped values written out; set them when the bus lives somewhere else. The outbox is
-durable, so whatever path it ends up on must be on the data volume — `/data` already is.
 
 ## Where it answers
 

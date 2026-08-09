@@ -98,18 +98,30 @@ id; the two are in different databases and a foreign key cannot span them.
 `domain/src/main/resources/db/workspaces/migration/`, hand-written, its own lineage on its own
 datasource. Never touch the monorepo's `db/migration` — that is a different database.
 
-The lineage is `V1` (workspace, workspace_event), `V2` (service_event, workspace_bootstrap_run,
-workspace_prompt_draft, workspace_prompt_attachment), `V3` (one active workspace per branch),
-then `V4` (service_event.workspace_row_id).
-`V1`'s header says the `V2` tables were deliberately left out; that was true when it was written and
-is not any more — `V2`'s header explains why. Likewise `V1`'s "no unique constraint" note is
-superseded by `V3` for the branch. Extend, never renumber, and never edit an applied file's body:
-Flyway checksums it.
+**The lineage is one `V1`, and it starts again there.** The four H2 files (`V1` workspace +
+workspace_event, `V2` the four host tables, `V3` one active workspace per branch, `V4`
+service_event.workspace_row_id) were deleted rather than continued when the store moved to
+PostgreSQL: the move is an unwrap and a re-bootstrap, so no postgres database ever ran them and no
+`V5__move_to_postgres.sql` had a reader. `V1`'s header records what the translation changed and what
+it deliberately kept. **From here the ordinary rule is back**: extend, never renumber, and never edit
+an applied file's body — Flyway checksums it.
 
-**H2 has no partial indexes.** `create unique index … where …` is a syntax error, so a rule that
-only applies to some rows carries its predicate in a generated column instead and relies on unique
-indexes ignoring NULLs — see `V3`'s `active_branch`. Verify any index syntax against the H2 version
-actually on the classpath before writing the migration; it is the only target.
+**The target is PostgreSQL 18.4** — the tag `images/qits-oci-postgresql` is built from, and the
+version the suites' embedded binaries are, so a migration is proved against the engine it ships on.
+Two H2 habits are gone with it: a rule that applies to some rows is a **partial unique index** now
+(`create unique index … where …`, which is what `uq_workspace_active_branch` finally is, instead of
+the generated column H2 forced), and `clob`/`blob` are `text`/`bytea`. The second is also an entity
+rule — see below.
+
+**`@Lob` is banned on this context's entities.** On H2 a `@Lob String` was a clob and the two agreed;
+on postgres `@Lob` means a LARGE OBJECT, so Hibernate binds an oid and the insert fails against the
+column the migration declares. Spell it `@Column(columnDefinition = "text")` — or `"bytea"` for
+bytes — as `Workspace.preamble`, `WorkspacePromptDraft.content`, `ServiceEvent.logExcerpt` and
+`WorkspacePromptAttachment.bytes` do.
+
+**Native SQL is postgres SQL.** `WorkspacePromptDraftRepository.upsert` is the only place this repo
+writes any, and it is `insert … on conflict (…) do update` — H2's `merge into … key (…)` until the
+move.
 
 Remember that workspace rows are **soft-deleted**. A child table in another context gets no cascade;
 publish through `WorkspaceResolved` instead, and fire it synchronously inside the resolving
@@ -683,7 +695,7 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
 
 - **App-level config lives in `service/src/main/resources/application.properties`, and the tests
   inherit it.** That file is on the test classpath and Quarkus merges it, so
-  `service/src/test/resources/application.properties` holds test-only *overrides* (in-memory H2,
+  `service/src/test/resources/application.properties` holds test-only *overrides* (the test port,
   `flyway…clean-at-start`, the on-disk trees under `target/`) and nothing else. Never
   re-declare a shipped setting such as `quarkus.rest.path` there: the copy is free to drift from
   what ships, and then a green suite proves nothing.
@@ -699,17 +711,28 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   closed the first of those; nothing closes the second, and the native build widened the gap —
   see "the two rules" above for what else only the artifact can tell you.
 - `NativeImageContractTest` (one per module) holds the native-image invariants a JVM run *can*
-  hold: no `AUTO_SERVER` in the shipped datasource url, every nested record of `QitsConfig` and of
+  hold: the shipped datasource being the bare `QITS_RESOURCE_DB_*` contract with no `${user.home}`
+  anywhere behind it — the two spellings of "config the binary cannot boot on" this repo paid for,
+  `AUTO_SERVER` and a home-rooted file path — every nested record of `QitsConfig` and of
   `CaptureResource`'s payloads present in its `@RegisterForReflection(targets)`, and
   `CaptureCorsRoute` reading an application-owned config key. None of them proves a binary works —
   they prevent the silent re-introduction of what booting one already caught.
+- **The suites run on a real postgres they spawn themselves.** Zonky resolves the binaries as
+  ordinary Maven artifacts and `EmbeddedPg` starts one child process per surefire JVM — never
+  Testcontainers, never a dev service, so the clone-alone no-docker rule survives the move off H2.
+  Its port is chosen at run time, which is why the url/username/password are not in any properties
+  file: `EmbeddedPgConfigSource` supplies them at ordinal 500, registered through
+  `META-INF/services`. Both classes are **copied per module** (`domain`'s `…workspaces.testdb`,
+  `service`'s `…workspaces.wiring.testdb`), because sharing them would mean a test-jar dependency
+  between two modules that deliberately have none — the same reason the `Fake*` doubles are
+  duplicated. **Every (module, datasource) pair names a distinct database** so two suites on one host
+  cannot mean the same one.
 - **The event bus is dark in `%dev` and `%test`, but its datasource is not.**
   `qits.eventstream.enabled=false` stops publishing and sweeping; Quarkus still opens the connection
-  and runs Flyway at boot, so `service/src/test/resources/application.properties` points the
-  `eventstream` datasource at in-memory H2. Without it every run would create and migrate a real
-  `~/.qits/data/eventstream` and two builds on one host would race for its single-writer file. A test
-  that wants the bus real turns it back on for itself against a stub, never against a live
-  qits-events.
+  and runs Flyway at boot, so `service`'s `EmbeddedPgConfigSource` supplies the `eventstream`
+  datasource's triple beside the `workspaces` one. Without it every run would try to open the
+  database a deployment injects, and fail on an unresolvable expression. A test that wants the bus
+  real turns it back on for itself against a stub, never against a live qits-events.
 - `FakeRepositoryLookup` still wins over `wiring/HttpRepositoryLookup` with no change on your part:
   the latter is `@DefaultBean`, which yields to any other bean of the type. **Keep that annotation.**
   Drop it and the two are an ambiguous dependency — the build fails at `ArcProcessor#validate`, not
@@ -721,9 +744,12 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   left its `.class` in `target/`, and the next `-Dnative` run failed with an ambiguous
   `RepositoryLookup` naming a class no longer in `src/`. `mvn clean` — the symptom names a file you
   cannot find, which is the confusing part.
-- A `Failed to start quarkus` / `Port already bound: 8081` failure is the known flake
-  (`migration-plan.md` §9 item 14) — `@QuarkusTest` restarts racing for the test port. Re-run first,
-  or pass `-Dquarkus.http.test-port=<free port>` when something else on the machine is using it.
+- `Port already bound: 8081` is settled rather than flaky now: `service`'s test properties set
+  `quarkus.http.test-port=0`, so the OS picks and RestAssured is told. It was two failures wearing
+  one message — `@QuarkusTest` restarts racing each other for the default test port
+  (`migration-plan.md` §9 item 14), and 8081 being where the platform's own npm registry answers on
+  the machine this repo is most likely built on. Keep the line; it is a test-only value and belongs
+  in that file.
 - `TestOrigin.create(dataDir)` builds a real bare origin (master + a diverging feature branch) and
   returns a repo id; pair it with `FakeRepositoryLookup.register`. Where those origins go is
   **`qits.test.origins-dir`, a key no deployment has** — the suite needs somewhere to put a fixture

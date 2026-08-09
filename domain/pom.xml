@@ -19,8 +19,9 @@
          jar in the shape of the monorepo's `artifacts`/`ci`/`epics` modules — NO web, NO JAX-RS,
          NO websockets; those live in the sibling `service` module.
 
-         It owns its OWN named datasource + persistence unit + Flyway lineage (a separate H2 under
-         ~/.qits/data/workspaces, see src/main/resources/META-INF/microprofile-config.properties),
+         It owns its OWN named datasource + persistence unit + Flyway lineage (its own PostgreSQL
+         database, provisioned by the platform's `resources:` mechanism — see
+         src/main/resources/META-INF/microprofile-config.properties),
          and it references repositories by *String id*, never a JPA @ManyToOne into qits' tables.
          That is what makes this repo a standalone deployable rather than a checkout of the monorepo.
 
@@ -52,12 +53,22 @@
             <artifactId>quarkus-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- This context's store. It was a file H2 until the platform grew resource
+                 provisioning; the `workspaces` datasource is a PostgreSQL database of its own now,
+                 created by qits-deployments before the container starts. -->
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-jdbc-h2</artifactId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of the core: without this module Flyway
+                 refuses a postgres url with "no database found to handle". It sits here because
+                 this module owns the lineage. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -74,6 +85,33 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest here boots against. Zonky spawns real postgres binaries
+                 as a child process — a maven dependency rather than a container — which is what
+                 keeps the clone-alone, docker-free rule true now that the store is postgres.
+                 EmbeddedPg + EmbeddedPgConfigSource hand the running instance to Quarkus. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather than
+                 during resolution. These three are what this platform is built and developed on. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

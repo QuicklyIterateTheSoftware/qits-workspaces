@@ -7,7 +7,6 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import org.hibernate.annotations.CreationTimestamp;
@@ -91,11 +90,20 @@ public class Workspace extends PanacheEntityBase {
   @Column(name = "runtime_error", length = 2000)
   public String runtimeError;
 
+  /*
+   * `text`/`bytea` via columnDefinition, and NOT @Lob — the one entity mapping the move to postgres
+   * had to change. On H2 a @Lob String was a clob and the two agreed; on postgres @Lob means a LARGE
+   * OBJECT, so Hibernate binds an oid and the insert fails against the column V1 declares. Unbounded
+   * either way, which is what these fields need.
+   */
+
   /** Markdown: the reason/goal, authored at creation, editable while ACTIVE. */
-  @Lob public String preamble;
+  @Column(columnDefinition = "text")
+  public String preamble;
 
   /** Markdown: the outcome, authored at integration or abandonment. */
-  @Lob public String result;
+  @Column(columnDefinition = "text")
+  public String result;
 
   /** When the workspace was resolved (integrated/abandoned); null while ACTIVE. */
   @Column(name = "resolved_at")

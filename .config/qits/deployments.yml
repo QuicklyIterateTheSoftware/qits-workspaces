@@ -8,6 +8,24 @@
 # thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
 #
 # qits-workspaces is an ENVIRONMENT service: one instance per tier, the default target, so the
-# `deployment_target` key is left off rather than written out as its own default. Which leaves
-# this file with no keys at all — and it still matters, because this service is the one that
-# reads it, and it reads it for its presence.
+# `deployment_target` key is left off rather than written out as its own default.
+#
+# ONE KEY, AND IT ASKS FOR TWO DATABASES, because two jars in this deployable each own one.
+#
+#   postgresql:db                                     the `workspaces` datasource, this context's
+#                                                     own store. No third segment, so the database
+#                                                     name is derived: `qits_workspaces`.
+#   postgresql:eventstream:qits_workspaces_eventstream the outbox's, declared by the qits-eventstream
+#                                                     jar. Named explicitly, because the derived
+#                                                     default would collide with every other
+#                                                     consumer of that library on the same postgres.
+#
+# The deployer creates a role and a database for each before the successor container starts and
+# injects QITS_RESOURCE_DB_URL / _USERNAME / _PASSWORD and QITS_RESOURCE_EVENTSTREAM_* into it. The
+# variable names follow the resource NAME, so `eventstream` is not a label chosen here — it is what
+# the library's own shipped defaults read back, and renaming it stops matching them.
+#
+# Nothing in the deployer is workspaces-specific: an application maps the generic variables in its
+# own config defaults, which the domain jar's META-INF/microprofile-config.properties does for the
+# first and the qits-eventstream jar does for the second.
+resources: postgresql:db, postgresql:eventstream:qits_workspaces_eventstream

@@ -6,7 +6,6 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import java.time.Instant;
 
@@ -60,8 +59,13 @@ public class ServiceEvent extends PanacheEntityBase {
   @Column(length = 2000)
   public String summary;
 
-  @Lob
-  @Column(name = "log_excerpt")
+  /*
+   * `text`/`bytea` via columnDefinition, and NOT @Lob — the one entity mapping the move to postgres
+   * had to change. On H2 a @Lob String was a clob and the two agreed; on postgres @Lob means a LARGE
+   * OBJECT, so Hibernate binds an oid and the insert fails against the column V1 declares. Unbounded
+   * either way, which is what these fields need.
+   */
+  @Column(name = "log_excerpt", columnDefinition = "text")
   public String logExcerpt;
 
   @Column(name = "command_id")

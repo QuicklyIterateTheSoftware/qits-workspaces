@@ -164,6 +164,35 @@
             <artifactId>rest-assured</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest here boots against — BOTH of this module's datasources,
+                 `workspaces` and the qits-eventstream jar's `eventstream`. Zonky spawns real
+                 postgres binaries as a child process, a maven dependency rather than a container,
+                 which is what keeps the clone-alone, docker-free rule true now that both stores are
+                 postgres. EmbeddedPg + EmbeddedPgConfigSource hand the running instance to Quarkus.
+                 The copy in `domain` is deliberate: the two modules share no test classpath. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather than
+                 during resolution. These three are what this platform is built and developed on. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
