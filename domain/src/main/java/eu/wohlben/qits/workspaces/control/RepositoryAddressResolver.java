@@ -11,9 +11,9 @@ import java.util.Optional;
  * name-addressed and committed relative submodule urls resolve natively. Registering and persisting
  * those aliases is the repositories context's job, hence the port.
  *
- * <p>Injected as {@code Instance<RepositoryAddressResolver>}. Empty is a supported configuration,
- * not a degraded one: both env vars are then blank, and the daemon falls back to id-addressing
- * ({@code /git/<repositoryId>}) exactly as it did before name-addressing existed.
+ * <p>Injected as {@code Instance<RepositoryAddressResolver>}. Empty is supported: {@link
+ * RepositoryLookup} is the ordinary production source for the same pair, while an implementation
+ * here lets an embedding override the git address registry.
  */
 public interface RepositoryAddressResolver {
 
@@ -22,7 +22,7 @@ public interface RepositoryAddressResolver {
 
   /**
    * The {@code (projectId, name)} for {@code repoId}, or empty when the repository or its project
-   * is absent — the caller then id-addresses.
+   * is absent — the caller then asks {@link RepositoryLookup}.
    */
   Optional<ProjectScopedName> resolve(String repoId);
 }

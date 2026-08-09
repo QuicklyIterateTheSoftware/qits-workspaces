@@ -30,7 +30,8 @@ public interface RepositoryLookup {
    * is the registered name — the coordinate that is the same on every platform instance, while
    * {@code id} is whatever that instance's registry minted (a manifest repository's id equals its
    * name, a self-seeded one's is a UUID). Both are nullable — a registry that does not answer with
-   * one costs the event a field, never the release.
+   * one costs the event a field, never the release. The workspace daemon also receives both so its
+   * name-addressed clone lets committed relative submodule URLs resolve to sibling repositories.
    */
   record RepositoryView(String id, String name, String projectId, String mainBranch) {}
 

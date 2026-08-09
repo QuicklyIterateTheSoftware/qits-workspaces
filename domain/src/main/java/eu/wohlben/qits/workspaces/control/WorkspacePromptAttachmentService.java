@@ -107,6 +107,40 @@ public class WorkspacePromptAttachmentService {
         .toList();
   }
 
+  /** Returns one attachment scoped to its active workspace, including its raw image bytes. */
+  @Transactional
+  public WorkspacePromptAttachment getAttachment(Long id, String attachmentId) {
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    return attachmentRepository
+        .findByWorkspaceIdAndId(workspace.id, attachmentId)
+        .orElseThrow(() -> new NotFoundException("Attachment not found: " + attachmentId));
+  }
+
+  /** Replaces an attachment's image in place, preserving the id used by durable document URLs. */
+  @Transactional
+  public WorkspacePromptAttachment updateAttachment(
+      Long id,
+      String attachmentId,
+      String claimedMimeType,
+      String label,
+      String source,
+      String dataBase64) {
+    PromptAttachmentSource parsedSource = parseSource(source);
+    byte[] bytes = decodeAndValidate(dataBase64);
+    Workspace workspace = workspaceResolver.resolveActive(id);
+    WorkspacePromptAttachment attachment =
+        attachmentRepository
+            .findByWorkspaceIdAndId(workspace.id, attachmentId)
+            .orElseThrow(() -> new NotFoundException("Attachment not found: " + attachmentId));
+    attachment.mimeType = sniffImageType(bytes);
+    attachment.label = label;
+    attachment.source = parsedSource;
+    attachment.bytes = bytes;
+    changePublisher.fire(
+        workspace.repositoryId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
+    return attachment;
+  }
+
   /** Removes one attachment scoped to its workspace; 404 if the workspace or the row is unknown. */
   @Transactional
   public void deleteAttachment(Long id, String attachmentId) {
@@ -125,6 +159,22 @@ public class WorkspacePromptAttachmentService {
     } catch (IllegalArgumentException e) {
       throw new BadRequestException("Unknown attachment source: " + source, e);
     }
+  }
+
+  private byte[] decodeAndValidate(String dataBase64) {
+    byte[] bytes;
+    try {
+      bytes = Base64.getDecoder().decode(dataBase64);
+    } catch (IllegalArgumentException e) {
+      throw new BadRequestException("Attachment data is not valid base64", e);
+    }
+    if (bytes.length > maxBytes) {
+      throw new PayloadTooLargeException("Attachment exceeds the " + maxBytes + "-byte limit");
+    }
+    if (sniffImageType(bytes) == null) {
+      throw new BadRequestException("Attachment is not a PNG or JPEG image");
+    }
+    return bytes;
   }
 
   /**
