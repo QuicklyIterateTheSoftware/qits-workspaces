@@ -5,6 +5,7 @@ import eu.wohlben.qits.workspaces.gitmirror.GitMirrors;
 import eu.wohlben.qits.workspaces.gitmirror.RepoMirror;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -56,6 +57,14 @@ public class GitMirrorRegistry {
 
   @Inject GitHostAddress gitHost;
 
+  /**
+   * What caused the work a push is part of, asked once per push and stamped on the request so the
+   * git host can publish its SCM events under the same cause. Optional like every port here: with no
+   * implementation the supplier answers null and a push names no cause, which is what every push did
+   * before the git host published anything.
+   */
+  @Inject Instance<PushCausation> pushCausation;
+
   private GitMirrors mirrors;
 
   @PostConstruct
@@ -66,7 +75,16 @@ public class GitMirrorRegistry {
             gitHost,
             Path.of(dataDir).toAbsolutePath(),
             Duration.ofMillis(networkTimeoutMs),
-            Duration.ofMillis(freshnessMs));
+            Duration.ofMillis(freshnessMs),
+            this::currentCauseId);
+  }
+
+  /**
+   * Read per push rather than once at build time, because the answer is per-thread: it is whatever
+   * the request or the bus dispatch this push belongs to arrived under.
+   */
+  private String currentCauseId() {
+    return pushCausation.isResolvable() ? pushCausation.get().currentCauseId() : null;
   }
 
   /** The mirror for a repository. Cheap and lazy — nothing is cloned until objects are needed. */

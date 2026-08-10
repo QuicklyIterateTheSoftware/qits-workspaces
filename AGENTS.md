@@ -629,6 +629,39 @@ integrate**, which released nothing to deploy.
 **This repository carries its own** `.config/qits/deployments.yml`, so it releases through the
 mechanism it implements.
 
+## The causation stamp on every push
+
+The git host publishes an SCM event per ref a push moves — `SCMPublishCommit`, `SCMPublishTag`,
+`SCMDeleteBranch`, `SCMDeleteTag` — and it publishes them **under whatever `X-Qits-Causation-Id` the
+push carried**, read off the receive-pack request. Every ref this service moves is moved by a push,
+so this hop is where a chain would otherwise break: release → push → commit event → CI run → deploy
+is one chain only because the producer says what it was doing.
+
+`domain/…/control/PushCausation` is the port and `service/…/bus/EventstreamPushCausation` reads
+`CausationScope`, the same split `ReleaseAnnouncer`/`SCMReleaseAnnouncer` already has and for the
+same reason: `domain` stays free of the bus. `GitMirrorRegistry` injects it as `Instance<T>` and
+hands `GitMirrors` a `Supplier<String>`; `RepoMirror.push(cwd, spec)` turns the answer into
+`-c http.extraHeader=X-Qits-Causation-Id: <uuid>`.
+
+Four things are deliberate:
+
+- **It is attached in `push(Path, PushSpec)` and nowhere else.** Both `push` overloads, both
+  worktree pushes, `createBranch` and `deleteBranch` all funnel through it, so no call site has to
+  remember — and there is no external remote in this service that could pick it up by accident.
+- **The header name is a literal in `gitmirror`**, because that module has no Quarkus in it and
+  stays that way. `EventstreamPushCausationTest` asserts it equals `CausationHeader.NAME`; nothing
+  else connects the two strings.
+- **A value that will not parse as a UUID is dropped rather than interpolated.** A cause is
+  advisory and must never fail a release, and a newline in an HTTP header would be injection. The
+  parse is the check and the sanitiser at once.
+- **Absent is a supported configuration.** No implementation, no cause, no header — which is exactly
+  how every push behaved before the git host published anything.
+
+Nothing in the suites can assert the header *arriving*: the fixtures are local bares and
+`http.extraHeader` is inert over a file transport. `CausedPushWiringTest` asserts the part that is
+this repo's — that a push made inside a scope, through the injected registry, still lands — and
+qits-githost owns the far end.
+
 ## The SCMRelease event
 
 A **release** publishes `SCMRelease {projectId, repository, repositoryName, branch, version}` the
