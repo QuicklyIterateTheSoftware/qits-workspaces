@@ -82,17 +82,24 @@ steps:
       # probe asks about the exact image the launcher will pull. A path spelled a second time here
       # could drift from the pin and pass while the pin was wrong.
       #
-      # THE HOST DOES NOT. $QITS_REGISTRY is how a step container reaches qits-platform-artifacts;
-      # the pin carries how the HOST docker daemon reaches it. Those are two different spellings of
-      # one registry (qits-platform-artifacts:8080 vs localhost:8081) and neither is portable to the
-      # other side.
+      # THE HOST DOES NOT. The pin carries how the HOST docker daemon reaches the registry
+      # (localhost:8081), and from inside a step container that spelling is the container itself —
+      # measured: the first firing of this file died on it in one second. $QITS_REGISTRY is the same
+      # host-side spelling, so neither is usable here. What a step container CAN reach is
+      # qits-platform-artifacts' own origin, which $QITS_MAVEN_REGISTRY_URL carries as origin+path —
+      # and the OCI API sits at that origin's host root /v2, since a registry client accepts no path
+      # prefix. Derived, not spelled: moving qits-artifacts moves both.
+      artifacts_origin=$(printf '%s' "$QITS_MAVEN_REGISTRY_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
       #
       # manifests/<tag>, never tags/list: this registry answers tags/list with 200 and an empty
       # array for a repository that does not exist, so a probe on it would pass for anything.
-      # A manifest that is not there is a 404, which -f turns into a non-zero exit.
+      # A manifest that is not there is a 404, which -f turns into a non-zero exit. HEAD with the
+      # Accept list, because a registry 404s a media type it will not negotiate.
       path="${current#*/}"
       path="${path%:*}"
-      curl -fsS -o /dev/null "http://$QITS_REGISTRY/v2/$path/manifests/$version"
+      curl -fsS -o /dev/null -I \
+        -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+        "$artifacts_origin/v2/$path/manifests/$version"
 
       sed -i -E "s#^qits\.workspace\.image=.*#qits.workspace.image=$reference#" "$properties"
       after=$(sed -n -E 's#^qits\.workspace\.image=##p' "$properties")
