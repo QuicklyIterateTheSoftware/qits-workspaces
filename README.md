@@ -127,7 +127,7 @@ at all.
 The url carries no path because qits-projects serves its own `/projects/api` segment, so the same
 base address works whether the call goes direct or through the gateway.
 
-`qits.artifacts.url` matters more than it used to: it is where every ref read and every ref write
+`qits.githost.url` matters more than it used to: it is where every ref read and every ref write
 goes. This service holds a **mirror** of each repository under `qits.workspaces.data-dir` (its own
 tree, rebuildable — delete it and the next request re-clones), does its merges in a worktree on that
 mirror, and reaches the served repository only by pushing. An unreachable git host is no longer a

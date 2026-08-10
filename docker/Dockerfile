@@ -99,7 +99,7 @@
 #           `worktree add/remove`, `merge`, `merge-tree --write-tree`, `rev-list`, `tag`, and `push`.
 #           That is the whole branch lifecycle, not an optional feature: absent, creating a workspace
 #           fails at its first `ls-remote`. Installed below from the image's own UBI repositories.
-#           Note what it now needs that it did not before: outbound HTTP to `qits.artifacts.url`. A
+#           Note what it now needs that it did not before: outbound HTTP to `qits.githost.url`. A
 #           git host this service cannot reach is no longer a one-endpoint problem.
 #
 # --- stage `build`: native-compile ----------------------------------------------------------------

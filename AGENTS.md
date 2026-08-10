@@ -427,13 +427,13 @@ a resolution state machine — all wrong-shaped for a ref a pipeline overwrites 
 proves the worktree slug survives a branch name that cannot be a directory name.
 
 **Every ref this service moves is moved by a push, and that is the point.** The bare origins used to
-be on our own disk, on the volume qits-artifacts serves, so a branch could be created, merged or
+be on our own disk, on the volume the git host serves, so a branch could be created, merged or
 deleted by writing the ref — which is exactly what this service did, and it is why **no branch
 creation, no merge and no cleanup it ever performed produced a CI run**: a filesystem ref update
-fires no `post-receive`. Pushing over HTTP through qits-artifacts makes receive-pack the sole writer
+fires no `post-receive`. Pushing over HTTP through qits-githost makes receive-pack the sole writer
 of every ref, so the protection hook sees every release and the existing post-receive → qits-ci →
 build chain happens for the ordinary reason. Nothing downstream learns a new trick. The address is
-`qits.artifacts.url` behind the `GitHostAddress` port.
+`qits.githost.url` behind the `GitHostAddress` port.
 
 Five properties, each of which is why a step is where it is:
 
