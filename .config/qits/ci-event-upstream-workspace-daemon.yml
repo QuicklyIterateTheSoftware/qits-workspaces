@@ -2,23 +2,35 @@
 #
 # qits-workspaces launches every workspace container from a pinned, registry-qualified reference
 # (qits.workspace.image, in domain/.../META-INF/microprofile-config.properties). A pin does not
-# follow anything by itself, so this is what moves it: qits-workspace-daemon releases, this rewrites
-# the tag, and the bump goes onto maintenance/ where ci-post-receive.yml releases it like any other
-# change.
+# follow anything by itself, so this is what moves it: qits-workspace-daemon publishes the image,
+# this rewrites the tag, and the bump goes onto maintenance/ where ci-post-receive.yml releases it
+# like any other change.
 #
-# THE RACE, recorded rather than fixed. SCMRelease fires when qits-workspace-daemon is TAGGED. That
-# repo then spends several minutes building and pushing the workspace image — roughly 3.4 GB of
-# toolchain — so this train can bump the pin to a version whose image is still uploading. The window
-# is nearly always harmless: the bump only edits a properties file, nothing here pulls or inspects
-# the image, and the reference is not dereferenced until a container launches, which is after this
-# repo's own release and deploy. Closing it properly means triggering on SoftwareRelease (fired when
-# the artifact is PUBLISHED, the way ci-event-upstream-eventstream.yml does) instead of SCMRelease.
-# That is the correct shape and the reason it is not here yet is only that the workspace image's
-# publish event was not wired when this train was written. Prefer it when it is.
-event: SCMRelease
+# THE RACE THIS FILE USED TO CARRY IS CLOSED. It triggered on SCMRelease, which fires when
+# qits-workspace-daemon is TAGGED — and that repository then spends up to two hours building and
+# pushing ~3.4 GB of layered toolchain, so the pin could name a version whose image was still
+# uploading, or one whose build went red and never uploaded at all. That is not hypothetical: the
+# value this file replaced (2026.809.192040) was written by such a bump and names nothing in the
+# registry to this day. SoftwareRelease is fired when the ARTIFACT is published, so it says the one
+# thing the pin needs to be true.
+#
+# THE SELECTION NAMES THE PACKAGE AND NOT THE REPOSITORY, and that is deliberate rather than a
+# missing condition. SoftwareRelease's `repository` field carries the repository's ROW ID, and
+# qits-workspace-daemon was registered by the projects self-seed reconcile, so its id is a UUID
+# minted per platform instance — no committed config can name it, and a selection that tried would
+# match nothing SILENTLY (CI logs matches and never non-matches). Unlike SCMRelease there is no
+# `repositoryName` to fall back on. The package name is the stable coordinate here, and it is a
+# sharper one anyway: it is the artifact this pin dereferences.
+#
+# WHICH IS ALSO WHY packageName IS qits/workspace AND NOT qits/workspace-daemon. That pipeline
+# declares two docker artifacts. The daemon image is the small one qits-deployments reads; this is
+# the layered one — the released toolchain with the daemon copied in as its entrypoint — and only
+# the second is startable as a workspace. Selecting on packageType alone would fire this train
+# twice per daemon release, once for an image no workspace can run.
+event: SoftwareRelease
 when:
-  # matching repositoryName because this repository's row id is a per-platform UUID.
-  - repositoryName: { exact: qits-workspace-daemon }
+  - packageType: { exact: docker }
+    packageName: { exact: qits/workspace }
 steps:
   - image: qits/build-images/node-base:latest
     timeout-seconds: 300
@@ -29,9 +41,10 @@ steps:
       version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
       # Digits and dots, nothing else. The version reaches a `sed` s### expression, and `#` is that
       # expression's own delimiter — a version carrying one closes it, and GNU sed's `e` command
-      # then runs a shell. It also becomes part of an image reference and part of a commit message.
-      # Refused rather than quoted: this is a calver, and nothing legitimate needs a character
-      # outside the set. Validate before the value goes near a file or a reference, not after.
+      # then runs a shell. It also becomes part of an image reference, part of a URL and part of a
+      # commit message. Refused rather than quoted: this is a calver, and nothing legitimate needs a
+      # character outside the set. Validate before the value goes near a file, a reference or a
+      # request, not after.
       case "$version" in
         ''|*[!0-9.]*) echo "refusing an implausible version: $version" >&2; exit 1 ;;
       esac
@@ -54,8 +67,32 @@ steps:
       reference="${current%:*}:$version"
 
       # Already there. Exit clean and commit nothing: a release that changes no file must not push a
-      # branch, or the maintenance leg cuts an empty release on every daemon tag.
+      # branch, or the maintenance leg cuts an empty release on every daemon release. Checked before
+      # the probe below, so a re-delivered event costs no request either.
       [ "$reference" != "$current" ] || exit 0
+
+      # THE PROBE: does the registry really hold that tag. SoftwareRelease is an ARTIFACT-published
+      # event, so this should always pass — and it is here precisely because "should" is what the
+      # previous shape also assumed. The declaration qits-ci announces on is a claim by the
+      # publishing repository, not something qits-ci watched land, so one HTTP call is what turns it
+      # into an observation.
+      #
+      # THE REPOSITORY PATH COMES OFF THE PIN, not off the event. Stripping the leading host segment
+      # from the committed reference gives the path the registry knows (`qits/workspace`), so the
+      # probe asks about the exact image the launcher will pull. A path spelled a second time here
+      # could drift from the pin and pass while the pin was wrong.
+      #
+      # THE HOST DOES NOT. $QITS_REGISTRY is how a step container reaches qits-platform-artifacts;
+      # the pin carries how the HOST docker daemon reaches it. Those are two different spellings of
+      # one registry (qits-platform-artifacts:8080 vs localhost:8081) and neither is portable to the
+      # other side.
+      #
+      # manifests/<tag>, never tags/list: this registry answers tags/list with 200 and an empty
+      # array for a repository that does not exist, so a probe on it would pass for anything.
+      # A manifest that is not there is a 404, which -f turns into a non-zero exit.
+      path="${current#*/}"
+      path="${path%:*}"
+      curl -fsS -o /dev/null "http://$QITS_REGISTRY/v2/$path/manifests/$version"
 
       sed -i -E "s#^qits\.workspace\.image=.*#qits.workspace.image=$reference#" "$properties"
       after=$(sed -n -E 's#^qits\.workspace\.image=##p' "$properties")

@@ -40,14 +40,15 @@ import org.junit.jupiter.api.Test;
  * side.
  *
  * <p>Part of the <strong>extended</strong> suite ({@code ./mvnw verify -Pextended}); self-skips
- * when docker or the {@code qits/workspace} image (built WITH the workspace-daemon stage) is
- * absent.
+ * when docker or the {@code qits/workspace} image is absent from the LOCAL store — the check is
+ * {@code docker image inspect} and never pulls, so pass a published reference with {@code
+ * -Dqits.workspace.image=} to run this against one.
  */
 @Tag("extended")
 public class DaemonServiceIT {
 
   private static final String IMAGE =
-      System.getProperty("qits.workspace.image", "qits/workspace:latest");
+      System.getProperty("qits.workspace.image", "localhost:8081/qits/workspace:latest");
   private static final String RUNTIME =
       System.getProperty("qits.workspace.container-runtime", "docker");
   private static final String REPO_ID = "service-repo";

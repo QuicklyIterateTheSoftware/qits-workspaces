@@ -272,7 +272,7 @@
              It deliberately does NOT flip skipITs, which is where this repo differs from its
              siblings. There the native profile turns ITs on so a `-Dnative` build exercises the
              binary it just produced; here the four *IT.java are the docker-backed `extended` suite
-             (real containers, the qits/workspace image, the daemon binary) and have nothing to say
+             (real containers, the published qits/workspace image, the daemon binary) and have nothing to say
              about the artifact — turning them on would make a native build shell docker, which is
              precisely what the clone-alone rule forbids. And the artifact-level IT that would
              belong here cannot be written yet: the binary refuses to start without a

@@ -700,6 +700,50 @@ token-free by necessity — its callers are daemons inside containers, holding n
 names its caller with a path parameter, so anything on `qits-net` can claim to be any workspace's
 daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes that.
 
+## The workspace image, and who pulls it
+
+`qits.workspace.image` is a **registry-qualified reference at a pinned calver**, and there is no
+`defaultValue` behind it in code — a deployment that loses the key must fail at startup naming it
+rather than launch something a host happens to have lying around. The properties file carries the
+reasoning; here is what surrounds it.
+
+**There is no hand-built image any more, and no recipe for one.** `qits/workspace:latest` was a
+local tag on one machine: no version, no registry, no pipeline, and a platform unwrap swept it,
+after which every workspace launch died with "no workspace-daemon dialed home". What publishes the
+image is **qits-workspace-daemon's own release pipeline**, which builds two docker artifacts —
+`qits/workspace-daemon`, the small one qits-deployments reads, and `qits/workspace`, the released
+toolchain with the daemon copied in as its entrypoint. **This pin names the second.** Only that one
+is startable as a workspace, and the difference is one hyphen.
+
+**`.config/qits/ci-event-upstream-workspace-daemon.yml` is what moves the pin**, on
+**`SoftwareRelease`** — the artifact-published event, not `SCMRelease`, which fires at tag time and
+would pin a version whose 3.4 GB image is still uploading or never uploads at all. It selects on
+`packageName` rather than on the repository, because `SoftwareRelease` carries a repository ROW ID
+and this daemon's is a per-platform UUID; the file says so at length, along with why it probes the
+registry's `manifests/<tag>` and never `tags/list`.
+
+**`DockerExecutor.ensureImage` pulls the pin when the host daemon does not hold it**, before the
+`docker run` and after nothing. Three properties are the point of it:
+
+- **Inspect first, and the inspect never pulls.** A present image is never re-checked against the
+  registry: the reference is a version, so what is local under that name *is* the release.
+- **The pull is bounded** (`qits.workspace.image-pull-timeout-ms`, 15 min — the base alone is
+  ~3.4 GB) and it is the only docker verb in that class that carries a bound, because it is the only
+  one that reaches the network. `DockerExecutor.runCapturing` grew a `timeout` parameter for it,
+  with `gitmirror`'s `GitCli` discipline: the drain runs on its own thread, because a registry that
+  accepts a connection and then says nothing blocks in `readLine()` and never in `waitFor()`.
+- **A wrong pin throws, naming the image and the registry.** That failure is *expected* — the tag is
+  written by a release train and the image is published by another repository's pipeline, so the two
+  can disagree — and the one thing it must never do is hang or fall back to something stale.
+  `DockerExecutorImagePullTest` overrides that single process seam and asserts the verb order, the
+  bound, and both halves of the message; no docker involved.
+
+**Measured 2026-08-10, and worth knowing before you debug a launch:** the platform registry holds no
+tag under `qits/workspace`, none under `qits/workspace-daemon` and none under the toolchain base
+`qits/workspace-base`. The shipped pin is therefore a **placeholder** naming nothing, and the first
+real value will arrive through the train (or by hand at the first published calver). Until then a
+workspace launch fails at the pull, which is the loud version of what used to be silent.
+
 ## Tests
 
 - **App-level config lives in `service/src/main/resources/application.properties`, and the tests
@@ -798,11 +842,15 @@ daemon (`migration-plan.md` §9 item 22). Edge auth neither touches nor fixes th
   `./mvnw verify -DskipITs=false`. Keep both properties: the default keeps `mvn verify` runnable
   anywhere, and the self-skip keeps a deliberate `-DskipITs=false` from failing on a machine that
   simply has no image.
-  - Their image name comes from `-Dqits.workspace.image=`, falling back to `qits/workspace:latest`.
-    That fallback is a *local-store* name and stays one: the check is `docker image inspect`, which
-    never pulls. The service itself no longer runs that tag — it runs the pinned, published
-    `localhost:8081/qits/workspace:<calver>` from `microprofile-config.properties` — so to exercise
-    the ITs against the shipped image, pull it and pass it:
+  - Their image name comes from `-Dqits.workspace.image=`, falling back to
+    `localhost:8081/qits/workspace:latest`. The check behind that fallback is `docker image
+    inspect`, which **never pulls** — deliberately, and unlike the service, which pulls its pin (see
+    "The workspace image, and who pulls it"). An IT that pulled 3.4 GB to decide whether to skip
+    would not be a self-skip.
+    Nothing publishes a `latest` tag, so the fallback normally means "skip", and passing a real
+    reference is the way to run them:
     `./mvnw verify -DskipITs=false -Dqits.workspace.image=localhost:8081/qits/workspace:<calver>`.
     The fallback is deliberately not a copy of the pin; the release train moves the pin and would
-    not move five test literals.
+    not move five test literals. It used to be the bare `qits/workspace:latest`, which was a
+    hand-built local tag on one machine — the whole disease the pin exists to end, and a spelling
+    that must not come back anywhere as a default.

@@ -264,6 +264,16 @@ public class WorkspaceContainerFactory {
   static final String PNPM_MOUNT = "/caches/pnpm";
 
   /**
+   * The pinned workspace image reference — the single source of truth {@link
+   * DockerExecutor#ensureImage} pulls when the host daemon does not hold it. Exposed rather than
+   * read from config a second time, so the reference the launcher pulls and the reference the argv
+   * carries cannot be two values.
+   */
+  public String image() {
+    return image;
+  }
+
+  /**
    * The shared credential volume name (blank when the mount is disabled) — the single source of
    * truth {@link DockerExecutor} reuses for its startup {@code docker volume create}.
    */

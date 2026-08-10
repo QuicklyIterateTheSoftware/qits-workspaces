@@ -33,15 +33,16 @@ import org.junit.jupiter.api.Test;
  * round-trip a command".
  *
  * <p>Part of the <strong>extended</strong> suite ({@code ./mvnw verify -Pextended}); self-skips
- * when docker or the {@code qits/workspace} image (which must be built WITH the workspace-daemon
- * stage) is absent. Reaches the host-run test server the same way host-run qits does — {@code
+ * when docker or the {@code qits/workspace} image is absent from the LOCAL store — the check is
+ * {@code docker image inspect} and never pulls, so pass a published reference with {@code
+ * -Dqits.workspace.image=} to run this against one. Reaches the host-run test server the same way host-run qits does — {@code
  * host.docker.internal}.
  */
 @Tag("extended")
 public class DaemonControlSocketIT {
 
   private static final String IMAGE =
-      System.getProperty("qits.workspace.image", "qits/workspace:latest");
+      System.getProperty("qits.workspace.image", "localhost:8081/qits/workspace:latest");
   private static final String RUNTIME =
       System.getProperty("qits.workspace.container-runtime", "docker");
 

@@ -8,9 +8,11 @@ import jakarta.inject.Inject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -37,6 +39,13 @@ public class DockerExecutor implements ContainerRuntime {
    */
   @ConfigProperty(name = "qits.workspace.container-network", defaultValue = "network")
   String containerNetwork;
+
+  /**
+   * The bound on the {@code pull} in {@link #ensureImage}. See the config key's own comment for why
+   * it is generous and why it exists at all.
+   */
+  @ConfigProperty(name = "qits.workspace.image-pull-timeout-ms", defaultValue = "900000")
+  long imagePullTimeoutMs;
 
   /**
    * Assembles the {@code docker run} argv (with the always-on cross-cutting config — credential
@@ -104,25 +113,9 @@ public class DockerExecutor implements ContainerRuntime {
 
   @Override
   public String run(String repoId, String workspaceId, Long rowId, String branch, String parent) {
-    String name = containerName(workspaceId, repoId);
-    // Create-if-absent the labeled per-workspace /workspace volume before the container mounts it,
-    // so recreation reattaches the same checkout (and dangling-volume reconcile has its handle).
-    ensureWorkspaceVolumeIfPersistent(repoId, workspaceId, branch, parent);
-    // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
-    // qits.* labels, host alias, host uid, shared network); this executor only prepends the runtime
-    // + `run` verb.
-    List<String> argv = new ArrayList<>();
-    argv.add(runtime);
-    argv.add("run");
-    argv.addAll(
-        containerFactory.forWorkspace(repoId, workspaceId, rowId, branch, parent).toRunArgv());
-
-    ExecResult result = runCapturing(null, argv);
-    if (result.exitCode() != 0) {
-      throw new InternalServerErrorException(
-          "Failed to start container " + name + ": " + result.output());
-    }
-    return name;
+    // One implementation, taking no tap. The capturing overload used to be a second copy of the
+    // whole sequence, which is one copy too many now that a pull sits in front of it.
+    return run(repoId, workspaceId, rowId, branch, parent, null);
   }
 
   @Override
@@ -154,7 +147,16 @@ public class DockerExecutor implements ContainerRuntime {
       String parent,
       java.util.function.Consumer<String> onLine) {
     String name = containerName(workspaceId, repoId);
+    // The image before anything else: the pin is a registry reference and the host daemon may not
+    // hold it. A `docker run` on an absent reference would pull on its own, silently and unbounded;
+    // pulling here is what makes the wait visible on the tap and the failure legible.
+    ensureImage(onLine);
+    // Create-if-absent the labeled per-workspace /workspace volume before the container mounts it,
+    // so recreation reattaches the same checkout (and dangling-volume reconcile has its handle).
     ensureWorkspaceVolumeIfPersistent(repoId, workspaceId, branch, parent);
+    // The factory owns the argv shape and the always-on cross-cutting config (credential volume,
+    // qits.* labels, host alias, host uid, shared network); this executor only prepends the runtime
+    // + `run` verb.
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
@@ -167,6 +169,65 @@ public class DockerExecutor implements ContainerRuntime {
           "Failed to start container " + name + ": " + result.output());
     }
     return name;
+  }
+
+  /**
+   * Pull the workspace image when the local daemon does not hold it.
+   *
+   * <p><b>Why this exists at all.</b> {@code qits.workspace.image} no longer names a hand-built
+   * local tag. It is a registry reference at a pinned version, so a host that has never pulled it —
+   * or a host a platform unwrap has just swept — holds nothing under that name. Left to itself
+   * {@code docker run} pulls such a reference on its own: unbounded, invisible on the tap, and on a
+   * bad pin failing in a sentence nobody reads as "the pin is wrong".
+   *
+   * <p><b>Inspect first, and the inspect never pulls.</b> That is the whole reason it is two calls:
+   * the ordinary case is an image already present, and it must cost nothing on the wire. A present
+   * image is also never re-checked against the registry — the pin is a version, so what is local
+   * under that name IS the release, and a launch is not the place to re-litigate it.
+   *
+   * <p><b>The failure names the image and the registry, and it throws.</b> A wrong pin is the
+   * expected failure here — the tag is written by a release train and the image is published by
+   * another repository's pipeline, so the two can disagree — and the one thing it must not do is
+   * hang or degrade to a stale local image. Bounded by {@code
+   * qits.workspace.image-pull-timeout-ms}, which is what stops a registry that accepts a connection
+   * and then says nothing from parking the request thread.
+   */
+  void ensureImage(java.util.function.Consumer<String> onLine) {
+    String image = containerFactory.image();
+    if (runCapturing(null, List.of(runtime, "image", "inspect", image)).exitCode() == 0) {
+      return;
+    }
+    LOG.infof("Pulling workspace image %s — the local %s daemon does not hold it", image, runtime);
+    ExecResult pull =
+        runCapturing(
+            null,
+            List.of(runtime, "pull", image),
+            onLine,
+            Duration.ofMillis(imagePullTimeoutMs));
+    if (pull.exitCode() != 0) {
+      throw new InternalServerErrorException(
+          "Could not pull the workspace image "
+              + image
+              + " from "
+              + registryOf(image)
+              + " — check that qits.workspace.image names a published tag: "
+              + pull.output());
+    }
+  }
+
+  /**
+   * The registry a reference is pulled from, for the failure message. Docker's own rule: the leading
+   * path segment is a host when it carries a dot or a port, or when it is literally {@code
+   * localhost}; anything else is a repository namespace on the default registry.
+   */
+  static String registryOf(String image) {
+    int slash = image == null ? -1 : image.indexOf('/');
+    if (slash < 0) {
+      return "docker.io";
+    }
+    String head = image.substring(0, slash);
+    boolean host = head.indexOf('.') >= 0 || head.indexOf(':') >= 0 || "localhost".equals(head);
+    return host ? head : "docker.io";
   }
 
   @Override
@@ -417,13 +478,32 @@ public class DockerExecutor implements ContainerRuntime {
     return runCapturing(cwd, command, null);
   }
 
+  private ExecResult runCapturing(
+      Path cwd, List<String> command, java.util.function.Consumer<String> onLine) {
+    return runCapturing(cwd, command, onLine, null);
+  }
+
   /**
    * Runs the command capturing its combined output; a non-null {@code onLine} additionally receives
    * each line as it arrives — the live tap the technical-process log stream rides on. Tap failures
    * are swallowed so a broken consumer can never fail the underlying docker verb.
+   *
+   * <p>A non-null {@code timeout} bounds the <b>whole</b> invocation, and only the calls that reach
+   * the network pass one. The bound cannot be enforced on this thread: a registry that accepts the
+   * connection and then says nothing blocks in {@code readLine()} and never in {@code waitFor()}, so
+   * the drain runs on its own thread and {@code destroyForcibly} is what unblocks it. That is
+   * {@code gitmirror}'s {@code GitCli} discipline, arrived at the same way and deliberately not
+   * shared with it — that class forces {@code GIT_TERMINAL_PROMPT} and an English locale into every
+   * process it spawns, which is git's contract rather than docker's.
+   *
+   * <p>Package-private, and the single place this class starts a process, so a test can replace the
+   * whole runtime by overriding one method.
    */
-  private ExecResult runCapturing(
-      Path cwd, List<String> command, java.util.function.Consumer<String> onLine) {
+  ExecResult runCapturing(
+      Path cwd,
+      List<String> command,
+      java.util.function.Consumer<String> onLine,
+      Duration timeout) {
     ProcessBuilder pb = new ProcessBuilder(command);
     if (cwd != null) {
       pb.directory(cwd.toFile());
@@ -431,34 +511,61 @@ public class DockerExecutor implements ContainerRuntime {
     pb.redirectErrorStream(true);
     try {
       Process p = pb.start();
-      String output;
-      try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-        if (onLine == null) {
-          output = reader.lines().collect(Collectors.joining("\n"));
-        } else {
-          StringBuilder collected = new StringBuilder();
-          String line;
-          while ((line = reader.readLine()) != null) {
-            if (collected.length() > 0) {
-              collected.append('\n');
-            }
-            collected.append(line);
-            try {
-              onLine.accept(line);
-            } catch (RuntimeException ignored) {
-              // the tap is observational only
-            }
-          }
-          output = collected.toString();
-        }
+      if (timeout == null) {
+        String output = drain(p, onLine);
+        return new ExecResult(p.waitFor(), output);
       }
-      int exitCode = p.waitFor();
-      return new ExecResult(exitCode, output);
+      StringBuilder collected = new StringBuilder();
+      Thread drain =
+          new Thread(
+              () -> {
+                try {
+                  collected.append(drain(p, onLine));
+                } catch (Exception ignored) {
+                  // the pipe closing under a destroyForcibly is this thread's expected end
+                }
+              },
+              "docker-exec-drain");
+      drain.setDaemon(true);
+      drain.start();
+      if (!p.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+        p.destroyForcibly();
+        drain.join(DRAIN_JOIN.toMillis());
+        return new ExecResult(-1, "timed out after " + timeout + ": " + String.join(" ", command));
+      }
+      drain.join(DRAIN_JOIN.toMillis());
+      return new ExecResult(p.exitValue(), collected.toString());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       return new ExecResult(-1, "interrupted");
     } catch (Exception e) {
       return new ExecResult(-1, e.getMessage());
+    }
+  }
+
+  /** How long to wait for the drain thread once the process has settled. */
+  private static final Duration DRAIN_JOIN = Duration.ofSeconds(5);
+
+  private static String drain(Process p, java.util.function.Consumer<String> onLine)
+      throws Exception {
+    try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+      if (onLine == null) {
+        return reader.lines().collect(Collectors.joining("\n"));
+      }
+      StringBuilder collected = new StringBuilder();
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (collected.length() > 0) {
+          collected.append('\n');
+        }
+        collected.append(line);
+        try {
+          onLine.accept(line);
+        } catch (RuntimeException ignored) {
+          // the tap is observational only
+        }
+      }
+      return collected.toString();
     }
   }
 }

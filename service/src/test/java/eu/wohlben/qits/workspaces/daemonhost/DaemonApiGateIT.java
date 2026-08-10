@@ -62,7 +62,7 @@ import org.junit.jupiter.api.Test;
 public class DaemonApiGateIT {
 
   private static final String IMAGE =
-      System.getProperty("qits.workspace.image", "qits/workspace:latest");
+      System.getProperty("qits.workspace.image", "localhost:8081/qits/workspace:latest");
   private static final String RUNTIME =
       System.getProperty("qits.workspace.container-runtime", "docker");
   private static final String REPO_ID = "apigate-repo";
