@@ -46,6 +46,7 @@
 
     <properties>
         <qits.eventstream.version>2026.810.191553</qits.eventstream.version>
+        <qits.arch-rules.version>2026.810.184518</qits.arch-rules.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -147,6 +148,12 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-eventstream</artifactId>
                 <version>${qits.eventstream.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's shared ArchUnit rules, test scope wherever entities live. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-arch-rules</artifactId>
+                <version>${qits.arch-rules.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>

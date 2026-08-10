@@ -75,6 +75,18 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
+            <!-- CausedRow + CausationStamp + @Uncaused, and NOTHING else out of this jar here: the
+                 persistence vocabulary, not the bus. `Workspace` and `WorkspaceEvent` record the
+                 event they were written because of in the platform's generic causation_id column;
+                 the other four entities opt out in one reviewable line each. The jar rides into
+                 this module's OWN tests too — the eventstream persistence unit boots whether the
+                 bus is enabled or not — so testdb/EmbeddedPgConfigSource feeds it a database and
+                 the test properties keep it dark, exactly the consumer contract the eventstream
+                 README states and the `service` module has always honoured. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>
@@ -85,6 +97,14 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The platform's shared ArchUnit rules; ArchRulesTest points them at this repo's
+                 packages, where the entities live. A new @Entity that neither implements CausedRow
+                 nor declares @Uncaused fails this build naming the class. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-arch-rules</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

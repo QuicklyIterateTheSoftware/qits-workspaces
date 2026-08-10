@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -37,6 +38,13 @@ import java.time.Instant;
  * any number of container recreates, which the daemon's own lifetime state does not. The declared
  * chain (what the steps are) is the daemon's {@code GET /bootstrap-commands}; a client joins the
  * two on {@link #bootstrapCommandId}.
+ *
+ * <p>{@code @Uncaused} by decision, and the row's own shape is the reason. It is an <b>updatable
+ * singleton</b>: one row per {@code (workspace, bootstrapCommandId)}, inserted by the first run and
+ * <em>overwritten</em> by every run after it. The stamp is insert-only, so a causation column would
+ * name the first run's cause and then keep naming it while every column beside it moved on — worse
+ * than empty. The write also sits on the async observer thread and the manual-run executor, where
+ * no scope stands anyway; the run's own audit trail is the {@code command} rows.
  */
 @Entity
 @Table(
@@ -45,6 +53,7 @@ import java.time.Instant;
         @UniqueConstraint(
             name = "UQ_workspace_bootstrap_run",
             columnNames = {"workspace_id_fk", "bootstrap_command_id"}))
+@Uncaused
 public class BootstrapRun extends PanacheEntityBase {
 
   @Id

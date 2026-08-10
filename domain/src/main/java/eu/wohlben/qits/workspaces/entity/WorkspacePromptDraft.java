@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -21,9 +22,16 @@ import org.hibernate.annotations.UpdateTimestamp;
  * generated id is needed. The workspace row is soft-deleted, so the on-delete-cascade FK never
  * fires in the normal discard flow — {@code WorkspaceService.doDiscard} deletes this row
  * explicitly.
+ *
+ * <p>{@code @Uncaused} by decision, twice over. No row here is ever written through Hibernate:
+ * {@code WorkspacePromptDraftRepository.upsert} is a native {@code insert … on conflict}, so
+ * {@code @PrePersist} — and with it the {@code CausationStamp} — cannot fire at all. And the row is
+ * an updatable singleton, rewritten by every autosave, so even a hand-set value would name one
+ * edit and then misname every one after it.
  */
 @Entity
 @Table(name = "workspace_prompt_draft")
+@Uncaused
 public class WorkspacePromptDraft extends PanacheEntityBase {
 
   /** Shares the owning {@link Workspace}'s {@code id} — this is both the PK and the FK. */

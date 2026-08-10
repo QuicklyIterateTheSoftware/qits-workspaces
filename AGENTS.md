@@ -72,7 +72,9 @@ split package:
   without the release flow noticing.
 - `domain/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the
   sense that matters: no JAX-RS, no websockets. Entities are Panache active-record with public
-  fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`.
+  fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`. It depends on
+  qits-eventstream for the causation persistence trio and nothing else out of that jar — see
+  "The causation stamp on every push" for why the boundary reads *seams* rather than *the bus*.
 - `service/` — `api` (JAX-RS + SSE, including the raw vertx routes), `daemonhost` (the control
   socket and registry), `bus` (the event-bus wiring), `wiring`, `security`.
 - `workspaces-events/` — `events`, and nothing else. Plain records on `qits-eventstream`, no CDI:
@@ -105,6 +107,35 @@ PostgreSQL: the move is an unwrap and a re-bootstrap, so no postgres database ev
 `V5__move_to_postgres.sql` had a reader. `V1`'s header records what the translation changed and what
 it deliberately kept. **From here the ordinary rule is back**: extend, never renumber, and never edit
 an applied file's body — Flyway checksums it.
+
+**`V2__causation.sql` is that rule being followed**, and the first file to follow it: `causation_id`
+(qits-eventstream's generic `CausedRow` column) on `workspace` and `workspace_event` — nullable, no
+backfill, part of no constraint and never a foreign key, because the event it names lives in
+qits-events' store. The decisions behind it are enforced by `ArchRulesTest` in `domain`: every
+`@Entity` here implements `CausedRow` or declares `@Uncaused` with its reason in the javadoc, and a
+new entity that skips the decision fails the build naming the class. Two in, four out:
+
+- **`Workspace`** — in. Both creation paths (`createWorkspace`, and `CaptureService.capture` behind
+  the capture ingest) run on the request thread, so the `CausationStamp` listener reads the REST
+  filter's restored scope. Nothing is set as data because nothing crosses an executor.
+- **`WorkspaceEvent`** — in, and it is the one that carries the trace. The workspace row says why
+  the unit of work exists; a MERGED/RELEASED/INTEGRATED entry answers to whatever asked for *that*
+  landing. All six `recordEvent` sites are on the flow's own thread, and the machine caller worth
+  tracing is `POST /workspaces/api/branches/release`, driven by a pipeline step.
+- **`ServiceEvent`** — out. `ServiceEventPersister` writes on supervisor/scheduler threads with no
+  request context (that is what its `@ActivateRequestContext` is for), no scope stands there and no
+  cause is in reach as data. The column would be null forever.
+- **`BootstrapRun`** — out. An updatable singleton: one row per `(workspace, command)`, overwritten
+  by every run. The stamp is insert-only, so it would pin the first run's cause while every column
+  beside it moved on.
+- **`WorkspacePromptDraft`** — out, twice: the row is only ever written by the native `insert … on
+  conflict` upsert, which no `@PrePersist` can see, and it is an updatable singleton besides.
+- **`WorkspacePromptAttachment`** — out, following the draft it is the payload of: composition
+  state, written one browser paste at a time, deleted wholesale with the draft.
+
+The lesson to carry to the next entity: `CausationScope` is a plain ThreadLocal, so a row written
+behind an executor or queue hop has no ambient scope and the stamp records null. Where the cause
+exists as data at such a write site, set `causationId` explicitly — qits-ci paid for that one live.
 
 **The target is PostgreSQL 18.4** — the tag `images/qits-oci-postgresql` is built from, and the
 version the suites' embedded binaries are, so a migration is proved against the engine it ships on.
@@ -639,9 +670,21 @@ is one chain only because the producer says what it was doing.
 
 `domain/…/control/PushCausation` is the port and `service/…/bus/EventstreamPushCausation` reads
 `CausationScope`, the same split `ReleaseAnnouncer`/`SCMReleaseAnnouncer` already has and for the
-same reason: `domain` stays free of the bus. `GitMirrorRegistry` injects it as `Instance<T>` and
-hands `GitMirrors` a `Supplier<String>`; `RepoMirror.push(cwd, spec)` turns the answer into
-`-c http.extraHeader=X-Qits-Causation-Id: <uuid>`.
+same reason: `domain` stays free of the bus's **seams**. `GitMirrorRegistry` injects it as
+`Instance<T>` and hands `GitMirrors` a `Supplier<String>`; `RepoMirror.push(cwd, spec)` turns the
+answer into `-c http.extraHeader=X-Qits-Causation-Id: <uuid>`.
+
+**The word is SEAMS, not "the bus", and the narrowing was deliberate (2026-08-10).** The
+eventstream jar also carries the platform's causation *persistence vocabulary* — `CausedRow`,
+`CausationStamp`, `@Uncaused`, three jakarta-persistence-shaped types with no publish, no subscribe
+and no wire in them — and `Workspace` and `WorkspaceEvent` implement it, so the jar sits in
+`domain/`'s pom now. What the rule still forbids is control flow: no listener, no publisher, no
+`EventFrame`, no `QitsEventBus` anywhere in `domain`, and the announcement ports stay ports. The
+`PushCausation` port above is untouched by the narrowing — reading the ambient scope to build a
+header is a bus seam, and it stays in `service`. What the dependency costs is honest and paid in
+the suite: the jar's persistence unit boots in this module's tests too, so
+`testdb/EmbeddedPgConfigSource` feeds it a database of its own and the test properties keep the bus
+dark — the same consumer contract `service` has always honoured.
 
 Four things are deliberate:
 
@@ -677,8 +720,9 @@ the class name** (`QitsEvent.signature()` returns the simple class name), so the
 wire rename; the payload's fields did not change.
 
 `ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SCMReleaseAnnouncer` is
-the implementation, so the domain module stays free of the bus and its transport (the `RunAnnouncer`
-precedent in qits-ci, copied down to the package name). It is announced **after the push and before
+the implementation, so the domain module stays free of the bus's seams and its transport (the
+`RunAnnouncer` precedent in qits-ci, copied down to the package name; "seams" rather than "the bus"
+since the causation persistence trio moved in — see the push-causation section above). It is announced **after the push and before
 the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
 statement conditional on the transaction would be silent about a release that really happened.
 

@@ -1,14 +1,18 @@
 package eu.wohlben.qits.workspaces.entity;
 
+import eu.wohlben.qits.eventstream.CausationStamp;
+import eu.wohlben.qits.eventstream.CausedRow;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EntityListeners;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.util.UUID;
 import org.hibernate.annotations.CreationTimestamp;
 
 /**
@@ -27,10 +31,35 @@ import org.hibernate.annotations.CreationTimestamp;
  * drafts) reference it by id and are not reachable from here. Because the delete is soft, no FK
  * cascade ever fires for them; {@link eu.wohlben.qits.workspaces.control.WorkspaceResolved} is the
  * event they clean up on.
+ *
+ * <p><b>A {@link CausedRow}.</b> {@link #causationId} is the platform's generic trace column,
+ * stamped from the ambient {@code CausationScope} at persist — which is the REST filter's restored
+ * scope, because both creation paths run on the request thread and neither crosses an executor:
+ * {@code createWorkspace} behind {@code POST /workspaces/api/workspaces}, and {@code
+ * CaptureService.capture} behind the capture ingest, the machine caller most likely to send an
+ * {@code X-Qits-Causation-Id}. A workspace created from a browser records none, and null is the
+ * honest answer there. Insert-only by the stamp's contract: the column says why this unit of work
+ * exists, and the status changes that follow are the {@link WorkspaceEvent} timeline's to explain,
+ * each with a cause of its own.
  */
 @Entity
 @Table(name = "workspace")
-public class Workspace extends PanacheEntityBase {
+@EntityListeners(CausationStamp.class)
+public class Workspace extends PanacheEntityBase implements CausedRow {
+
+  /** See the class javadoc; the platform's uniform column, never part of any constraint. */
+  @Column(name = "causation_id")
+  public UUID causationId;
+
+  @Override
+  public UUID causationId() {
+    return causationId;
+  }
+
+  @Override
+  public void causationId(UUID id) {
+    this.causationId = id;
+  }
 
   /**
    * The workspace's identity, inside and out. Every child table ({@code workspace_event}, {@code

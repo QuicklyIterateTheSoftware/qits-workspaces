@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -18,9 +19,17 @@ import java.time.Instant;
  * 1-based file line numbers since {@code sourceEpoch} for a tailed file (whose content is
  * deliberately <em>not</em> copied here — the file is the durable store, the excerpt the display
  * copy).
+ *
+ * <p>{@code @Uncaused} by decision. These rows are observations of a container's own output, and
+ * {@code ServiceEventPersister} writes them on supervisor and scheduler threads that carry no
+ * request context at all — it says so, and {@code @ActivateRequestContext} is what it needs to run
+ * there. No {@code CausationScope} stands on those threads and no event id is in reach at the write
+ * site to set as data, so a causation column here would record null forever and read as a decision
+ * nobody made.
  */
 @Entity
 @Table(name = "service_event")
+@Uncaused
 public class ServiceEvent extends PanacheEntityBase {
 
   @Id public String id;

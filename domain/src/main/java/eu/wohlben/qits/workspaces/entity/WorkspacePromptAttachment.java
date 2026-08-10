@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -22,9 +23,17 @@ import org.hibernate.annotations.CreationTimestamp;
  * soft-deleted, so that cascade never fires in practice — {@code WorkspaceService} (and {@code
  * WorkspacePromptDraftService.deleteDraft}) delete these rows explicitly, same as {@link
  * WorkspacePromptDraft}.
+ *
+ * <p>{@code @Uncaused} by decision, following the draft it is the payload of. These rows are
+ * pre-launch composition state rather than a durable record: they arrive one browser paste at a
+ * time through {@code WorkspacePromptAttachmentController} — the only writer, and one with no
+ * machine caller that could carry an {@code X-Qits-Causation-Id} — and they are deleted wholesale
+ * with the draft and on {@code WorkspaceResolved}. A column that only a human's browser could fill,
+ * on a row that does not outlive the composition, buys nothing the draft does not already decline.
  */
 @Entity
 @Table(name = "workspace_prompt_attachment")
+@Uncaused
 public class WorkspacePromptAttachment extends PanacheEntityBase {
 
   /** A service-generated {@code UUID.randomUUID().toString()} — the blob references it verbatim. */
