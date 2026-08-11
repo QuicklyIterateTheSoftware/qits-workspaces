@@ -179,8 +179,9 @@ The eventstream one's three lines currently sit in `service`'s `application.prop
 stand-in, because the released jar predates them; the comment there says when to delete them.
 
 **Layer 2 is `DbRetry` at read seams, and it is placement-sensitive.** Layer 1 cannot help a request
-whose connection died *after* statements ran; retrying those is only safe for reads, so it is
-explicit and rare. Today there is exactly one: `ContainerProxyRoute.resolve`, the daemon lookup that
+whose connection died *after* statements ran; a plain `DbRetry.call` re-runs the block, which is
+safe for a read and not for an arbitrary write, so it is explicit and rare. Today there is exactly
+one: `ContainerProxyRoute.resolve`, the daemon lookup that
 backs the proxy's 404s — the only path to a workspace-daemon's API, so a blip there takes the file
 browser, the terminals and the coding-agent surface down and calls a live workspace missing.
 
@@ -199,6 +200,64 @@ inside `DaemonProxyTargets.resolve`:
 and a genuine absence still 404s on the **first** attempt, because an absent row is an answer rather
 than a failure. Widen the retry to "anything that went wrong" and every unknown id would sit on the
 deadline before 404ing.
+
+**Layer 3 is `DbRetry.inNewTx` at write seams**, which is a different method for a real reason:
+`call` retries a block, and when the block is a write, a connection that died inside the *commit*
+round trip would be retried into a second write. `inNewTx` owns the transaction boundary, so it can
+tell the two apart — it retries only a failure **thrown out of the body** that is connection-classed
+(Quarkus rolls a failed body back and never commits it, so that position is known), and rethrows
+everything the transaction manager reports, a `RollbackException` included. Narayana spells "the
+commit failed, outcome unknown" and "rolled back before committing" with the same exception type, so
+a rollback it claims is not evidence of anything.
+
+Three things follow, and each is a way to get this wrong:
+
+- **The wrapped method loses its `@Transactional`.** `inNewTx` opens the transaction per attempt;
+  an annotation on top of it would only be the interceptor joining the one already open. The wrap
+  goes at the public method and the retried unit is a private one.
+- **The body is DATABASE-ONLY.** It re-runs, so anything in it that is not a row — a push, a
+  `docker` verb, an HTTP call, an event — happens once per attempt. Every wrap here fires its
+  `WorkspaceChangePublisher` hint *after* the unit, and hands the repository id out of it so the
+  hint needs no second query.
+- **The unit ends with a `flush()`, or the retry buys nothing.** Hibernate sends a `persist` at
+  commit by default, which is precisely the phase `inNewTx` reports rather than repeats. Flushing
+  last moves the write into the statement phase, where a lost connection is a certain no-commit.
+  The draft's own writes need no flush: they are native `insert … on conflict` / `delete`
+  statements, which execute where they stand.
+
+**Four writes are wrapped, and they were chosen for what a lost one costs**, not for being writes:
+
+- **`WorkspacePromptDraftService.saveDraft`** — the autosave, on a debounce while someone types. It
+  is also the perfect first adopter: one `insert … on conflict`, idempotent by construction, which
+  is why `WorkspacePromptDraft` is `@Uncaused` in the first place.
+- **`WorkspacePromptDraftService.deleteDraft`** — delete-if-present, twice, in one transaction
+  deliberately: a draft kept with its images gone is a broken composition.
+- **`WorkspacePromptAttachmentService.addAttachment`** — a paste, whose bytes nothing else holds a
+  copy of. The row id is minted **before** the retried unit so every attempt writes the same primary
+  key; generated inside, a retry would be a second row.
+- **`BootstrapRunService.recordOutcome`** — bookkeeping after the step already ran in the container,
+  and the caller swallows failures by design, so a dropped row is silent. Its thread is the
+  registry's single `daemon-sink-dispatch`, never a socket thread or a monitor: a held attempt
+  delays the outcomes queued behind it and loses none.
+
+**What is deliberately not wrapped**, beyond the read-seam rules above (which all still hold — stay
+outside `WorkspaceService`'s `synchronized` methods, and never split a multi-op bracket):
+
+- **The workflow verbs** — `createWorkspace`, `merge*`, `release*`, `cleanupBranch`,
+  `discardWorkspace`. They orchestrate pushes and containers, so their bodies are not database-only
+  and re-running one is not a re-run of a write.
+- **`ServiceEventService.publish`** and the other fail-soft diagnostics: dropping one is the
+  designed behaviour.
+- **`updateAttachment` / `deleteAttachment`** — verbs on an image already on screen and already in
+  the database. A failed one is the same click again, which is worth less than a wider wrapped set
+  costs to review.
+
+`PromptDraftWritePatienceTest` proves the pair, and it is shaped unlike the read test on purpose:
+its wound fires *after* the real statement has run, because only that arrangement can tell a retry
+that re-executed rolled-back work from one that added a second effect. `prompt_version` is the
+witness — the upsert bumps it once per execution, so a save that survived one severed connection
+reads **1**. Its second case is a SQLState `23505` violation surfacing on the **first** attempt,
+which is the same narrowness assertion the read test makes about an absent row.
 
 The measurements are in the superproject's `db-patience-plan.md`; the doctrine is step 9 of
 `docs/project-setup-quinoa-angular.md`.

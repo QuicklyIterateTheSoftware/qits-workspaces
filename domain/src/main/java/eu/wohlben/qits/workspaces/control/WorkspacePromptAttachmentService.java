@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.control;
 
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
 import eu.wohlben.qits.workspaces.error.PayloadTooLargeException;
@@ -23,6 +24,12 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * STOPPED} workspace. Upload decodes the base64 payload, enforces a per-image byte cap (413) and a
  * PNG/JPEG magic-byte sniff (400 for anything else), and stores the <em>sniffed</em> media type —
  * the bytes are the truth, the client's claimed {@code mimeType} is only a hint.
+ *
+ * <p><b>Only the ingest holds through a postgres cutover</b> ({@link DbRetry#inNewTx} on {@link
+ * #addAttachment}). That one is the arrival of bytes nothing else has a copy of. Replacing and
+ * removing an attachment act on an image already on screen and already in the database, so a
+ * failed one is the same click again — worth less than the review cost of a wider wrapped set. See
+ * AGENTS.md, "Surviving a postgres cutover".
  */
 @ApplicationScoped
 public class WorkspacePromptAttachmentService {
@@ -42,8 +49,15 @@ public class WorkspacePromptAttachmentService {
    * a non-PNG/JPEG payload is a 400, an oversized one a 413. The stored {@code mimeType} is the
    * sniffed type (it wins over the claimed one); {@code claimedMimeType} is accepted for symmetry
    * with the client request but only the bytes decide.
+   *
+   * <p><b>The insert is held through a postgres cutover</b> ({@link DbRetry#inNewTx}). This is a
+   * paste: the bytes are in one browser's clipboard buffer and a 500 asks a person to find the
+   * screenshot again. Two things make the retry exactly-once rather than "probably once" — the row
+   * id is minted <em>before</em> the retried unit, so every attempt writes the same primary key,
+   * and the unit flushes, which is what puts the insert on the statement side of the commit line
+   * where a lost connection is a certain no-commit. Without the flush an ORM would send it during
+   * the commit round trip, and {@code inNewTx} reports that rather than repeating it.
    */
-  @Transactional
   public WorkspacePromptAttachment addAttachment(
       Long id,
       String claimedMimeType,
@@ -66,22 +80,50 @@ public class WorkspacePromptAttachmentService {
       throw new BadRequestException("Attachment is not a PNG or JPEG image");
     }
 
+    // Minted here rather than inside the retried unit: the id IS the row's identity, so a second
+    // attempt must reuse it. Generated per attempt, a retry would be a different row.
+    String attachmentId = UUID.randomUUID().toString();
+
+    Attached attached =
+        DbRetry.inNewTx(
+            "attach image to workspace " + id,
+            () -> insertAttachment(id, attachmentId, sniffed, label, parsedSource, bytes));
+    // Outside the retried unit — the body is database-only by rule. Fires the attachments-only SSE
+    // topic (not prompt-draft) so another open view refreshes its GET-list without every
+    // prompt-text autosave re-downloading the image payloads.
+    changePublisher.fire(attached.repositoryId(), id, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
+    return attached.attachment();
+  }
+
+  /** One attempt of {@link #addAttachment}'s database work: resolve, insert, flush. */
+  private Attached insertAttachment(
+      Long id,
+      String attachmentId,
+      String mimeType,
+      String label,
+      PromptAttachmentSource source,
+      byte[] bytes) {
     Workspace workspace = workspaceResolver.resolveActive(id);
-    String repoId = workspace.repositoryId;
-    String workspaceId = workspace.workspaceId;
     WorkspacePromptAttachment attachment = new WorkspacePromptAttachment();
-    attachment.id = UUID.randomUUID().toString();
+    attachment.id = attachmentId;
     attachment.workspaceId = workspace.id;
-    attachment.mimeType = sniffed;
+    attachment.mimeType = mimeType;
     attachment.label = label;
-    attachment.source = parsedSource;
+    attachment.source = source;
     attachment.bytes = bytes;
     attachmentRepository.persist(attachment);
-    // Fire the attachments-only SSE topic (not prompt-draft) so another open view refreshes its
-    // GET-list without every prompt-text autosave re-downloading the image payloads.
-    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_ATTACHMENTS);
-    return attachment;
+    // The last thing the unit does, and it is what the retry is worth anything for: it moves the
+    // insert out of the commit round trip (undecidable, reported) into the statement phase
+    // (certainly not committed, retried). It also stamps createdAt, which the caller returns.
+    attachmentRepository.flush();
+    return new Attached(attachment, workspace.repositoryId);
   }
+
+  /**
+   * What one retried write attempt hands back: the row, plus the owning repository the change hint
+   * outside the transaction needs.
+   */
+  private record Attached(WorkspacePromptAttachment attachment, String repositoryId) {}
 
   /**
    * A workspace's attachments (oldest first) with their base64-encoded image payloads, so the

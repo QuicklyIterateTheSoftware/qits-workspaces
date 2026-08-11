@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.control;
 
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.workspaces.dto.BootstrapRunDto;
 import eu.wohlben.qits.workspaces.entity.BootstrapOutcome;
 import eu.wohlben.qits.workspaces.entity.BootstrapRun;
@@ -41,13 +42,50 @@ public class BootstrapRunService {
 
   @Inject WorkspaceChangePublisher changePublisher;
 
-  /** Upsert the last-run row for {@code (workspace, bootstrapCommandId)} and hint the UI. */
-  @Transactional
+  /**
+   * Upsert the last-run row for {@code (workspace, bootstrapCommandId)} and hint the UI.
+   *
+   * <p><b>The write is held through a postgres cutover</b> ({@link DbRetry#inNewTx}) rather than
+   * dropped. This is bookkeeping <em>after</em> irreversible work: the step already ran inside the
+   * container, so a lost row leaves the world and the rows disagreeing, and the caller
+   * ({@code WorkspaceBootstrapRunner}'s recorder) swallows the failure by design — nothing
+   * downstream would ever notice. It is safe to re-run because the row is keyed on {@code
+   * (workspace, bootstrapCommandId)} and every column is overwritten from the arguments, so a
+   * second attempt writes the same row to the same values.
+   *
+   * <p>It runs on the registry's single {@code daemon-sink-dispatch} thread, never a socket thread
+   * or a monitor. A held attempt delays the outcomes queued behind it and loses none of them, which
+   * is the trade: during a cutover every writer on that thread is failing anyway.
+   */
   @ActivateRequestContext
   public void recordOutcome(
       String repoId,
       String workspaceId,
       Long rowId,
+      String bootstrapCommandId,
+      String commandName,
+      BootstrapOutcome outcome,
+      String commandId,
+      Integer exitCode) {
+    DbRetry.runInNewTx(
+        "record bootstrap outcome for workspace " + workspaceId,
+        () ->
+            writeOutcome(
+                repoId,
+                workspaceId,
+                bootstrapCommandId,
+                commandName,
+                outcome,
+                commandId,
+                exitCode));
+    // Outside the retried unit — the body is database-only by rule.
+    changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+  }
+
+  /** One attempt of {@link #recordOutcome}'s database work: resolve, upsert, flush. */
+  private void writeOutcome(
+      String repoId,
+      String workspaceId,
       String bootstrapCommandId,
       String commandName,
       BootstrapOutcome outcome,
@@ -71,7 +109,9 @@ public class BootstrapRunService {
     if (existing == null) {
       bootstrapRunRepository.persist(run);
     }
-    changePublisher.fire(repoId, rowId, WorkspaceChangeHint.Topic.BOOTSTRAP);
+    // The last thing the unit does: it puts the insert (or the dirty-checked update) on the
+    // statement side of the commit line, which is the only side inNewTx can retry.
+    bootstrapRunRepository.flush();
   }
 
   /** The active workspace's last-run rows, for the workspace bootstrap surface. */

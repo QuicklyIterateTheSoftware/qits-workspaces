@@ -3,6 +3,7 @@ package eu.wohlben.qits.workspaces.control;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
 import eu.wohlben.qits.workspaces.error.PayloadTooLargeException;
@@ -22,6 +23,12 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * materializing anything. The {@code content} blob is stored opaquely (the server validates only
  * that it is well-formed JSON within a size cap); {@code serializedPrompt} rides alongside as the
  * server-readable launch-ready markdown.
+ *
+ * <p><b>The two writes here hold through a postgres cutover</b> ({@link DbRetry#inNewTx}) rather
+ * than answering a 500. Both are idempotent by construction — the save is one {@code insert … on
+ * conflict} and the discard is a delete of what may not be there — so a second attempt is not a
+ * second effect, which is what makes them the safest possible first adopters. See AGENTS.md,
+ * "Surviving a postgres cutover".
  */
 @ApplicationScoped
 public class WorkspacePromptDraftService {
@@ -77,8 +84,13 @@ public class WorkspacePromptDraftService {
    * Idempotent upsert of a workspace's draft. Validates the opaque {@code content} against the size
    * cap (413) and JSON well-formedness (400) before writing; {@code serializedPrompt} is stored
    * verbatim. Returns the persisted entity so the caller can read the fresh {@code updatedAt}.
+   *
+   * <p><b>The write is held through a cutover rather than 500ing.</b> This is the autosave path —
+   * it fires on a debounce while someone types, and a 500 here is composition the browser believed
+   * was saved. {@link DbRetry#inNewTx} owns the transaction, so the {@code @Transactional} that
+   * used to be here would only get in its way; the validation above stays outside it, because it
+   * touches no database and re-running it on every attempt buys nothing.
    */
-  @Transactional
   public WorkspacePromptDraft saveDraft(Long id, String content, String serializedPrompt) {
     // Validate the payload before touching the DB — the cheap in-memory guards fail fast, so a
     // buggy autosave loop of rejected requests costs no repository round-trips.
@@ -98,25 +110,47 @@ public class WorkspacePromptDraftService {
       throw new BadRequestException("Prompt draft content is not valid JSON", e);
     }
 
+    Written written =
+        DbRetry.inNewTx(
+            "save prompt draft " + id, () -> writeDraft(id, content, serializedPrompt));
+    // Fired AFTER the retried unit, not inside it: the body is database-only by rule, and a hint
+    // emitted per attempt would be one SSE wake-up per lost connection. Notifies other open clients
+    // (another device/browser) to rehydrate — they apply the refetched draft only when their local
+    // copy is pristine, so this never clobbers mid-typing.
+    changePublisher.fire(written.repositoryId(), id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
+    return written.draft();
+  }
+
+  /** One attempt of {@link #saveDraft}'s database work: the upsert and the read-back, and no more. */
+  private Written writeDraft(Long id, String content, String serializedPrompt) {
     Workspace workspace = workspaceResolver.resolveActive(id);
-    String repoId = workspace.repositoryId;
-    String workspaceId = workspace.workspaceId;
     // Atomic DB-level upsert (`insert … on conflict`) rather than a read-then-insert: the PK *is* the
     // workspace id (shared 1:1 PK/FK), so two concurrent first-saves for a draftless workspace —
     // the exact cross-device flow this feature targets — would both find no row and both insert the
     // same PK, and the loser's insert would 500 on the constraint violation. The upsert serializes
     // them under the row lock (last write wins), so a first-insert race is clean, not a 500.
     // See docs/issues/resolved/2026-07-20_prompt-draft-concurrent-first-insert-500.md.
+    // It is also what makes this retriable: `insert … on conflict` executes as a statement, so the
+    // write is on the statement side of the commit line and a re-run of it is the same one row.
     draftRepository.upsert(workspace.id, content, serializedPrompt);
-    // Notify other open clients (another device/browser) to rehydrate — they apply the refetched
-    // draft only when their local copy is pristine, so this never clobbers mid-typing.
-    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
     // Re-read so the returned entity carries the DB-assigned updatedAt (the value a later GET will
     // return) — the client stores it to dedup its own SSE echo, so it must match byte-for-byte.
-    return draftRepository
-        .findByWorkspaceId(workspace.id)
-        .orElseThrow(() -> new NotFoundException("No prompt draft for workspace: " + workspaceId));
+    WorkspacePromptDraft draft =
+        draftRepository
+            .findByWorkspaceId(workspace.id)
+            .orElseThrow(
+                () ->
+                    new NotFoundException(
+                        "No prompt draft for workspace: " + workspace.workspaceId));
+    return new Written(draft, workspace.repositoryId);
   }
+
+  /**
+   * What one retried write attempt hands back: the row, plus the owning repository the change hint
+   * outside the transaction needs. The hint cannot re-read it — that would be a second query on a
+   * connection the retry just proved is worth being careful with.
+   */
+  private record Written(WorkspacePromptDraft draft, String repositoryId) {}
 
   /**
    * Records that this workspace's draft was handed to an agent run — stamps {@code last_run_at},
@@ -137,14 +171,22 @@ public class WorkspacePromptDraftService {
   /**
    * Removes a workspace's draft and its attachment rows (idempotent — a no-op when none exist). The
    * attachments are the draft's payload, so clearing the draft clears them too.
+   *
+   * <p>Held through a cutover for the same reason as {@link #saveDraft}, and safe for the same one:
+   * both statements are "delete this if it is there", so a second attempt deletes nothing twice.
+   * The two are deliberately in ONE transaction still — a draft kept with its images gone is a
+   * broken composition, and the retry re-runs the pair or neither.
    */
-  @Transactional
   public void deleteDraft(Long id) {
+    String repositoryId = DbRetry.inNewTx("discard prompt draft " + id, () -> deleteDraftRows(id));
+    changePublisher.fire(repositoryId, id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
+  }
+
+  /** One attempt of {@link #deleteDraft}'s database work. */
+  private String deleteDraftRows(Long id) {
     Workspace workspace = workspaceResolver.resolveActive(id);
-    String repoId = workspace.repositoryId;
-    String workspaceId = workspace.workspaceId;
     draftRepository.deleteByWorkspaceId(workspace.id);
     attachmentRepository.deleteByWorkspaceId(workspace.id);
-    changePublisher.fire(repoId, workspace.id, WorkspaceChangeHint.Topic.PROMPT_DRAFT);
+    return workspace.repositoryId;
   }
 }
