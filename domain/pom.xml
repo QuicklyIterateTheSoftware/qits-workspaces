@@ -60,6 +60,14 @@
             <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
+            <!-- PatientPgDriver, which the `workspaces` datasource names in this module's shipped
+                 config, and DbRetry for the read seams that must survive a postgres cutover. The
+                 driver is loaded by name, so the class has to be on the running app's classpath;
+                 pgjdbc itself stays the one quarkus-jdbc-postgresql above already ships. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
         </dependency>

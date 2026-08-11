@@ -158,6 +158,51 @@ Remember that workspace rows are **soft-deleted**. A child table in another cont
 publish through `WorkspaceResolved` instead, and fire it synchronously inside the resolving
 transaction so observers can join it.
 
+## Surviving a postgres cutover
+
+The platform restarts its own postgres, and this service has to still be there afterwards. Two
+layers, and they are not interchangeable.
+
+**Layer 1 is three config lines per postgresql datasource**, and all three are needed:
+`jdbc.driver=eu.wohlben.qits.db.PatientPgDriver`, `jdbc.validate-on-borrow=true`,
+`jdbc.acquisition-timeout=15S`. The driver (qits-db-core) delegates to pgjdbc and **holds** a
+connection request while postgres is coming back — refused, unreachable and `57P03` only, so an auth
+failure still fails at once. `validate-on-borrow` turns a dead pooled connection into a fresh
+creation attempt, which is the thing the driver makes patient, and the acquisition timeout keeps the
+pool's waiter alive while it works. Measured: Agroal does **not** spend its acquisition budget on a
+failed connection *creation*, so the last two lines alone never held anything.
+
+`DatasourceBaselineTest` (in `service`) fails the build when a datasource is missing a line. It runs
+there and not in `domain` because **two** postgresql datasources reach the deployable — `workspaces`
+from the domain jar and `eventstream` from the qits-eventstream jar — and only this module sees both.
+The eventstream one's three lines currently sit in `service`'s `application.properties` as a
+stand-in, because the released jar predates them; the comment there says when to delete them.
+
+**Layer 2 is `DbRetry` at read seams, and it is placement-sensitive.** Layer 1 cannot help a request
+whose connection died *after* statements ran; retrying those is only safe for reads, so it is
+explicit and rare. Today there is exactly one: `ContainerProxyRoute.resolve`, the daemon lookup that
+backs the proxy's 404s — the only path to a workspace-daemon's API, so a blip there takes the file
+browser, the terminals and the coding-agent surface down and calls a live workspace missing.
+
+Three rules govern where a wrap may go, and the first is why this one is at the caller rather than
+inside `DaemonProxyTargets.resolve`:
+
+- **Outside the transaction.** `resolve` is `@Transactional`; retrying inside it would re-run
+  statements on a transaction already marked for rollback. The retry has to surround the
+  transactional call so each attempt gets a new one.
+- **Never inside a `synchronized` monitor.** Several `WorkspaceService` methods are synchronized —
+  sleeping in one holds the lock for the whole deadline. Stay away from them.
+- **Never split a deliberate multi-op bracket.** Wrap what runs *after* irreversible work, never a
+  bare insert: a commit whose ack was lost would be duplicated.
+
+`ContainerProxyDbPatienceTest` proves both halves — a severed connection is retried once and answers,
+and a genuine absence still 404s on the **first** attempt, because an absent row is an answer rather
+than a failure. Widen the retry to "anything that went wrong" and every unknown id would sit on the
+deadline before 404ing.
+
+The measurements are in the superproject's `db-patience-plan.md`; the doctrine is step 9 of
+`docs/project-setup-quinoa-angular.md`.
+
 ## What identifies a workspace
 
 `Workspace.id` — the generated `Long`. It is what routes, the ports and every FK'd child table use,

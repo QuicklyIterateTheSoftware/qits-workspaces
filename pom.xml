@@ -46,7 +46,9 @@
 
     <properties>
         <qits.eventstream.version>2026.810.191553</qits.eventstream.version>
-        <qits.arch-rules.version>2026.810.184518</qits.arch-rules.version>
+        <!-- Both come out of qits-integrations-quarkus, so they move together. -->
+        <qits.db-core.version>2026.811.152803</qits.db-core.version>
+        <qits.arch-rules.version>2026.811.152803</qits.arch-rules.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -148,6 +150,16 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-eventstream</artifactId>
                 <version>${qits.eventstream.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's database resilience: PatientPgDriver, which every postgresql
+                     datasource here opens its connections through, and DbRetry, which holds a read
+                     seam through a cutover that severed the connection mid-flight. Compile scope,
+                     because both are on the running app's classpath — the driver is named by config
+                     and the retry is called from code. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-db-core</artifactId>
+                <version>${qits.db-core.version}</version>
             </dependency>
             <dependency>
                 <!-- The platform's shared ArchUnit rules, test scope wherever entities live. -->

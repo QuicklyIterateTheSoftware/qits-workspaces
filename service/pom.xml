@@ -74,6 +74,13 @@
             <artifactId>qits-workspaces-events</artifactId>
         </dependency>
         <dependency>
+            <!-- DbRetry, used by name in ContainerProxyRoute's daemon lookup. It also arrives
+                 through `domain`, which names PatientPgDriver in the datasource block it ships;
+                 declared here as well because this module calls the class. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>
@@ -162,6 +169,16 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- DatasourceBaselineRules, asserted by DatasourceBaselineTest. It runs HERE and not
+                 in `domain` because this is the module whose config is the whole config the
+                 deployable runs on: both postgresql datasources, `workspaces` from the domain jar
+                 and `eventstream` from the eventstream jar. `domain`'s own ArchRulesTest uses the
+                 same jar for the entity rules. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-arch-rules</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

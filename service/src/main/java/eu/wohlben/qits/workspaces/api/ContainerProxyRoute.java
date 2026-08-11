@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspaces.api;
 
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.workspaces.control.ContainerProxyPath;
 import eu.wohlben.qits.workspaces.control.DaemonProxyTargets;
 import eu.wohlben.qits.workspaces.control.ProxyOrigin;
@@ -164,12 +165,31 @@ public class ContainerProxyRoute {
    * round-trip less per request. It does mean the ACTIVE-row scoping only runs on the direct branch;
    * that is fine, because {@code WorkspaceTunnels} is keyed on the same row id and a soft-deleted
    * workspace's daemon is not connected.
+   *
+   * <p><b>The direct branch holds through a postgres cutover rather than answering 404.</b> {@link
+   * DaemonProxyTargets#resolve} reads the workspace row, and a connection severed mid-flight
+   * surfaces here as an exception — which, before the retry, cost every live workspace its file
+   * browser, its terminals and its coding-agent surface for as long as the database was away, since
+   * this route is the only path to a daemon's API. {@code DbRetry} is what turns that into a held
+   * request: connection-class failures only, bounded by its own deadline, and a genuine absence is
+   * not a failure at all — it returns {@code NO_WORKSPACE} and still 404s on the first attempt.
+   *
+   * <p><b>The wrap is HERE, at the caller, and that placement is the rule rather than a
+   * convenience.</b> {@code resolve} is {@code @Transactional}, so retrying inside it would re-run
+   * statements on a transaction already marked for rollback; the retry has to surround the
+   * transactional call so each attempt gets a new one. This runs on the worker thread {@code
+   * executeBlocking} gave it, holding no monitor and no session, which is the other half of the same
+   * rule.
    */
   private Resolved resolve(Long workspaceId) {
     return tunnels
         .originFor(workspaceId)
         .map(Resolved::tunnelled)
-        .orElseGet(() -> Resolved.direct(targets.resolve(workspaceId)));
+        .orElseGet(
+            () ->
+                Resolved.direct(
+                    DbRetry.call(
+                        "workspace daemon proxy lookup", () -> targets.resolve(workspaceId))));
   }
 
   /** Either a tunnel entrance, or a direct target that still has to be interpreted. */
