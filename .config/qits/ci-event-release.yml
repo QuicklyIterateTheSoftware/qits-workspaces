@@ -32,8 +32,9 @@
 #
 # THE CLIENT IS PACKAGED, NOT INSTALLED BY THE IMAGE BUILD. service/src/main/webui is the
 # qits-spa-workspaces submodule and it is built HERE, in this step container, which sits on
-# qits-net and can reach the platform's npm registry — a RUN inside a docker build cannot, by any
-# address. The Dockerfile's builder stage only packages the bundle this half produced.
+# qits-net and can reach the platform's npm registry by its service alias. The Dockerfile's builder
+# stage only packages the bundle this half produced; its own network is the host's, for Maven —
+# see the build below and ci-post-receive.yml's two-flags block.
 #
 # THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease, and it lands first on purpose: the
 # bus is at-most-once with no catch-up and no replay, so a trigger file must be in place before the
@@ -112,8 +113,8 @@ steps:
 
       # --- half two: the image ------------------------------------------------------------------
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspaces:$QITS_CI_SHA"
-      docker build --network qits-net \
-        --build-arg QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       docker rmi "$ref" || true
