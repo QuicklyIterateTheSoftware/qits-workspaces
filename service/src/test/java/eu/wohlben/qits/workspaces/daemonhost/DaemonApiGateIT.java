@@ -44,7 +44,7 @@ import org.junit.jupiter.api.Test;
  * detaches until you reconnect and find the command gone.
  *
  * <p><b>What this does not cover, deliberately.</b> The proxy hop. This test reaches the daemon
- * directly on a published port, because {@code FakeContainerRuntime} replaces {@code DockerExecutor}
+ * directly on a published port, because {@code FakeContainerRuntime} replaces {@code WorkspaceContainers}
  * globally in this module's {@code @QuarkusTest}s (via {@code @Mock}) — so an application booted
  * here cannot drive real docker, and a test that drives real docker cannot boot the application.
  * {@code ContainerProxyRouteTest} covers the hop instead, against a real Vert.x server on a real

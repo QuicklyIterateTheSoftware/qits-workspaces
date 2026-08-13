@@ -40,7 +40,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * mirroring a per-exec {@code -e} overriding container-creation env) — so commits made "in the
  * container" carry the configured identity exactly like in a real container.
  *
- * <p>Replaces {@link DockerExecutor} globally in this module's {@code @QuarkusTest}s via {@link
+ * <p>Replaces {@link eu.wohlben.qits.workspaces.control.ContainerRuntime}'s production adapter globally in this module's {@code @QuarkusTest}s via {@link
  * Mock}. Real-docker behavior is covered separately by integration tests behind {@code skipITs}.
  */
 @Mock
@@ -110,7 +110,7 @@ public class FakeContainerRuntime implements ContainerRuntime {
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    // Mirror DockerExecutor.run: create-if-absent the per-workspace volume before "mounting" it, so
+    // Mirror the adapter's run: create-if-absent the per-workspace volume before "mounting" it, so
     // a subsequent incidental `rm` preserves the checkout on the reattached volume.
     if (persistWorkspace) {
       ensureWorkspaceVolume(repoId, workspaceId, branch, parent);
@@ -210,7 +210,8 @@ public class FakeContainerRuntime implements ContainerRuntime {
   }
 
   @Override
-  public void start(String container) {
+  public void start(String repoId, String workspaceId, Long rowId, String branch, String parent) {
+    String container = containerName(workspaceId, repoId);
     if (!byName.containsKey(container)) {
       throw new IllegalStateException("No such container: " + container);
     }

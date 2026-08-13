@@ -14,8 +14,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * workspace container must have — the container-creation analog of {@code CodingAgentFactory}.
  * Routing all creation through {@link #forWorkspace} makes it structurally impossible to start a
  * workspace container without the shared credential volume, the {@code qits.*} reconciliation
- * labels, the docker-host alias and the host uid. {@link DockerExecutor#run} is the sole caller; it
- * only prepends the runtime binary + {@code run} and executes the rendered argv.
+ * labels, the docker-host alias and the host uid. {@code containershost/WorkspaceContainers} is the
+ * sole caller; it turns what this describes into the orchestrator's wire spec.
  */
 @ApplicationScoped
 public class WorkspaceContainerFactory {
@@ -39,8 +39,8 @@ public class WorkspaceContainerFactory {
 
   /**
    * The shared Docker network every workspace container joins (and qits is on), so qits reaches a
-   * container's ports by its DNS name with no host-port publishing. Created if absent at startup by
-   * {@link DockerExecutor}.
+   * container's ports by its DNS name with no host-port publishing. Creating it is the bootstrap's
+   * job — the orchestrator only probes for it, and this service no longer creates networks at all.
    */
   @ConfigProperty(name = "qits.workspace.network", defaultValue = "qits-net")
   String network;
@@ -264,34 +264,35 @@ public class WorkspaceContainerFactory {
   static final String PNPM_MOUNT = "/caches/pnpm";
 
   /**
-   * The pinned workspace image reference — the single source of truth {@link
-   * DockerExecutor#ensureImage} pulls when the host daemon does not hold it. Exposed rather than
-   * read from config a second time, so the reference the launcher pulls and the reference the argv
-   * carries cannot be two values.
+   * The pinned workspace image reference. Exposed rather than read from config a second time, so
+   * the reference the spec carries and the reference anything else names cannot be two values. Who
+   * pulls it is the orchestrator, under pull policy MISSING — the inspect-then-pull this service
+   * used to do itself went with the docker socket.
    */
   public String image() {
     return image;
   }
 
   /**
-   * The shared credential volume name (blank when the mount is disabled) — the single source of
-   * truth {@link DockerExecutor} reuses for its startup {@code docker volume create}.
+   * The shared credential volume name (blank when the mount is disabled). The orchestrator creates
+   * it and the other two at its own boot; this service only names them, so that the adapter can tell
+   * a platform volume from the workspace's own when it builds the spec.
    */
   public String claudeVolume() {
     return claudeVolume;
   }
 
-  /** The shared Maven-repo volume name (blank when disabled) — ensured at startup by executor. */
+  /** The shared Maven-repo volume name (blank when disabled). The orchestrator creates it. */
   public String mavenVolume() {
     return mavenVolume;
   }
 
-  /** The shared pnpm-store volume name (blank when disabled) — ensured at startup by executor. */
+  /** The shared pnpm-store volume name (blank when disabled). The orchestrator creates it. */
   public String pnpmVolume() {
     return pnpmVolume;
   }
 
-  /** The shared network name — the single source of truth {@link DockerExecutor} ensures exists. */
+  /** The shared network name. The bootstrap creates it; the orchestrator only probes for it. */
   public String network() {
     return network;
   }
@@ -342,7 +343,7 @@ public class WorkspaceContainerFactory {
    * credential + build-cache volumes (whenever configured), the configured resource limits (memory
    * hard cap, pids, cpus — whenever configured), the image, and the {@code qits-workspace-daemon}
    * dial-home env. The container's process is {@code qits-workspace-daemon} via the image
-   * ENTRYPOINT (no {@code docker run} command is appended) — with no {@code sleep infinity}
+   * ENTRYPOINT (no command is appended) — with no {@code sleep infinity}
    * fallback, so a container that can't run the daemon fails to start rather than lingering
    * unmanaged. Everything safety-critical is already in place; the caller may keep chaining but
    * need not.
@@ -377,8 +378,7 @@ public class WorkspaceContainerFactory {
     // set it explicitly. A container whose workspace-daemon can't reach qits stays alive and idle
     // (the
     // binary
-    // never exits on a failed dial), so this is behaviour-neutral: the docker exec paths are
-    // untouched (docs/epics/qits-workspace-daemon/).
+    // never exits on a failed dial), so this is behaviour-neutral (docs/epics/qits-workspace-daemon/).
     container.env(
         "QITS_WORKSPACE_DAEMON_URL",
         "ws://"
@@ -503,16 +503,15 @@ public class WorkspaceContainerFactory {
     // volume from the image's world-writable /workspace (docker copies the image dir's contents AND
     // permissions), so no permission fix is needed under the arbitrary-uid container user — the
     // same
-    // reason the shared cache volumes work. DockerExecutor.run creates it (with labels) just before
-    // this mount attaches. Flag off ⇒ /workspace stays the ephemeral writable layer (today's
+    // reason the shared cache volumes work. It rides the spec as a row-claimed mount, so the
+    // orchestrator creates it as part of the same ensure that starts the container. Flag off ⇒ /workspace stays the ephemeral writable layer (today's
     // behavior). See docs/epics/qits-workspaces/features/2026-07-25_persistent-workspace-volume.md.
     if (persistWorkspace) {
       container.volume(workspaceVolumeName(workspaceId), "/workspace");
     }
     // The container runs ONLY the workspace-daemon, via the image ENTRYPOINT
     // (docker/qits/Dockerfile),
-    // so qits appends no `docker run` command and a bare `docker run <image>` boots the control
-    // plane.
+    // so qits puts no command on the spec at all and the image alone boots the control plane.
     // There is deliberately NO `sleep infinity` fallback: a container that can't run the daemon
     // must
     // FAIL to start rather than linger. A daemon-less container never sends HELLO, so qits has no
@@ -523,7 +522,8 @@ public class WorkspaceContainerFactory {
     // puts
     // tini at PID 1, so the daemon is tini's child (tini reaps zombies + forwards signals); the
     // daemon
-    // holds the socket open and is otherwise idle in Part 1, and `docker exec` is unaffected.
+    // holds the socket open and is otherwise idle in Part 1. `init` is a spec field now rather
+    // than a run flag, and it is what keeps a long-lived daemon from collecting its children.
     return container.image(image);
   }
 

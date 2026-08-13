@@ -49,6 +49,7 @@
         <!-- Both come out of qits-integrations-quarkus, so they move together. -->
         <qits.db-core.version>2026.811.165001</qits.db-core.version>
         <qits.arch-rules.version>2026.811.165001</qits.arch-rules.version>
+        <qits.containers-client.version>2026.812.173301</qits.containers-client.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -176,6 +177,14 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-workspaces-domain</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The orchestrator's client jar: the only way this service reaches a container.
+                     Pinned at a RELEASED calver and never a snapshot — a snapshot resolves from a
+                     developer's own ~/.m2 and fails in the step container that builds the release. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-containers-client</artifactId>
+                <version>${qits.containers-client.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

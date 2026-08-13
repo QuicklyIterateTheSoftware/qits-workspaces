@@ -347,8 +347,9 @@ public class WorkspaceService {
     // browser polls this route, so a git host that is briefly away must not 500 the page it is on.
     RepoMirror mirror = mirrors.of(repoId);
     refreshQuietly(mirror);
-    // Live container set (one docker ps), so RUNNING stays accurate even when docker state changed
-    // out-of-band; the persisted column carries the STOPPED/PROVISIONING/FAILED signal otherwise.
+    // Live container set (one listing call to the orchestrator), so RUNNING stays accurate even
+    // when container state changed out-of-band; the persisted column carries the
+    // STOPPED/PROVISIONING/FAILED signal otherwise.
     Set<String> runningIds =
         containers.listWorkspaceContainers(repoId).stream()
             // ps -a lists stopped containers too; only genuinely-running ones count as RUNNING (a
@@ -1133,13 +1134,15 @@ public class WorkspaceService {
     }
 
     // Present but not running — a container that died out-of-band (classically a host/docker
-    // restart leaving it Exited). `isRunning` is false but the container (and its /workspace clone)
-    // still exist, so start it back up in place rather than re-cloning: this keeps unpushed
-    // commits,
-    // the lossless recovery the graceful-stop path can't offer once the container died
-    // unexpectedly.
-    // The branch-gone abandonment below deliberately doesn't apply here — the work lives in the
-    // container, not just origin.
+    // restart leaving it stopped). `isRunning` is false but the container and its /workspace volume
+    // still exist, so start it back up rather than re-cloning: this keeps unpushed commits, the
+    // lossless recovery the graceful-stop path can't offer once the container died unexpectedly.
+    // The branch-gone abandonment below deliberately doesn't apply here — the work lives on the
+    // volume, not just origin.
+    //
+    // `start` takes the workspace's identity rather than the container name, and the snapshot is
+    // where branch and parent come from: the orchestrator has no start verb, so a stopped place is
+    // started by asking for it again with its spec. See ContainerRuntime.start.
     if (containers.exists(container)) {
       QuarkusTransaction.requiringNew()
           .run(() -> markRuntime(repoId, workspaceId, WorkspaceRuntimeStatus.PROVISIONING, null));
@@ -1147,11 +1150,11 @@ public class WorkspaceService {
         if (process != null) {
           process.openSegment("container-start");
         }
-        containers.start(container);
+        containers.start(repoId, workspaceId, rowId, snapshot.branch(), snapshot.parent());
         if (process != null) {
           process.appendLine(
               "container-start",
-              "Started the existing container in place (its /workspace clone is preserved).");
+              "Started the existing container again (its /workspace volume is preserved).");
           process.settleSegment("container-start", true);
           process.finishProvision(true);
         }

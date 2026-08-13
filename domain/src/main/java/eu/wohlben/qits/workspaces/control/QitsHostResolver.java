@@ -28,7 +28,7 @@ import org.jboss.logging.Logger;
  *       container→container DNS with no host hop at all. This is the preferred setup and sidesteps
  *       the WSL2 problem below entirely.
  *   <li><strong>Plain Linux docker (qits on the host)</strong>: {@code host.docker.internal} works
- *       — {@code DockerExecutor} adds {@code --add-host=host.docker.internal:host-gateway}, so it
+ *       — every workspace spec carries the {@code host.docker.internal:host-gateway} alias, so it
  *       maps to the host and the app (bound on {@code 0.0.0.0}) is reachable.
  *   <li><strong>WSL2 + Docker Desktop (qits on the host)</strong>: {@code host.docker.internal}
  *       resolves to an address that does <em>not</em> reach the WSL2 distro's app (commonly an

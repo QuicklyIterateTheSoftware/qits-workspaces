@@ -1,0 +1,443 @@
+package eu.wohlben.qits.workspaces.containershost;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import eu.wohlben.qits.containers.client.ContainersClient;
+import eu.wohlben.qits.containers.client.ContainersWire.EnsureRequest;
+import eu.wohlben.qits.containers.client.ContainersWire.PolicyType;
+import eu.wohlben.qits.containers.client.ContainersWire.PullPolicy;
+import eu.wohlben.qits.containers.client.ContainersWire.Recreate;
+import eu.wohlben.qits.containers.client.ContainersWire.Security;
+import eu.wohlben.qits.containers.client.ContainersWire.SharedMount;
+import eu.wohlben.qits.containers.client.ContainersWire.Spec;
+import eu.wohlben.qits.containers.client.ContainersWire.VolumeMount;
+import eu.wohlben.qits.workspaces.control.ContainerRuntime;
+import eu.wohlben.qits.workspaces.control.ProxyOrigin;
+import eu.wohlben.qits.workspaces.control.TestWorkspaceContainerFactory;
+import eu.wohlben.qits.workspaces.control.WorkspaceContainerFactory;
+import eu.wohlben.qits.workspaces.error.InternalServerErrorException;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The whole of what qits-workspaces asks qits-containers for, against a stub that answers on a real
+ * socket.
+ *
+ * <p><b>Plain objects and no CDI</b>, the way qits-ci proves its own launcher: the adapter is
+ * constructed by hand with a client pointed at {@link StubContainersServer}, so what is under test
+ * is this class's reading of the four answers rather than an application's wiring. The
+ * {@code @QuarkusTest}s cannot see any of it — {@code FakeContainerRuntime} replaces this adapter
+ * wholesale there, which is exactly why this file has to exist.
+ *
+ * <p><b>The request is asserted literally.</b> Several fields on the spec are load-bearing enough
+ * that one lost in a refactor is a behaviour change nobody would notice until a workspace
+ * misbehaved: the absent cap-drop (a dev environment must keep {@code su} and {@code chown}), the
+ * {@code init} that stops a long-lived daemon collecting zombies, the shared-versus-claimed split
+ * across the four volumes, and the explicit name that keeps {@code docker ps} readable.
+ */
+class WorkspaceContainersTest {
+
+  private static final String OWNER = "dev-qits-workspaces";
+  private static final String REPO = "repo12345678abc";
+
+  /** A live envelope body, as the service answers about a place that is up. */
+  private static final String RUNNING =
+      envelope("qits-ws-work-repo1234", "RUNNING");
+
+  private StubContainersServer stub;
+
+  @BeforeEach
+  void start() throws IOException {
+    stub = new StubContainersServer();
+  }
+
+  @AfterEach
+  void stop() {
+    stub.close();
+  }
+
+  private static String envelope(String name, String observed) {
+    return "{\"id\":\"6f1b3d2e-0000-4000-8000-000000000001\",\"containerName\":\""
+        + name
+        + "\",\"state\":{\"desired\":\"RUNNING\",\"observed\":\""
+        + observed
+        + "\"},\"endpoint\":null,\"specHash\":\"h1\",\"created\":false,\"detail\":null}";
+  }
+
+  private WorkspaceContainers adapter() {
+    return adapter(TestWorkspaceContainerFactory.persistent());
+  }
+
+  private WorkspaceContainers adapter(WorkspaceContainerFactory factory) {
+    WorkspaceContainers containers = new WorkspaceContainers();
+    containers.containerFactory = factory;
+    containers.owner = OWNER;
+    // One second, so the retry pause clamps to it (the adapter never pauses past its own window) and
+    // a test about holding through a 401 costs a second rather than five.
+    containers.launchPatience = Duration.ofSeconds(1);
+    containers.containers =
+        new ContainersClient(
+            stub.url(), Duration.ofSeconds(5), Duration.ofSeconds(5), Optional::empty);
+    return containers;
+  }
+
+  // --- the spec ---------------------------------------------------------------------------------
+
+  @Test
+  void theEnsureRequestCarriesTheWholeWorkspaceSpec() {
+    EnsureRequest request = adapter().ensureRequest(REPO, "work", 1L, "main", "0parent");
+    Spec spec = request.spec();
+
+    assertEquals(TestWorkspaceContainerFactory.IMAGE, spec.image());
+    // The image's qits-workspace-daemon ENTRYPOINT is the whole process: no entrypoint override and
+    // no command, so a container that cannot run the daemon fails to start rather than lingering.
+    assertNull(spec.entrypoint());
+    assertNull(spec.args());
+    assertEquals("qits-net", spec.network());
+    // The name this service composed travels as the explicit name, so `docker ps` reads as it did
+    // and the ref and the name are the same string wherever the name is already a legal ref.
+    assertEquals("qits-ws-work-repo1234", spec.explicitName());
+    assertEquals(List.of("host.docker.internal:host-gateway"), spec.addHosts());
+    assertTrue(spec.user().matches("\\d+"), spec.user());
+    // tini as PID 1: the daemon spawns bootstrap steps, dev servers and agent sessions, and a PID 1
+    // that reaps nothing would collect their orphans for as long as the workspace runs.
+    assertEquals(Boolean.TRUE, spec.init());
+    // The pin is a version, so what is local under that name IS the release — the inspect-then-pull
+    // this service used to do itself, enforced one hop out.
+    assertEquals(PullPolicy.MISSING, spec.pullPolicy());
+    // A workspace container never gets the host's docker socket, and nothing can ask for one.
+    assertFalse(spec.hostDockerSocket());
+    assertNull(spec.aliases());
+
+    // The qits.* identity labels, as human hints. They select nothing — the registry answers "whose
+    // container is this" — and they are what a person reading `docker inspect` has to go on.
+    assertEquals(REPO, spec.extraLabels().get("qits.repository"));
+    assertEquals("work", spec.extraLabels().get("qits.workspace"));
+    assertEquals("main", spec.extraLabels().get("qits.branch"));
+    assertEquals("0parent", spec.extraLabels().get("qits.parent"));
+    assertEquals("proj-1", spec.extraLabels().get("qits.project"));
+
+    // The daemon's dial-home coordinates reach it as environment, because it needs all of it before
+    // a socket exists. The order is the factory's insertion order, which is what keeps this
+    // assertable at all.
+    assertEquals(
+        "ws://qits:8080/workspaces/daemon/1", spec.env().get("QITS_WORKSPACE_DAEMON_URL"));
+    assertEquals(
+        "/workspaces/container/1/", spec.env().get("QITS_WORKSPACE_DAEMON_API_BASE_PATH"));
+    assertEquals("work", spec.env().get("QITS_WORKSPACE_DAEMON_WORKSPACE_ID"));
+    assertEquals(REPO, spec.env().get("QITS_WORKSPACE_DAEMON_REPOSITORY_ID"));
+    assertEquals("main", spec.env().get("QITS_WORKSPACE_DAEMON_BRANCH"));
+    assertEquals("/claude-home/.claude", spec.env().get("CLAUDE_CONFIG_DIR"));
+    assertEquals("-Dmaven.repo.local=/caches/m2", spec.env().get("MAVEN_OPTS"));
+
+    // EXPLICIT: a workspace lives until somebody says otherwise and only a delete ends it. It is
+    // also what makes a changed spec recreatable rather than a SPEC_CONFLICT.
+    assertEquals(PolicyType.EXPLICIT, request.policy().type());
+    assertNull(request.policy().idleAfterSeconds());
+    assertNull(request.policy().maxAgeSeconds());
+    // The release train moves the image pin, so a workspace whose spec no longer matches what is
+    // running must be replaced rather than silently left on the old image with a 200 saying so.
+    assertEquals(Recreate.ifChanged, request.recreate());
+  }
+
+  @Test
+  void theSandboxKeepsTheCapabilitiesAStepContainerDeliberatelyLoses() {
+    Spec spec = adapter().ensureRequest(REPO, "work", 1L, "main", null).spec();
+
+    // NOT qits-ci's sandbox, and the difference is the whole point: a step container runs a
+    // repository's script and drops everything it can, while this is a development environment a
+    // person works in — it has to be able to su, chown its own checkout and install a toolchain.
+    // What bounds it instead is the resource caps beside them. The memory cap is the swap cap too,
+    // so the container cannot spill the difference into host swap.
+    assertEquals(new Security(false, false, "4g", "4g", null, null), spec.security());
+  }
+
+  @Test
+  void theThreeSharedVolumesAreTheePlatformsAndTheWorkspaceVolumeIsClaimed() {
+    Spec spec = adapter().ensureRequest(REPO, "work", 1L, "main", null).spec();
+
+    // The platform's: the orchestrator creates exactly these three at its own boot, no row claims
+    // them and no delete may ever take them.
+    assertEquals(
+        List.of(
+            new SharedMount("qits_shared_dot_claude", "/claude-home"),
+            new SharedMount("qits_shared_m2", "/caches/m2"),
+            new SharedMount("qits_shared_pnpm", "/caches/pnpm")),
+        spec.sharedMounts());
+    // This workload's own: created with the container by the same ensure, and the reason a recreate
+    // reattaches the same checkout instead of re-cloning.
+    assertEquals(
+        List.of(new VolumeMount("qits_workspace_work", "/workspace")), spec.volumeMounts());
+  }
+
+  @Test
+  void theKillSwitchTakesTheClaimedVolumeAndNothingElse() {
+    Spec spec =
+        adapter(TestWorkspaceContainerFactory.ephemeralWorkspace())
+            .ensureRequest(REPO, "work", 1L, "main", null)
+            .spec();
+
+    // persist-workspace off: /workspace reverts to the container's own writable layer, so there is
+    // no claimed volume at all. The three shared mounts are untouched by that flag.
+    assertEquals(List.of(), spec.volumeMounts());
+    assertEquals(3, spec.sharedMounts().size());
+  }
+
+  // --- the ref ----------------------------------------------------------------------------------
+
+  @Test
+  void aNameThatIsAlreadyALegalRefIsTheRef() {
+    // Every ordinary workspace: the name IS the place, qits-ci's stance, and the common case stays
+    // readable.
+    assertEquals("qits-ws-main-abc12345", WorkspaceContainers.refOf("qits-ws-main-abc12345"));
+  }
+
+  @Test
+  void aNameOutsideTheRefCharsetIsNormalizedAndDisambiguated() {
+    // A branch slug carries [A-Za-z0-9_-] and the ref charset is [a-z0-9-], so uppercase and
+    // underscores have to fold. Folding alone would map two workspaces onto one place, so a name
+    // that had to change carries a hash of its whole self.
+    String upper = WorkspaceContainers.refOf("qits-ws-Login_V2-abc12345");
+    String lower = WorkspaceContainers.refOf("qits-ws-login-v2-abc12345");
+
+    assertTrue(upper.startsWith("qits-ws-login-v2-abc12345-"), upper);
+    assertTrue(upper.matches("[a-z0-9][a-z0-9-]*"), upper);
+    // The two would collide on the normalized form alone; they do not.
+    assertFalse(upper.equals(lower), "normalization must not merge two distinct workspaces");
+    // Deterministic, which is what lets rm and stop address what run put there.
+    assertEquals(upper, WorkspaceContainers.refOf("qits-ws-Login_V2-abc12345"));
+  }
+
+  // --- launching ---------------------------------------------------------------------------------
+
+  @Test
+  void aLaunchIsOnePutAtTheWorkspacesOwnPlace() {
+    stub.script(201, RUNNING);
+
+    String name = adapter().run(REPO, "work", 1L, "main", null);
+
+    assertEquals("qits-ws-work-repo1234", name);
+    StubContainersServer.Received put = stub.last();
+    assertEquals("PUT", put.method());
+    assertEquals(
+        "/containers/api/containers/" + OWNER + "/workspace/qits-ws-work-repo1234", put.path());
+  }
+
+  @Test
+  void aLaunchHoldsThroughAnIdpCutoversFourOhOne() {
+    // The 2026-08-12 lesson: a token minted by an idp the deploy train has just replaced reads as a
+    // statement about the request and is one about the moment. Each attempt asks the TokenSource
+    // again, which is the only way a post-cutover token is ever picked up.
+    stub.script(401, "{\"code\":\"UNAUTHORIZED\",\"message\":\"no\"}").script(201, RUNNING);
+
+    assertEquals("qits-ws-work-repo1234", adapter().run(REPO, "work", 1L, "main", null));
+    assertEquals(2, stub.received().size());
+  }
+
+  @Test
+  void aLaunchHoldsThroughAnOrchestratorThatSaidNothing() {
+    // Retrying an unanswered ensure is safe for a reason a bare `docker run` never had: it is a PUT
+    // per (owner, workload, ref), so the second attempt addresses the same place and a container the
+    // first created but could not report is adopted rather than duplicated.
+    stub.scriptSilence().script(201, RUNNING);
+
+    assertEquals("qits-ws-work-repo1234", adapter().run(REPO, "work", 1L, "main", null));
+    assertEquals(2, stub.received().size());
+  }
+
+  @Test
+  void aRefusalAboutTheRequestIsOneAttempt() {
+    // No window makes an unpublished image appear, so this is one attempt and one loud failure —
+    // and the code travels into the message, because it is what tells an operator whether to push an
+    // image or to fix a pin.
+    stub.script(409, "{\"code\":\"IMAGE_MISSING\",\"message\":\"nothing published that\"}");
+
+    InternalServerErrorException failure =
+        assertThrows(
+            InternalServerErrorException.class,
+            () -> adapter().run(REPO, "work", 1L, "main", null));
+
+    assertEquals(1, stub.received().size());
+    assertTrue(failure.getMessage().contains("IMAGE_MISSING"), failure.getMessage());
+  }
+
+  @Test
+  void aTwoHundredWhoseContainerIsNotThereIsAFailedLaunch() {
+    // The wire contract is explicit that an ensure whose container did not start is a TRUE answer
+    // rather than a failed request: the row exists, it says MISSING, and it carries what docker
+    // said. Reading it as started would leave a workspace RUNNING with nothing behind it.
+    stub.script(
+        200,
+        "{\"id\":\"6f1b3d2e-0000-4000-8000-000000000001\",\"containerName\":\"qits-ws-work-repo1234\","
+            + "\"state\":{\"desired\":\"RUNNING\",\"observed\":\"MISSING\"},\"endpoint\":null,"
+            + "\"specHash\":\"h1\",\"created\":true,\"detail\":\"[docker refused to start it]\"}");
+
+    InternalServerErrorException failure =
+        assertThrows(
+            InternalServerErrorException.class,
+            () -> adapter().run(REPO, "work", 1L, "main", null));
+
+    // Not retried either: something answered about this very container.
+    assertEquals(1, stub.received().size());
+    assertTrue(failure.getMessage().contains("docker refused to start it"), failure.getMessage());
+  }
+
+  // --- the rest of the lifecycle -----------------------------------------------------------------
+
+  @Test
+  void startRemovesTheStoppedContainerBeforeAskingForThePlaceAgain() {
+    // The workaround for the orchestrator's RESTART step, which re-runs `docker run` under the same
+    // name without removing the exited container first — a real daemon refuses that, and the
+    // recovery branch adopts only a container that is already running. The delete is what makes the
+    // ensure a clean START; asking for no volumes is what keeps the checkout.
+    stub.script(200, "{\"id\":null,\"containerName\":\"qits-ws-work-repo1234\",\"existed\":true,"
+            + "\"logTail\":null,\"detail\":null}")
+        .script(201, RUNNING);
+
+    adapter().start(REPO, "work", 1L, "main", null);
+
+    List<StubContainersServer.Received> seen = stub.received();
+    assertEquals(2, seen.size());
+    assertEquals("DELETE", seen.get(0).method());
+    assertEquals("volumes=false&logs=false", seen.get(0).query());
+    assertEquals("PUT", seen.get(1).method());
+  }
+
+  @Test
+  void rmNeverTakesTheWorkspaceVolumeWithIt() {
+    // The per-workspace volume outlives the container by design — a recreate reattaches the same
+    // checkout — and the one operation that means to drop it says so by name.
+    stub.script(200, "{\"id\":null,\"containerName\":\"c\",\"existed\":true,\"logTail\":null,"
+        + "\"detail\":null}");
+
+    adapter().rm("qits-ws-work-repo1234");
+
+    StubContainersServer.Received delete = stub.last();
+    assertEquals("DELETE", delete.method());
+    assertEquals(
+        "/containers/api/containers/" + OWNER + "/workspace/qits-ws-work-repo1234", delete.path());
+    assertEquals("volumes=false&logs=false", delete.query());
+  }
+
+  @Test
+  void removingTheWorkspaceVolumeGoesThroughTheStandaloneVolumeDoor() {
+    // The volume can outlive or precede a container entirely — a branch abandoned before it was ever
+    // provisioned — so asking for it on a container's delete would only work on the one path where
+    // both exist at once.
+    stub.script(200, "{\"id\":null,\"owner\":\"" + OWNER + "\",\"name\":\"qits_workspace_work\","
+        + "\"desired\":\"ABSENT\",\"existed\":true,\"detail\":null}");
+
+    adapter().removeWorkspaceVolume("work");
+
+    StubContainersServer.Received delete = stub.last();
+    assertEquals("DELETE", delete.method());
+    assertEquals("/containers/api/volumes/" + OWNER + "/qits_workspace_work", delete.path());
+  }
+
+  @Test
+  void aStoppedContainerStillExistsAndIsNotRunning() {
+    // The distinction the whole start-in-place path rests on: a deliberate stop leaves the place
+    // there, so `exists` must stay true while `isRunning` goes false.
+    stub.fallback(200, envelope("qits-ws-work-repo1234", "EXITED"));
+
+    WorkspaceContainers containers = adapter();
+    assertTrue(containers.exists("qits-ws-work-repo1234"));
+    assertFalse(containers.isRunning("qits-ws-work-repo1234"));
+  }
+
+  @Test
+  void aPlaceWithNoRowNeitherExistsNorRuns() {
+    stub.fallback(404, "{\"code\":\"NOT_FOUND\",\"message\":\"no such place\"}");
+
+    WorkspaceContainers containers = adapter();
+    assertFalse(containers.exists("qits-ws-work-repo1234"));
+    assertFalse(containers.isRunning("qits-ws-work-repo1234"));
+  }
+
+  @Test
+  void anUnreachableOrchestratorReadsAsAbsentRatherThanAsRunning() {
+    // The safe direction rather than the honest one: `exists` false sends the caller to run, which
+    // is an idempotent PUT at the same place. The opposite default would report a workspace as
+    // running while the orchestrator was down, and the proxy would dial a container nobody could
+    // confirm.
+    stub.fallback(503, "{\"code\":\"UNAVAILABLE\",\"message\":\"down\"}");
+
+    WorkspaceContainers containers = adapter();
+    assertFalse(containers.exists("qits-ws-work-repo1234"));
+    assertFalse(containers.isRunning("qits-ws-work-repo1234"));
+  }
+
+  @Test
+  void theWorkspaceListingIsOneCallMatchedOnNames() {
+    // One call and not one per workspace: this backs the workspace list endpoint, which a browser
+    // polls. The listing carries no labels, so the workspace id is read back out of the name.
+    stub.script(
+        200,
+        "{\"containers\":["
+            + envelope("qits-ws-work-repo1234", "RUNNING")
+            + ","
+            + envelope("qits-ws-paused-repo1234", "EXITED")
+            + ","
+            + envelope("qits-ws-other-99999999", "RUNNING")
+            + ","
+            + envelope("qits-ct-someone-else", "RUNNING")
+            + "]}");
+
+    List<ContainerRuntime.ContainerInfo> found = adapter().listWorkspaceContainers(REPO);
+
+    assertEquals(1, stub.received().size());
+    assertEquals("GET", stub.last().method());
+    // Another repository's container and a place that is not a workspace at all are both out.
+    assertEquals(List.of("work", "paused"), found.stream().map(ContainerRuntime.ContainerInfo::workspaceId).toList());
+    assertTrue(found.get(0).running());
+    // A deliberately stopped container is listed and reads as not running — the reconcile needs to
+    // see it, and only genuinely-running ones may count as RUNNING.
+    assertFalse(found.get(1).running());
+    // branch and parent lived on labels the listing does not answer with, and nothing reads them.
+    assertNull(found.get(0).branch());
+    assertNull(found.get(0).parent());
+  }
+
+  @Test
+  void aFailedListingClaimsNothingIsRunning() {
+    stub.fallback(503, "{\"code\":\"UNAVAILABLE\",\"message\":\"down\"}");
+
+    assertEquals(List.of(), adapter().listWorkspaceContainers(REPO));
+  }
+
+  @Test
+  void theProxyTargetIsTheContainersOwnNameOnTheSharedNetwork() {
+    // Pure: no round trip, and no component of a request ever selects a host or a port. The
+    // bridge-ip mode that needed an inspect is gone with the key that selected it.
+    assertEquals(
+        new ProxyOrigin("qits-ws-work-repo1234", 13338),
+        adapter().resolveTarget("qits-ws-work-repo1234", 13338));
+    assertEquals(0, stub.received().size());
+  }
+
+  // --- what the orchestrator has no verb for -----------------------------------------------------
+
+  @Test
+  void theVerbsWithNoProductionCallerRefuseRatherThanAnswer() {
+    // Reaching one of these is a new caller rather than a state, so it must fail where it is written
+    // instead of quietly answering something. The interface keeps them because the two
+    // FakeContainerRuntimes are their real implementors.
+    WorkspaceContainers containers = adapter();
+    assertThrows(
+        UnsupportedOperationException.class, () -> containers.exec("c", null, null, "git", "log"));
+    assertThrows(
+        UnsupportedOperationException.class, () -> containers.execArgv("c", false, null, null));
+    assertThrows(UnsupportedOperationException.class, () -> containers.restart("c"));
+    assertThrows(UnsupportedOperationException.class, containers::listWorkspaceVolumes);
+    assertEquals(0, stub.received().size());
+  }
+}

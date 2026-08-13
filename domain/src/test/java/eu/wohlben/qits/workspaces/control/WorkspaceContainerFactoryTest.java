@@ -2,11 +2,12 @@ package eu.wohlben.qits.workspaces.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import jakarta.enterprise.inject.Instance;
 import java.time.ZoneId;
 import java.util.List;
-import jakarta.enterprise.inject.Instance;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -15,6 +16,10 @@ import org.junit.jupiter.api.Test;
  * JUnit (same package) sets the {@code @ConfigProperty} fields directly, so no docker or Quarkus
  * boot is needed — this is the coverage {@link FakeContainerRuntime} (which models neither the
  * volume nor the labels) cannot give.
+ *
+ * <p>Read through {@link WorkspaceContainer}'s readers, not through a rendered argv: the socket is
+ * gone and the {@code docker run} flags with it, so what is asserted here is the decision (this
+ * volume at this path, this env var with this value) rather than the string it used to become.
  */
 class WorkspaceContainerFactoryTest {
 
@@ -22,11 +27,11 @@ class WorkspaceContainerFactoryTest {
    * A stand-in for {@code qits.workspace.image}, in the shape the service now ships: registry host
    * with a port, repository path, calver tag. The shape is what earns its keep here — the reference
    * carries two colons, so anything that ever tried to split it into name and tag would fail on
-   * this argv rather than on a container launch.
+   * this reference rather than on a container launch.
    *
    * <p>The version is invented, and stays invented. The real pin lives in {@code
    * META-INF/microprofile-config.properties} and the release train moves it; a test that copied it
-   * would only add a place the train forgets. This test proves the factory renders whatever image
+   * would only add a place the train forgets. This test proves the factory carries whatever image
    * it is handed, which is a claim no particular version makes truer.
    */
   private static final String IMAGE = "localhost:8081/qits/workspace:2026.101.1";
@@ -89,89 +94,83 @@ class WorkspaceContainerFactoryTest {
   }
 
   @Test
-  void alwaysSeedsTheCredentialVolumeLabelsHostUserImageAndCommand() {
-    List<String> argv =
-        factory().forWorkspace("repo12345678abc", "work", 1L, "main", "0parent").toRunArgv();
+  void alwaysSeedsTheCredentialVolumeLabelsHostUserAndImage() {
+    WorkspaceContainer c = factory().forWorkspace("repo12345678abc", "work", 1L, "main", "0parent");
 
-    // The guarantee: the shared credential volume is mounted on every container.
-    assertSequence(argv, "-v", "qits_shared_dot_claude:/claude-home");
+    // The guarantee: the shared credential volume is mounted on every container, the shared build
+    // caches beside it at their fixed paths, and nothing else. Asserted as the whole list because
+    // the mounts are the one thing a workspace cannot be quietly given an extra of; the
+    // per-workspace /workspace volume is absent because persist-workspace is off on this
+    // hand-built factory (a plain field, so it is Java's false rather than the shipped default).
+    assertEquals(
+        List.of(
+            new WorkspaceContainer.Mount("qits_shared_dot_claude", "/claude-home"),
+            new WorkspaceContainer.Mount("qits_shared_m2", "/caches/m2"),
+            new WorkspaceContainer.Mount("qits_shared_pnpm", "/caches/pnpm")),
+        c.volumes());
     // ...and every in-container `claude` is pointed at it regardless of HOME, so a login persists
     // across containers even for ad-hoc runs.
-    assertSequence(argv, "-e", "CLAUDE_CONFIG_DIR=/claude-home/.claude");
+    assertEnv(c, "CLAUDE_CONFIG_DIR", "/claude-home/.claude");
     // ...and Kimi Code's data root likewise (KIMI_CODE_HOME relocates config, credentials and
     // sessions onto the same volume).
-    assertSequence(argv, "-e", "KIMI_CODE_HOME=/claude-home/.kimi-code");
-    // Shared build caches mounted + tools pointed at them, so downloads are reused across builds.
-    assertSequence(argv, "-v", "qits_shared_m2:/caches/m2");
-    assertSequence(argv, "-e", "MAVEN_OPTS=-Dmaven.repo.local=/caches/m2");
-    assertSequence(argv, "-v", "qits_shared_pnpm:/caches/pnpm");
-    assertSequence(argv, "-e", "npm_config_store_dir=/caches/pnpm/store");
+    assertEnv(c, "KIMI_CODE_HOME", "/claude-home/.kimi-code");
+    // The build-cache tools pointed at their mounts, so downloads are reused across builds.
+    assertEnv(c, "MAVEN_OPTS", "-Dmaven.repo.local=/caches/m2");
+    assertEnv(c, "npm_config_store_dir", "/caches/pnpm/store");
     // The qits.* reconciliation labels.
-    assertSequence(argv, "--label", "qits.repository=repo12345678abc");
-    assertSequence(argv, "--label", "qits.workspace=work");
-    assertSequence(argv, "--label", "qits.branch=main");
-    assertSequence(argv, "--label", "qits.parent=0parent");
-    // Host alias, host uid, deterministic name, image, entrypoint.
-    assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
-    assertTrue(argv.contains("--user"), argv.toString());
-    assertSequence(argv, "--name", "qits-ws-work-repo1234");
-    assertTrue(argv.contains(IMAGE), argv.toString());
-    // The container runs qits-workspace-daemon via the image ENTRYPOINT (docker/qits/Dockerfile),
-    // with no `docker run` command and — deliberately — no `sleep infinity` fallback: the image is
-    // the LAST token (no trailing command), the run argv carries no daemon path, and a container
-    // that can't run the daemon fails to start rather than lingering
-    // (docs/epics/qits-workspace-daemon/).
-    assertEquals(IMAGE, argv.get(argv.size() - 1), argv.toString());
-    assertFalse(argv.contains("sleep"), argv.toString());
-    assertFalse(argv.contains("infinity"), argv.toString());
-    assertFalse(argv.contains("/usr/local/bin/qits-workspace-daemon"), argv.toString());
-    // workspace-daemon's dial-home coordinates + identity, injected as env (QITS_WORKSPACE_DAEMON_*
-    // ->
-    // qits.workspace-daemon.*)
-    // — workspace-daemon runs in-container so it can't call QitsHostResolver; the URL is composed
-    // here.
-    assertSequence(
-        argv, "-e", "QITS_WORKSPACE_DAEMON_URL=ws://qits:8080/workspaces/daemon/1");
+    assertLabel(c, "qits.repository", "repo12345678abc");
+    assertLabel(c, "qits.workspace", "work");
+    assertLabel(c, "qits.branch", "main");
+    assertLabel(c, "qits.parent", "0parent");
+    // Host alias, host uid, deterministic name, image.
+    assertEquals(List.of("host.docker.internal:host-gateway"), c.addHosts());
+    // The uid is the host's, so the value is whatever this machine's is — what is asserted is that
+    // one was resolved and it is a uid, not a copy of the private lookup that produced it.
+    assertTrue(c.user().matches("\\d+"), c.user());
+    assertEquals("qits-ws-work-repo1234", c.name());
+    assertEquals(IMAGE, c.image());
+    // workspace-daemon's dial-home coordinates + identity, injected as env
+    // (QITS_WORKSPACE_DAEMON_* -> qits.workspace-daemon.*) — workspace-daemon runs in-container so
+    // it can't call QitsHostResolver; the URL is composed here.
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_URL", "ws://qits:8080/workspaces/daemon/1");
     // Where ContainerProxyRoute addresses this container. Asserted as a literal rather than through
     // ContainerProxyPath.base: the daemon in the other repo matches this string, so a test that
     // computed it the same way the production code does would rename itself along with the bug.
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_API_BASE_PATH=/workspaces/container/1/");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_API_BASE_PATH", "/workspaces/container/1/");
     // The per-workspace half of QITS_PUBLIC_BASE, which the daemon completes with the declared
     // service id (+ web-view base-path) at every spawn. Literal for the same cross-repo reason as
     // above: ServiceProxyRoute's verbatim proxy answers under exactly this prefix.
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE=/workspaces/service/1");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_WORKSPACE_ID=work");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPOSITORY_ID=repo12345678abc");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BRANCH=main");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PARENT=0parent");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE", "/workspaces/service/1");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_WORKSPACE_ID", "work");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_REPOSITORY_ID", "repo12345678abc");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_BRANCH", "main");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_PARENT", "0parent");
     // The project-scoped name the daemon self-clones under (/git/<projectId>/<repoName>), so
     // committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part
     // 1).
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=proj-1");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=my-repo");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_PROJECT_ID", "proj-1");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_REPO_NAME", "my-repo");
     // The bootstrap kill switch the daemon honours when it self-runs the chain on boot (Part 3).
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN=true");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN", "true");
     // Part 4: the service (dev-server) auto-start kill switch the daemon honours as its boot tail.
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART=true");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART", "true");
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
-    assertSequence(argv, "--network", "qits-net");
-    assertFalse(argv.contains("-p"), argv.toString());
-    // The hard memory cap (--memory-swap equal, so the container can't swap past it either) —
+    assertEquals("qits-net", c.network());
+    // The hard memory cap (it is the swap cap as well, so the container can't swap past it) —
     // without it a dev server's JVMs size against the whole host's RAM and can OOM the host
     // (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md).
-    assertSequence(argv, "--memory", "4g");
-    assertSequence(argv, "--memory-swap", "4g");
+    assertEquals("4g", c.memory());
     // pids/cpus are off by default.
-    assertFalse(argv.contains("--pids-limit"), argv.toString());
-    assertFalse(argv.contains("--cpus"), argv.toString());
+    assertNull(c.pidsLimit());
+    assertNull(c.cpus());
     // The blank default timezone inherits qits' own zone, so container wall-clock matches qits'.
-    assertSequence(argv, "-e", "TZ=" + ZoneId.systemDefault().getId());
+    assertEnv(c, "TZ", ZoneId.systemDefault().getId());
     // The commit identity as container-level env, so every git process in the container (qits'
     // verbs, the agent, actions, ad-hoc shells) commits as the configured identity.
-    assertSequence(argv, "-e", "GIT_AUTHOR_NAME=qits");
-    assertSequence(argv, "-e", "GIT_AUTHOR_EMAIL=qits@local");
-    assertSequence(argv, "-e", "GIT_COMMITTER_NAME=qits");
-    assertSequence(argv, "-e", "GIT_COMMITTER_EMAIL=qits@local");
+    assertEnv(c, "GIT_AUTHOR_NAME", "qits");
+    assertEnv(c, "GIT_AUTHOR_EMAIL", "qits@local");
+    assertEnv(c, "GIT_COMMITTER_NAME", "qits");
+    assertEnv(c, "GIT_COMMITTER_EMAIL", "qits@local");
   }
 
   @Test
@@ -179,12 +178,12 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.nameResolver = nameResolver(Optional.empty());
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
     // Blank scope ⇒ the Provisioner clones id-addressed (/git/<repositoryId>), mirroring cloneUrl's
-    // fallback.
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=");
+    // fallback. Blank rather than missing: the daemon reads the var either way.
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_PROJECT_ID", "");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_REPO_NAME", "");
   }
 
   @Test
@@ -203,12 +202,11 @@ class WorkspaceContainerFactoryTest {
                         "53c78589-6af3-4221-b3ef-315c867b0863",
                         "main")));
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
-    assertSequence(
-        argv, "-e", "QITS_WORKSPACE_DAEMON_PROJECT_ID=53c78589-6af3-4221-b3ef-315c867b0863");
-    assertSequence(argv, "-e", "QITS_WORKSPACE_DAEMON_REPO_NAME=qits-qits");
-    assertSequence(argv, "--label", "qits.project=53c78589-6af3-4221-b3ef-315c867b0863");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_PROJECT_ID", "53c78589-6af3-4221-b3ef-315c867b0863");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_REPO_NAME", "qits-qits");
+    assertLabel(c, "qits.project", "53c78589-6af3-4221-b3ef-315c867b0863");
   }
 
   @Test
@@ -216,12 +214,12 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.gitIdentity = identity("qits-bot", "qits-bot@example.com");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
-    assertSequence(argv, "-e", "GIT_AUTHOR_NAME=qits-bot");
-    assertSequence(argv, "-e", "GIT_AUTHOR_EMAIL=qits-bot@example.com");
-    assertSequence(argv, "-e", "GIT_COMMITTER_NAME=qits-bot");
-    assertSequence(argv, "-e", "GIT_COMMITTER_EMAIL=qits-bot@example.com");
+    assertEnv(c, "GIT_AUTHOR_NAME", "qits-bot");
+    assertEnv(c, "GIT_AUTHOR_EMAIL", "qits-bot@example.com");
+    assertEnv(c, "GIT_COMMITTER_NAME", "qits-bot");
+    assertEnv(c, "GIT_COMMITTER_EMAIL", "qits-bot@example.com");
   }
 
   @Test
@@ -229,9 +227,9 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.timezone = Optional.of("Pacific/Auckland");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
-    assertSequence(argv, "-e", "TZ=Pacific/Auckland");
+    assertEnv(c, "TZ", "Pacific/Auckland");
   }
 
   @Test
@@ -239,22 +237,22 @@ class WorkspaceContainerFactoryTest {
     WorkspaceContainerFactory f = factory();
     f.memoryLimit = Optional.of("  ");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
-    assertFalse(argv.contains("--memory"), argv.toString());
-    assertFalse(argv.contains("--memory-swap"), argv.toString());
+    // The blank never reaches the container: absent, not "  ", so the spec carries no cap at all.
+    assertNull(c.memory());
   }
 
   @Test
-  void configuredPidsAndCpuLimitsFlowIntoTheArgv() {
+  void configuredPidsAndCpuLimitsFlowIntoTheContainer() {
     WorkspaceContainerFactory f = factory();
     f.pidsLimit = Optional.of("2048");
     f.cpus = Optional.of("2.5");
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
-    assertSequence(argv, "--pids-limit", "2048");
-    assertSequence(argv, "--cpus", "2.5");
+    assertEquals("2048", c.pidsLimit());
+    assertEquals("2.5", c.cpus());
   }
 
   @Test
@@ -263,29 +261,31 @@ class WorkspaceContainerFactoryTest {
     f.claudeVolume = "";
     f.pnpmVolume = "";
 
-    List<String> argv = f.forWorkspace("repo12345678abc", "work", 1L, "main", null).toRunArgv();
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
 
-    // The blanked caches drop their mount (and, for claude/kimi, the credential-dir env too)...
-    assertFalse(argv.contains("qits_shared_dot_claude:/claude-home"), argv.toString());
-    assertFalse(argv.contains("CLAUDE_CONFIG_DIR=/claude-home/.claude"), argv.toString());
-    assertFalse(argv.contains("KIMI_CODE_HOME=/claude-home/.kimi-code"), argv.toString());
-    assertFalse(argv.contains("qits_shared_pnpm:/caches/pnpm"), argv.toString());
-    // ...while the still-configured Maven cache stays.
-    assertSequence(argv, "-v", "qits_shared_m2:/caches/m2");
+    // The blanked caches drop their mount — and, for claude/kimi, the credential-dir env too —
+    // while the still-configured Maven cache stays.
+    assertEquals(
+        List.of(new WorkspaceContainer.Mount("qits_shared_m2", "/caches/m2")), c.volumes());
+    assertFalse(c.env().containsKey("CLAUDE_CONFIG_DIR"), c.env().toString());
+    assertFalse(c.env().containsKey("KIMI_CODE_HOME"), c.env().toString());
+    assertEnv(c, "MAVEN_OPTS", "-Dmaven.repo.local=/caches/m2");
     // Everything else still present, incl. an empty parent label for the null parent.
-    assertTrue(argv.contains("--add-host=host.docker.internal:host-gateway"), argv.toString());
-    assertSequence(argv, "--label", "qits.repository=repo12345678abc");
-    assertSequence(argv, "--label", "qits.parent=");
-    assertSequence(argv, "--name", "qits-ws-work-repo1234");
+    assertEquals(List.of("host.docker.internal:host-gateway"), c.addHosts());
+    assertLabel(c, "qits.repository", "repo12345678abc");
+    assertLabel(c, "qits.parent", "");
+    assertEquals("qits-ws-work-repo1234", c.name());
   }
 
-  /** Assert {@code first} appears immediately followed by {@code second}. */
-  private static void assertSequence(List<String> argv, String first, String second) {
-    for (int i = 0; i < argv.size() - 1; i++) {
-      if (first.equals(argv.get(i)) && second.equals(argv.get(i + 1))) {
-        return;
-      }
-    }
-    throw new AssertionError("expected [" + first + ", " + second + "] in " + argv);
+  /** Assert the container carries {@code key} with exactly {@code value} in its environment. */
+  private static void assertEnv(WorkspaceContainer container, String key, String value) {
+    assertTrue(container.env().containsKey(key), () -> "no " + key + " in " + container.env());
+    assertEquals(value, container.env().get(key), key);
+  }
+
+  /** Assert the container carries {@code key} with exactly {@code value} in its labels. */
+  private static void assertLabel(WorkspaceContainer container, String key, String value) {
+    assertTrue(container.labels().containsKey(key), () -> "no " + key + " in " + container.labels());
+    assertEquals(value, container.labels().get(key), key);
   }
 }

@@ -81,6 +81,31 @@
             <artifactId>qits-db-core</artifactId>
         </dependency>
         <dependency>
+            <!-- The orchestrator's client: every container and volume this service has goes through
+                 it, and there is no docker vocabulary left anywhere else. A plain jar over
+                 java.net.http — no arc, no OIDC extension, no framework — so the bean and the token
+                 are this module's to supply (containers/ContainersClientProducer).
+
+                 It is platform infrastructure rather than another bounded context: no domain model
+                 crosses it, every call is bounded and cannot throw, and qits-containers is the
+                 platform's single answer to "where do containers live", the way qits-events is to
+                 "where do events live".
+
+                 A native consumer owes the wire records a registration — the jar builds its own
+                 ObjectMapper, so nothing scans them: containers/ContainersWireReflection, the
+                 sibling of bus/EventWireReflection and there for the identical reason. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-containers-client</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The machine token this service presents to qits-containers, which guards every route
+                 on the caller's own identity. quarkus.oidc-client.client-id is therefore not a label
+                 here — it is this service's OWNER string, and qits.workspace.containers.owner
+                 defaults to reading it. Shipped disabled; see application.properties. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>
