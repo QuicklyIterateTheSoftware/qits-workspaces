@@ -85,7 +85,13 @@ public class DockerExecutor implements ContainerRuntime {
   /**
    * Ensure the shared workspace network exists before any container joins it. Inspect-then-create
    * so a network already provisioned by the devcontainer compose (its usual owner) is left
-   * untouched; this only covers qits run outside compose. Best-effort — a broken runtime just logs.
+   * untouched, whatever driver it has — the platform runs on a bridge today and on an overlay after
+   * the swarm re-bootstrap, and both carry workspace containers. Best-effort — a broken runtime
+   * just logs.
+   *
+   * <p>A <b>missing</b> network is created as an attachable overlay, not as the default bridge. A
+   * swarm service cannot join a bridge, so rebuilding qits-net as one here would cut every platform
+   * service off from the workspace containers. An attachable overlay carries both.
    */
   void ensureNetwork() {
     String net = containerFactory.network();
@@ -95,12 +101,33 @@ public class DockerExecutor implements ContainerRuntime {
     if (runCapturing(null, List.of(runtime, "network", "inspect", net)).exitCode() == 0) {
       return;
     }
+    ExecResult overlay =
+        runCapturing(
+            null, List.of(runtime, "network", "create", "-d", "overlay", "--attachable", net));
+    if (overlay.exitCode() == 0 || alreadyExists(overlay)) {
+      return;
+    }
+    // A daemon that is not in a swarm has no overlay driver, which is the developer machine this
+    // service also runs on. Fall back to the default bridge there — wrong under swarm, which is
+    // why the overlay is tried first and this path says so in the log.
+    LOG.warnf(
+        "Could not create workspace network '%s' as an overlay, falling back to the default"
+            + " driver: %s",
+        net, overlay.output());
     ExecResult result = runCapturing(null, List.of(runtime, "network", "create", net));
-    if (result.exitCode() != 0) {
+    if (result.exitCode() != 0 && !alreadyExists(result)) {
       LOG.warnf(
           "Could not ensure shared workspace network '%s' (web view may be unreachable): %s",
           net, result.output());
     }
+  }
+
+  /**
+   * Docker's answer when another process created the network between the inspect and the create.
+   * The network is there, which is all this method wanted, so neither create tries again.
+   */
+  private static boolean alreadyExists(ExecResult result) {
+    return result.output() != null && result.output().contains("already exists");
   }
 
   @Override
