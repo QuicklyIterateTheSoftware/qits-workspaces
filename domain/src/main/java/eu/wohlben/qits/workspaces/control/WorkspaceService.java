@@ -239,11 +239,11 @@ public class WorkspaceService {
    * host-driven fallback</b> (docs/epics/qits-workspace-daemon/ Part 2): a container with no live
    * daemon — a stale, pre-daemon image — fails to provision (rm + FAILED) rather than degrading.
    *
-   * <p>A non-null {@code process} receives the provision as streamed segments: {@code docker-run}
-   * (container create/start) and {@code clone} (the clone plus the daemon's submodule
-   * materialization) — lines arrive live from the daemon over the socket, and each segment settles
-   * when its step completes. A failure leaves the open segment for the caller to settle {@code
-   * failed}.
+   * <p>A non-null {@code process} receives the provision as streamed segments: {@code container}
+   * (the orchestrator putting the container at its place) and {@code clone} (the clone plus the
+   * daemon's submodule materialization) — lines arrive live from the daemon over the socket, and
+   * each segment settles when its step completes. A failure leaves the open segment for the caller
+   * to settle {@code failed}.
    *
    * <p>Submodules resolve <b>natively</b> in the daemon's bounded {@code .gitmodules} walk: with
    * the repository addressed by its project-scoped name, a project's repos are siblings and a
@@ -261,13 +261,13 @@ public class WorkspaceService {
       String parentBranch,
       WorkspaceProcessTracker.Handle process) {
     if (process != null) {
-      process.openSegment("docker-run");
+      process.openSegment("container");
     }
     Consumer<String> runLines =
-        process == null ? null : line -> process.appendLine("docker-run", line);
+        process == null ? null : line -> process.appendLine("container", line);
     String container = containers.run(repoId, workspaceId, rowId, branch, parentBranch, runLines);
     if (process != null) {
-      process.settleSegment("docker-run", true);
+      process.settleSegment("container", true);
       process.openSegment("clone");
     }
     Consumer<String> cloneLines =

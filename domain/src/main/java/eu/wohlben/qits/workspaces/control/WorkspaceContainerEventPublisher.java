@@ -36,7 +36,7 @@ public class WorkspaceContainerEventPublisher {
 
   /**
    * {@code technicalProcessId} correlates the async bootstrap/service phases with the start's log
-   * stream; {@code freshProvision} marks the docker-run+clone transition that triggers bootstrap.
+   * stream; {@code freshProvision} marks the container→clone transition that triggers bootstrap.
    */
   public void fireStarted(
       String repoId,

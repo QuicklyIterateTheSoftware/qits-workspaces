@@ -49,7 +49,6 @@
 # tree, and supplies the two database triples plus the one address this service cannot invent:
 #
 #   docker run -v qits-workspaces-data:/data \
-#     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -e QITS_RESOURCE_DB_URL=jdbc:postgresql://qits-oci-postgresql:5432/qits_workspaces \
 #     -e QITS_RESOURCE_DB_USERNAME=qits_workspaces -e QITS_RESOURCE_DB_PASSWORD=… \
 #     -e QITS_RESOURCE_EVENTSTREAM_URL=jdbc:postgresql://qits-oci-postgresql:5432/qits_workspaces_eventstream \
@@ -71,28 +70,10 @@
 # volumes are bind mounts from a differently-numbered host user. Set the paths above and it is still
 # wrong, because `user.home` is not one of them; fixing it needs a config key, not a Dockerfile line.
 #
-# --- READ THIS BEFORE DEPLOYING: docker and git are part of this service's runtime -----------------
+# --- READ THIS BEFORE DEPLOYING: git is part of this service's runtime -----------------------------
 # This service is the HOST side of a workspace (README.md, "The boundary"): its work is orchestrating
 # containers and git trees that live outside itself. So the runtime stage below is deliberately NOT
-# the usual "the binary and nothing else", and two external programs are part of its *runtime*:
-#
-#   docker  `DockerExecutor` shells the CLI named by `qits.workspace.container-runtime` for every
-#           `run`/`stop`/`rm`/`inspect`/`exec`, and its `@Observes StartupEvent` creates the three
-#           shared volumes and the `qits-net` network on boot. The CLI is installed below — but it is
-#           only half of what a deployment has to supply, and the other half is a decision:
-#
-#             THE DOCKER SOCKET IS NOT IN THIS IMAGE. Run with
-#             `-v /var/run/docker.sock:/var/run/docker.sock`, or no workspace can be provisioned.
-#
-#           That mount hands this container control of the host's docker daemon, which is
-#           root-equivalent — a workspace container is a sandbox precisely because it does *not* get
-#           the socket, and this service is the thing on the other side of that boundary. Leaving the
-#           mount to the deployment keeps it an explicit act. Without it the service still starts and
-#           serves: the startup observer logs one WARN per volume and one for the network (it is
-#           best-effort by design) and every provision fails with a docker connection error.
-#
-#           Only docker's CLI is here. `qits.workspace.container-runtime` names the binary, so
-#           pointing it at `podman` makes supplying that CLI the deployment's problem.
+# the usual "the binary and nothing else" — one external program is part of its *runtime*:
 #
 #   git     the gitmirror module forks real git against this service's own mirror of each repository
 #           and against the git host over HTTP — `clone --mirror`, `fetch --prune`, `ls-remote`,
@@ -101,6 +82,11 @@
 #           fails at its first `ls-remote`. Installed below from the image's own UBI repositories.
 #           Note what it now needs that it did not before: outbound HTTP to `qits.githost.url`. A
 #           git host this service cannot reach is no longer a one-endpoint problem.
+#
+# THERE IS NO DOCKER CLI HERE AND NO SOCKET TO MOUNT. Workspace containers are started by
+# qits-containers over HTTP — `QITS_CONTAINERS_URL` plus a machine token — so this service holds no
+# docker socket, ships no docker client, and git is the only process it spawns. A deployment that
+# still passes `-v /var/run/docker.sock:/var/run/docker.sock` is granting a privilege nothing reads.
 #
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
@@ -213,14 +199,10 @@ WORKDIR /work
 
 # git-core rather than git: this service runs plumbing, branch and transport commands against its own
 # mirrors and the git host, and nothing that needs perl, the extra remote helpers or the docs — see
-# the header for why neither package is optional. The docker CLI comes from Docker's own repository because no UBI repository carries a
-# docker-compatible client at all; the repo definition is removed again afterwards so the shipped
-# image does not carry a third-party package source it has no reason to consult.
-RUN printf '[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=https://download.docker.com/linux/centos/9/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/centos/gpg\n' \
-      > /etc/yum.repos.d/docker-ce.repo \
- && microdnf -y --setopt=install_weak_deps=0 --nodocs install git-core docker-ce-cli \
- && microdnf -y clean all \
- && rm -f /etc/yum.repos.d/docker-ce.repo
+# the header for why the package is not optional. It is the only program installed here: a docker CLI
+# used to come from Docker's own repository beside it, and went with the socket.
+RUN microdnf -y --setopt=install_weak_deps=0 --nodocs install git-core \
+ && microdnf -y clean all
 
 # `quarkus.package.output-name` names the binary `qits-workspaces` (no -runner suffix), so the
 # process is identifiable in `ps`/`docker top` — which matters more here than elsewhere, since this

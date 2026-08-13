@@ -50,9 +50,9 @@ class TechnicalProcessTest {
   @Test
   void aLateSubscriberReplaysBufferedSegmentsThenReceivesLiveFramesThenDone() {
     TechnicalProcess process = process();
-    process.openSegment("docker-run");
-    process.appendLine("docker-run", "created");
-    process.settleSegment("docker-run", true);
+    process.openSegment("container");
+    process.appendLine("container", "created");
+    process.settleSegment("container", true);
     process.openSegment("clone");
     process.appendLine("clone", "Cloning…");
 
@@ -249,7 +249,7 @@ class TechnicalProcessTest {
     TechnicalProcess process = process();
     RecordingListener listener = new RecordingListener();
     process.attach(listener);
-    process.openSegment("docker-run");
+    process.openSegment("container");
     process.forceFinish();
 
     assertTrue(process.isTerminal());

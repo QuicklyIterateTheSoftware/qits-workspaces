@@ -32,7 +32,7 @@ class GitIdentityTest {
             "GIT_COMMITTER_NAME", "qits-bot",
             "GIT_COMMITTER_EMAIL", "qits-bot@example.com"),
         env);
-    // Deterministic iteration order, so the rendered docker-run argv is stable.
+    // Deterministic iteration order, so the container spec's env is stable.
     assertEquals(
         List.of("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"),
         List.copyOf(env.keySet()));

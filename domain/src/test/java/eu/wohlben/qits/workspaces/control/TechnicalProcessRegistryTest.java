@@ -154,7 +154,7 @@ class TechnicalProcessRegistryTest {
   void theIdleBackstopForceFinishesAProcessThatGoesQuiet() throws Exception {
     registry.maxIdleMillis = 100;
     TechnicalProcess process = registry.begin("repo-1", "ws-1", 1L);
-    process.openSegment("docker-run"); // never settled — e.g. a ready pattern that never matches
+    process.openSegment("container"); // never settled — e.g. a ready pattern that never matches
 
     long deadline = System.currentTimeMillis() + 5_000;
     while (!process.isTerminal() && System.currentTimeMillis() < deadline) {

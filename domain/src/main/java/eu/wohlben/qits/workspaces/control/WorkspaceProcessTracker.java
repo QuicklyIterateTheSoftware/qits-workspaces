@@ -4,7 +4,7 @@ import java.util.Optional;
 
 /**
  * Frames a long-running workspace operation — bringing a container up, recreating it — as a
- * segmented, streamable technical process, so a UI can follow {@code docker-run} → {@code clone} →
+ * segmented, streamable technical process, so a UI can follow {@code container} → {@code clone} →
  * {@code container-start} live instead of watching a spinner.
  *
  * <p>A port, not an implementation: the technical-process framework itself is a cross-context

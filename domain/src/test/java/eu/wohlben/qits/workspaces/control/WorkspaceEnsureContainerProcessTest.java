@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The streamed Start ({@code beginEnsureContainer}): registers a technical process, runs the
- * provision off-thread, and the process's replay tells the whole story — {@code docker-run} and
+ * provision off-thread, and the process's replay tells the whole story — {@code container} and
  * {@code clone} segments (with the fake runtime's real git output) settling {@code ok} on success,
  * a {@code done failed} on a dead branch, and a no-op completion for an already-running container.
  * Driven through {@link FakeContainerRuntime}, so no docker is needed.
@@ -101,7 +101,7 @@ public class WorkspaceEnsureContainerProcessTest {
     assertEquals(processId, registry.activeFor(repoId, "stream").orElseThrow());
 
     Replay replay = replayOf(awaitTerminal(processId));
-    assertEquals("ok", settled(replay, "docker-run").status());
+    assertEquals("ok", settled(replay, "container").status());
     assertEquals("ok", settled(replay, "clone").status());
     assertEquals("ok", doneFrame(replay).status());
     // The fake runtime runs a real host `git clone`, whose output streams into the clone segment.
@@ -128,7 +128,7 @@ public class WorkspaceEnsureContainerProcessTest {
     assertEquals("ok", settled(replay, "container-start").status());
     assertEquals("ok", doneFrame(replay).status());
     assertTrue(
-        replay.frames.stream().noneMatch(f -> "docker-run".equals(f.segment())),
+        replay.frames.stream().noneMatch(f -> "container".equals(f.segment())),
         "an already-running container must not re-provision");
   }
 

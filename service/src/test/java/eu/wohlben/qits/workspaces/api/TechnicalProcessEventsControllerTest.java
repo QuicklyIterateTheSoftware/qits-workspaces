@@ -102,9 +102,9 @@ public class TechnicalProcessEventsControllerTest {
   @Test
   public void aTerminalProcessReplaysAllFramesAndCompletesTheStream() throws Exception {
     TechnicalProcess process = registry.begin("repo-sse", "ws-terminal", 1L);
-    process.openSegment("docker-run");
-    process.appendLine("docker-run", "created abc");
-    process.settleSegment("docker-run", true);
+    process.openSegment("container");
+    process.appendLine("container", "created abc");
+    process.settleSegment("container", true);
     process.completeNoOp("container-start", "already running");
 
     // The stream completes server-side after done, so a plain full-body read terminates.

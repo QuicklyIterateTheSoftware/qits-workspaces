@@ -11,7 +11,7 @@ this repository enters the pipeline.
 
 That is why: the poms duplicate versions instead of inheriting them, the daemon protocol is
 vendored, tests build their own git origins (`TestOrigin`) instead of using fixtures, and the
-container runtime is faked in tests rather than shelling docker.
+container runtime is faked in tests rather than reaching a real one.
 
 The SPA is the sole submodule and an image build needs it.
 
@@ -216,7 +216,7 @@ Three things follow, and each is a way to get this wrong:
   an annotation on top of it would only be the interceptor joining the one already open. The wrap
   goes at the public method and the retried unit is a private one.
 - **The body is DATABASE-ONLY.** It re-runs, so anything in it that is not a row — a push, a
-  `docker` verb, an HTTP call, an event — happens once per attempt. Every wrap here fires its
+  container call, an HTTP call, an event — happens once per attempt. Every wrap here fires its
   `WorkspaceChangePublisher` hint *after* the unit, and hands the repository id out of it so the
   hint needs no second query.
 - **The unit ends with a `flush()`, or the retry buys nothing.** Hibernate sends a `persist` at
@@ -903,27 +903,33 @@ would pin a version whose 3.4 GB image is still uploading or never uploads at al
 and this daemon's is a per-platform UUID; the file says so at length, along with why it probes the
 registry's `manifests/<tag>` and never `tags/list`.
 
-**`DockerExecutor.ensureImage` pulls the pin when the host daemon does not hold it**, before the
-`docker run` and after nothing. Three properties are the point of it:
+**qits-containers pulls it, not this service.** The pin travels in the ensure request's spec —
+`containershost/WorkspaceContainers.ensureRequest` — under **`PullPolicy.MISSING`**, which is the
+same inspect-then-pull rule the deleted `DockerExecutor.ensureImage` followed, enforced one hop out
+where the daemon actually is. A present image is never re-checked against the registry: the
+reference is a version, so what is local under that name *is* the release. Three things follow:
 
-- **Inspect first, and the inspect never pulls.** A present image is never re-checked against the
-  registry: the reference is a version, so what is local under that name *is* the release.
-- **The pull is bounded** (`qits.workspace.image-pull-timeout-ms`, 15 min — the base alone is
-  ~3.4 GB) and it is the only docker verb in that class that carries a bound, because it is the only
-  one that reaches the network. `DockerExecutor.runCapturing` grew a `timeout` parameter for it,
-  with `gitmirror`'s `GitCli` discipline: the drain runs on its own thread, because a registry that
-  accepts a connection and then says nothing blocks in `readLine()` and never in `waitFor()`.
-- **A wrong pin throws, naming the image and the registry.** That failure is *expected* — the tag is
-  written by a release train and the image is published by another repository's pipeline, so the two
-  can disagree — and the one thing it must never do is hang or fall back to something stale.
-  `DockerExecutorImagePullTest` overrides that single process seam and asserts the verb order, the
-  bound, and both halves of the message; no docker involved.
+- **The bound is the client's, and it is not a key of this repo's.** `qits.workspace.image-pull-timeout-ms`
+  is gone with `qits.workspace.container-runtime`; the ceiling is
+  `qits.containers.client.ensure-timeout` (PT10M, shipped in the client jar and twenty times the
+  other deadline for exactly this reason — the base alone is ~3.4 GB). Setting either deleted key
+  sets a key nothing reads.
+- **A wrong pin comes back as a refusal, and the launch fails naming it.** The orchestrator answers
+  409 `IMAGE_MISSING` (`ContainersAnswer.imageMissing()`), which `WorkspaceContainers.holdThrough`
+  deliberately does **not** hold through — only 401/403 and unreachable are about the moment, and no
+  retry helps until something pushes the image. That failure is *expected*: the tag is written by a
+  release train and the image is published by another repository's pipeline, so the two can
+  disagree. What it must never do is hang or fall back to something stale.
+- **`WorkspaceContainersTest` is what pins both halves** — the literal spec including
+  `PullPolicy.MISSING`, and an `IMAGE_MISSING` refusal surfacing in the thrown message. It runs
+  against a stub HTTP origin; no docker and no orchestrator involved.
 
 **Measured 2026-08-10, and worth knowing before you debug a launch:** the platform registry holds no
 tag under `qits/workspace`, none under `qits/workspace-daemon` and none under the toolchain base
 `qits/workspace-base`. The shipped pin is therefore a **placeholder** naming nothing, and the first
 real value will arrive through the train (or by hand at the first published calver). Until then a
-workspace launch fails at the pull, which is the loud version of what used to be silent.
+workspace launch fails at the orchestrator's pull, which is the loud version of what used to be
+silent.
 
 ## Tests
 
@@ -1025,9 +1031,9 @@ workspace launch fails at the pull, which is the loud version of what used to be
   simply has no image.
   - Their image name comes from `-Dqits.workspace.image=`, falling back to
     `localhost:8081/qits/workspace:latest`. The check behind that fallback is `docker image
-    inspect`, which **never pulls** — deliberately, and unlike the service, which pulls its pin (see
-    "The workspace image, and who pulls it"). An IT that pulled 3.4 GB to decide whether to skip
-    would not be a self-skip.
+    inspect`, which **never pulls** — deliberately, and unlike a real launch, where qits-containers
+    pulls the pin (see "The workspace image, and who pulls it"). An IT that pulled 3.4 GB to decide
+    whether to skip would not be a self-skip.
     Nothing publishes a `latest` tag, so the fallback normally means "skip", and passing a real
     reference is the way to run them:
     `./mvnw verify -DskipITs=false -Dqits.workspace.image=localhost:8081/qits/workspace:<calver>`.
