@@ -294,22 +294,23 @@ class WorkspaceContainersTest {
   // --- the rest of the lifecycle -----------------------------------------------------------------
 
   @Test
-  void startRemovesTheStoppedContainerBeforeAskingForThePlaceAgain() {
-    // The workaround for the orchestrator's RESTART step, which re-runs `docker run` under the same
-    // name without removing the exited container first — a real daemon refuses that, and the
-    // recovery branch adopts only a container that is already running. The delete is what makes the
-    // ensure a clean START; asking for no volumes is what keeps the checkout.
-    stub.script(200, "{\"id\":null,\"containerName\":\"qits-ws-work-repo1234\",\"existed\":true,"
-            + "\"logTail\":null,\"detail\":null}")
-        .script(201, RUNNING);
+  void startIsOneEnsureAtThePlaceTheWorkspaceAlreadyOccupies() {
+    // Nothing is removed first, and that is the contract rather than an economy. The registry reads
+    // the unchanged spec, sees a container that is merely stopped, and starts THAT container where
+    // it stands — so its id and its writable layer survive, and the checkout with them. A delete
+    // beforehand would not only throw the layer away, it would be refused: a container name stays
+    // unique across settled rows for the prune horizon, so a fresh ensure under the same name after
+    // a row delete conflicts.
+    stub.script(200, RUNNING);
 
     adapter().start(REPO, "work", 1L, "main", null);
 
     List<StubContainersServer.Received> seen = stub.received();
-    assertEquals(2, seen.size());
-    assertEquals("DELETE", seen.get(0).method());
-    assertEquals("volumes=false&logs=false", seen.get(0).query());
-    assertEquals("PUT", seen.get(1).method());
+    assertEquals(1, seen.size());
+    assertEquals("PUT", seen.getFirst().method());
+    assertEquals(
+        "/containers/api/containers/" + OWNER + "/workspace/qits-ws-work-repo1234",
+        seen.getFirst().path());
   }
 
   @Test

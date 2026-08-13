@@ -18,10 +18,9 @@ import java.util.Map;
  *
  * <p><b>One method's signature did change, and the reason is worth having here.</b> {@link #start}
  * used to take a container name alone, because "start what is at this name" is something a docker
- * socket can do. The orchestrator has no such verb: a place is started by <em>asking for it
+ * socket can do. The orchestrator has no such route: a place is started by <em>asking for it
  * again</em>, and asking means presenting the spec, which is derived from the workspace's identity.
- * So {@code start} now takes what {@link #run} takes. See the implementation for what it does with
- * it, which is not a plain restart.
+ * So {@code start} now takes what {@link #run} takes.
  */
 public interface ContainerRuntime {
 
@@ -139,15 +138,12 @@ public interface ContainerRuntime {
 
   /**
    * Brings a present-but-stopped workspace back up — the recovery for a container that died
-   * out-of-band, or that a deliberate {@link #stop} paused.
+   * out-of-band, or that a deliberate {@link #stop} paused. Lossless: the container comes back with
+   * its writable layer and its {@code /workspace} checkout, unpushed commits included.
    *
-   * <p><b>It takes the workspace's identity rather than a container name, and it is not a plain
-   * restart.</b> Both facts come from the same place: the orchestrator exposes no start verb, so the
-   * only way to make a stopped place run is to ask for it again with its spec — which is why the
-   * arguments are {@link #run}'s. What the implementation does with them is documented there; the
-   * contract here is only that the workspace's {@code /workspace} checkout, including unpushed
-   * commits, survives this call while {@code qits.workspace.persist-workspace} is on. Throws on
-   * failure.
+   * <p><b>It takes the workspace's identity rather than a container name.</b> The orchestrator
+   * exposes no start route — a stopped place is started by asking for it again with its spec, and
+   * the spec is derived from the workspace — so the arguments are {@link #run}'s. Throws on failure.
    */
   void start(String repoId, String workspaceId, Long rowId, String branch, String parent);
 

@@ -406,39 +406,23 @@ public class WorkspaceContainers implements ContainerRuntime {
   // --- the rest of the lifecycle ----------------------------------------------------------------
 
   /**
-   * Bring a stopped workspace back up — <b>by removing the stopped container and asking for the
-   * place again</b>, not by restarting it.
+   * Bring a stopped workspace back up — one {@code ensure}, at the place it already occupies.
    *
-   * <p><b>That is a workaround for a measured defect in the orchestrator, and it is why this method
-   * had to grow arguments.</b> An {@code ensure} whose spec is unchanged and whose container is not
-   * running is planned as a {@code RESTART} — and the docker phase behind that step runs {@code
-   * docker run} under the same name <em>without removing the exited container first</em> (only the
-   * {@code REPLACE} step stops and removes). A real daemon refuses a second container of that name,
-   * the recovery branch adopts only a container that is already <em>running</em>, and an exited one
-   * therefore settles {@code MISSING}. So an ensure alone cannot resurrect a stopped workspace: the
-   * delete is what makes the following ensure a clean {@code START}. Fix it in qits-containers and
-   * this method collapses back into one call.
+   * <p><b>This is why the method takes an identity rather than a container name.</b> The
+   * orchestrator has no start route: a stopped place is started by asking for it <em>again</em>, and
+   * asking means presenting the spec, which is derived from the workspace. So there is nothing to do
+   * here beyond what {@link #run} already does — the registry reads the unchanged spec, sees a
+   * container that is merely stopped, and starts that container where it stands rather than running
+   * a second one. The container keeps its id and its writable layer across the call, so the checkout
+   * survives whether or not {@code qits.workspace.persist-workspace} put it on a volume.
    *
-   * <p><b>The checkout survives, and the flag that guarantees it is named.</b> The delete asks for
-   * no volumes, so the per-workspace {@code /workspace} volume — a row-claimed mount, created with
-   * the container and re-attached by the next ensure — keeps the working tree and every unpushed
-   * commit. That holds while {@code qits.workspace.persist-workspace} is on, which is the shipped
-   * default. <b>With it off this call is lossy</b> and was not before: {@code /workspace} is then
-   * the container's own writable layer, and removing the container is removing it. That is a real
-   * narrowing of the kill switch and is recorded here rather than discovered.
+   * <p>It stays a method of its own rather than a second name for {@code run} because the seam
+   * distinguishes them and the callers mean different things: {@link #run} provisions a place that
+   * is not there, this resumes one that is. The orchestrator collapses that distinction, which is
+   * the whole point of asking it rather than telling it.
    */
   @Override
   public void start(String repoId, String workspaceId, Long rowId, String branch, String parent) {
-    String name = containerName(workspaceId, repoId);
-    ContainersAnswer<DeleteOutcome> removed =
-        containers.delete(owner, WORKLOAD, ref(name), false, false, TEARDOWN_TIMEOUT);
-    if (!removed.succeeded() && !gone(removed)) {
-      // Report it and ask anyway: the ensure below is the operation, and a delete that could not be
-      // made is at worst the RESTART case this method exists to avoid — which fails loudly there.
-      LOG.warnf(
-          "Could not remove the stopped container %s before starting it again: %s",
-          name, removed.detail());
-    }
     run(repoId, workspaceId, rowId, branch, parent);
   }
 
