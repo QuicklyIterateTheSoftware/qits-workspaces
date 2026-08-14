@@ -180,6 +180,23 @@ class WorkspaceContainersTest {
   }
 
   @Test
+  void aCommissionedCredentialRidesTheSpecAsEnvAndChangesTheSpecHash() {
+    Spec plain = adapter().ensureRequest(REPO, "work", 1L, "main", null).spec();
+    Spec commissioned =
+        adapter(TestWorkspaceContainerFactory.commissioned("ws-1-a", "s3cr3t"))
+            .ensureRequest(REPO, "work", 1L, "main", null)
+            .spec();
+
+    // The pair the workspace authenticates to the platform with, on the spec the orchestrator
+    // stores — which is also why it must be derived from the row at every ensure and not handed in
+    // on the provision path alone: the two specs below are DIFFERENT specs, and Recreate.ifChanged
+    // replaces a container whose spec moved.
+    assertFalse(plain.env().containsKey("QITS_COMMISSIONED_CLIENT_ID"), plain.env().toString());
+    assertEquals("ws-1-a", commissioned.env().get("QITS_COMMISSIONED_CLIENT_ID"));
+    assertEquals("s3cr3t", commissioned.env().get("QITS_COMMISSIONED_CLIENT_SECRET"));
+  }
+
+  @Test
   void theKillSwitchTakesTheClaimedVolumeAndNothingElse() {
     Spec spec =
         adapter(TestWorkspaceContainerFactory.ephemeralWorkspace())

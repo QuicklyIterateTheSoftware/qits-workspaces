@@ -36,6 +36,17 @@ public final class TestWorkspaceContainerFactory {
     return build(false);
   }
 
+  /**
+   * A factory whose workspaces hold a commissioned platform credential — the shape a deployment with
+   * an issuer wired has. The shipped posture is the other one, which is why the two builders above
+   * leave the lookup empty.
+   */
+  public static WorkspaceContainerFactory commissioned(String clientId, String secret) {
+    WorkspaceContainerFactory f = build(true);
+    f.credentials = StubInstance.of(rowId -> Optional.of(new WorkspaceCredential(clientId, secret)));
+    return f;
+  }
+
   private static WorkspaceContainerFactory build(boolean persistWorkspace) {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.image = IMAGE;
@@ -66,6 +77,8 @@ public final class TestWorkspaceContainerFactory {
             repoId ->
                 Optional.of(new RepositoryAddressResolver.ProjectScopedName("proj-1", "my-repo")));
     f.repositories = StubInstance.empty();
+    // No issuer wired — the shipped posture, so no container carries a commissioned pair.
+    f.credentials = StubInstance.empty();
     return f;
   }
 

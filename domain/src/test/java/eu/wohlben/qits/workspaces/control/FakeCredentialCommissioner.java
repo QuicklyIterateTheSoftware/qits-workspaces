@@ -1,0 +1,125 @@
+package eu.wohlben.qits.workspaces.control;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * Test double for {@link CredentialCommissioner} that mints pairs in memory and records every call.
+ *
+ * <p><b>It starts UNWIRED, and that is the point.</b> A bean in {@code src/test} is a bean for every
+ * {@code @QuarkusTest} in the module, so a double that commissioned by default would put credential
+ * environment into every container the suite launches and quietly change what dozens of unrelated
+ * tests are about. Unwired it answers exactly as no implementation does — empty, no credential, no
+ * environment — which is also the shipped posture, so the default is the case worth defaulting to.
+ * {@link #wire()} turns it on for the test that is about commissioning, and {@link #reset()} turns
+ * it back off.
+ *
+ * <p>The issued pairs are kept, so a test can ask what a workspace was given and whether a later
+ * launch was given the same thing.
+ */
+@ApplicationScoped
+public class FakeCredentialCommissioner implements CredentialCommissioner {
+
+  private final AtomicInteger minted = new AtomicInteger();
+  private final Map<String, WorkspaceCredential> live = new LinkedHashMap<>();
+  private final Map<String, String> contexts = new LinkedHashMap<>();
+  private final List<Long> commissionedFor = new CopyOnWriteArrayList<>();
+  private final List<String> decommissioned = new CopyOnWriteArrayList<>();
+
+  private volatile boolean wired;
+  private volatile RuntimeException failure;
+
+  /** Behave as a deployment with an issuer configured. */
+  public void wire() {
+    wired = true;
+  }
+
+  /** Back to the shipped posture: no issuer, so nothing is commissioned. */
+  public void reset() {
+    wired = false;
+    failure = null;
+    minted.set(0);
+    live.clear();
+    contexts.clear();
+    commissionedFor.clear();
+    decommissioned.clear();
+  }
+
+  /** Make the next and every following commission fail the way an unreachable issuer does. */
+  public void failCommissioning(String why) {
+    failure = new IllegalStateException(why);
+  }
+
+  /** Every row id a commission was asked for, in order — including the ones that failed. */
+  public List<Long> commissionedFor() {
+    return List.copyOf(commissionedFor);
+  }
+
+  /** Every client id handed back, in order. */
+  public List<String> decommissioned() {
+    return List.copyOf(decommissioned);
+  }
+
+  /** The client ids this fake still holds — what a reconcile would read. */
+  public List<String> liveClientIds() {
+    synchronized (live) {
+      return new ArrayList<>(live.keySet());
+    }
+  }
+
+  /** Put a commission in place that this service never asked for — an orphan, for the reconcile. */
+  public void plant(String clientId, String contextKind, String contextId) {
+    synchronized (live) {
+      live.put(clientId, new WorkspaceCredential(clientId, "secret-of-" + clientId));
+      contexts.put(clientId, contextKind + ":" + contextId);
+    }
+  }
+
+  @Override
+  public Optional<WorkspaceCredential> commission(Long rowId) {
+    commissionedFor.add(rowId);
+    if (!wired) {
+      return Optional.empty();
+    }
+    if (failure != null) {
+      throw failure;
+    }
+    String clientId = "ws-" + rowId + "-" + minted.incrementAndGet();
+    WorkspaceCredential credential = new WorkspaceCredential(clientId, "secret-" + clientId);
+    synchronized (live) {
+      live.put(clientId, credential);
+      contexts.put(clientId, CONTEXT_KIND + ":" + rowId);
+    }
+    return Optional.of(credential);
+  }
+
+  @Override
+  public void decommission(String clientId) {
+    decommissioned.add(clientId);
+    synchronized (live) {
+      live.remove(clientId);
+      contexts.remove(clientId);
+    }
+  }
+
+  @Override
+  public List<Commission> list() {
+    if (!wired) {
+      return List.of();
+    }
+    synchronized (live) {
+      List<Commission> all = new ArrayList<>();
+      for (String clientId : live.keySet()) {
+        String[] context = contexts.getOrDefault(clientId, CONTEXT_KIND + ":").split(":", 2);
+        all.add(new Commission(clientId, context[0], context.length > 1 ? context[1] : ""));
+      }
+      return all;
+    }
+  }
+}

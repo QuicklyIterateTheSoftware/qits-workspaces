@@ -72,6 +72,9 @@ class WorkspaceContainerFactoryTest {
             Optional.of(new RepositoryAddressResolver.ProjectScopedName("proj-1", "my-repo")));
     // No repository registry by default — the lookup fallback has its own test.
     f.repositories = StubInstance.empty();
+    // No credential lookup by default: the shipped posture is no issuer wired, so a container
+    // carries no commissioned pair. The two cases that do have one set this themselves.
+    f.credentials = StubInstance.empty();
     return f;
   }
 
@@ -275,6 +278,40 @@ class WorkspaceContainerFactoryTest {
     assertLabel(c, "qits.repository", "repo12345678abc");
     assertLabel(c, "qits.parent", "");
     assertEquals("qits-ws-work-repo1234", c.name());
+  }
+
+  @Test
+  void aCommissionedWorkspaceCarriesItsPlatformCredentialAsEnv() {
+    WorkspaceContainerFactory f = factory();
+    f.credentials =
+        StubInstance.of(rowId -> Optional.of(new WorkspaceCredential("ws-1-a", "s3cr3t")));
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    // The pair the workspace authenticates to the platform with — registry pulls and pushes from
+    // inside the container, once reads are gated. Two variables, both or neither.
+    assertEnv(c, "QITS_COMMISSIONED_CLIENT_ID", "ws-1-a");
+    assertEnv(c, "QITS_COMMISSIONED_CLIENT_SECRET", "s3cr3t");
+  }
+
+  @Test
+  void noCommissionMeansNoCredentialEnvAtAll() {
+    // Both spellings of "not wired" — no lookup installed, and one that answers empty — and the
+    // half-answer that must never become half a pair.
+    for (Instance<WorkspaceCredentials> lookup :
+        List.of(
+            StubInstance.<WorkspaceCredentials>empty(),
+            StubInstance.<WorkspaceCredentials>of(rowId -> Optional.empty()),
+            StubInstance.<WorkspaceCredentials>of(
+                rowId -> Optional.of(new WorkspaceCredential("ws-1-a", " "))))) {
+      WorkspaceContainerFactory f = factory();
+      f.credentials = lookup;
+
+      WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+      assertFalse(c.env().containsKey("QITS_COMMISSIONED_CLIENT_ID"), c.env().toString());
+      assertFalse(c.env().containsKey("QITS_COMMISSIONED_CLIENT_SECRET"), c.env().toString());
+    }
   }
 
   /** Assert the container carries {@code key} with exactly {@code value} in its environment. */
