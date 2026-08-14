@@ -183,6 +183,13 @@ public class WorkspaceContainerFactory {
    */
   @Inject Instance<RepositoryLookup> repositories;
 
+  /**
+   * The credential this workspace's container holds toward the platform, injected as {@code
+   * QITS_COMMISSIONED_CLIENT_ID}/{@code …_SECRET} below. A lookup rather than an argument, and
+   * optional rather than required — {@link WorkspaceCredentials} carries both reasons.
+   */
+  @Inject Instance<WorkspaceCredentials> credentials;
+
   /** The repo's project-scoped name, from an override resolver or the repository registry. */
   private Optional<RepositoryAddressResolver.ProjectScopedName> scopedName(String repoId) {
     if (nameResolver.isResolvable()) {
@@ -211,6 +218,26 @@ public class WorkspaceContainerFactory {
 
   private static boolean present(String value) {
     return value != null && !value.isBlank();
+  }
+
+  /**
+   * The commissioned pair for this workspace, or none. A lookup failure costs the credential and
+   * never the container: by the time this runs the provision has already decided a credential is in
+   * hand (or that there is none to have), and a read that stumbles here must not turn a resume into
+   * a failed launch. A blank half is no credential — see the env block for why never half a pair.
+   */
+  private Optional<WorkspaceCredential> workspaceCredential(Long rowId) {
+    if (!credentials.isResolvable()) {
+      return Optional.empty();
+    }
+    try {
+      return credentials
+          .get()
+          .forWorkspace(rowId)
+          .filter(pair -> present(pair.clientId()) && present(pair.secret()));
+    } catch (RuntimeException e) {
+      return Optional.empty();
+    }
   }
 
   /**
@@ -342,7 +369,8 @@ public class WorkspaceContainerFactory {
    * the configured git commit identity as {@code GIT_*} env ({@link GitIdentity}), the shared
    * credential + build-cache volumes (whenever configured), the configured resource limits (memory
    * hard cap, pids, cpus — whenever configured), the image, and the {@code qits-workspace-daemon}
-   * dial-home env. The container's process is {@code qits-workspace-daemon} via the image
+   * dial-home env, and the commissioned platform credential when the workspace holds one. The
+   * container's process is {@code qits-workspace-daemon} via the image
    * ENTRYPOINT (no command is appended) — with no {@code sleep infinity}
    * fallback, so a container that can't run the daemon fails to start rather than lingering
    * unmanaged. Everything safety-critical is already in place; the caller may keep chaining but
@@ -451,6 +479,21 @@ public class WorkspaceContainerFactory {
     // One shared value with a default, so a deployment needs no configuration. See the config key's
     // own comment for what it is NOT: it is a handshake constant, not a boundary.
     container.env("QITS_WORKSPACE_DAEMON_API_TOKEN", daemonApiToken);
+    // The credential this container holds toward the PLATFORM — the other direction from the token
+    // above, which is what the host presents to the daemon. It is an idp client id and secret
+    // commissioned for this container alone (WorkspaceService provisions it, CredentialCommissioner
+    // mints it), so registry pulls and pushes from inside the workspace authenticate as this
+    // workspace rather than as a durable identity shared by everything on the network.
+    //
+    // Both vars or neither: half a pair is a credential that cannot be presented, and a container
+    // launched with one would look configured and fail at the first pull. Absent is the shipped
+    // posture and today's behaviour — no issuer wired, no credential on the row, no env here.
+    workspaceCredential(rowId)
+        .ifPresent(
+            credential -> {
+              container.env("QITS_COMMISSIONED_CLIENT_ID", credential.clientId());
+              container.env("QITS_COMMISSIONED_CLIENT_SECRET", credential.secret());
+            });
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);

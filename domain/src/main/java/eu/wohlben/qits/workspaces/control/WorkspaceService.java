@@ -62,6 +62,14 @@ public class WorkspaceService {
 
   @Inject ContainerRuntime containers;
 
+  /**
+   * Optional: where a per-container platform credential is commissioned and given back. Absent — no
+   * implementation, or one with no issuer configured — means no credential is minted and no
+   * container carries one, which is what every workspace did before this port existed. See {@link
+   * CredentialCommissioner}.
+   */
+  @Inject Instance<CredentialCommissioner> commissioner;
+
   @Inject WorkspaceContainerEventPublisher containerEvents;
 
   /**
@@ -260,6 +268,11 @@ public class WorkspaceService {
       String branch,
       String parentBranch,
       WorkspaceProcessTracker.Handle process) {
+    // A fresh container gets a fresh credential, and it is minted BEFORE anything is started: a
+    // commissioning failure must cost a launch that has not happened yet, never leave a container
+    // running with no identity. This is also the one place a recreate is covered — recreate rm's the
+    // container and comes back through here — so no second seam has to remember.
+    commissionFor(repoId, workspaceId, rowId);
     if (process != null) {
       process.openSegment("container");
     }
@@ -285,6 +298,9 @@ public class WorkspaceService {
     ProvisionResult outcome = awaitDaemonProvision(repoId, workspaceId, rowId, cloneLines);
     if (!outcome.ok()) {
       containers.rm(container);
+      // The container this credential was minted for is gone again, so it goes back — the same rule
+      // every teardown seam follows, applied to the teardown a failed provision is.
+      decommissionFor(rowId);
       throw new InternalServerErrorException(
           "workspace-daemon self-provision failed: " + outcome.message());
     }
@@ -319,6 +335,102 @@ public class WorkspaceService {
                     "no workspace-daemon dialed home within "
                         + provisionConnectTimeoutMs
                         + "ms — is the container running an image with the daemon?"));
+  }
+
+  /**
+   * Commission the platform credential this workspace's next container will carry, and put it on the
+   * row so every later ensure composes the same container spec.
+   *
+   * <p><b>It fails the provision.</b> A workspace launched with no identity would pull and push as
+   * nobody, which is precisely the state this credential exists to end, and the failure would only
+   * surface much later as a refused registry read. The launch already surfaces ensure failures, so
+   * throwing here reports it where it happened. The implementation is patient first — see {@code
+   * wiring/IdpCredentialCommissioner} — so what reaches this point is an issuer that stayed
+   * unreachable, not a redeploy window.
+   *
+   * <p>Any credential already on the row is given back first. That is the recreate case: the
+   * container it belonged to has just been removed, and a row can only carry one.
+   *
+   * <p>Its own transaction, and not the caller's: {@link #provisionContainer} runs outside one (each
+   * status transition commits separately), and the pair must be committed before {@code
+   * containers.run} asks the factory to read it back.
+   */
+  private void commissionFor(String repoId, String workspaceId, Long rowId) {
+    if (!commissioner.isResolvable()) {
+      return;
+    }
+    decommissionFor(rowId);
+    Optional<WorkspaceCredential> issued = commissioner.get().commission(rowId);
+    if (issued.isEmpty()) {
+      // No issuer wired. Supported, and the same as no implementation at all.
+      return;
+    }
+    WorkspaceCredential credential = issued.get();
+    QuarkusTransaction.requiringNew()
+        .run(
+            () ->
+                workspaceRepository
+                    .findActiveById(rowId)
+                    .ifPresent(
+                        wt -> {
+                          wt.commissionedClientId = credential.clientId();
+                          wt.commissionedClientSecret = credential.secret();
+                        }));
+    LOG.debugf(
+        "Commissioned %s for workspace %s/%s", credential.clientId(), repoId, workspaceId);
+  }
+
+  /**
+   * Give back the credential a workspace's container held, and clear the row.
+   *
+   * <p><b>Best-effort, and never in the way of a teardown.</b> Every caller runs after something
+   * irreversible — a container removed, a branch deleted — so a revocation that fails is logged and
+   * the teardown continues. What that leaves behind is a credential nothing can use to reach a
+   * container that no longer exists, and the reconcile reaps it within the hour.
+   *
+   * <p>The row is cleared even when the revocation fails, and that order is deliberate: the clientId
+   * is on the row so a teardown can find it, and a row still naming a client this service has
+   * stopped tracking would make the reconcile spare an orphan forever.
+   *
+   * <p>Callers on a transactional path (the resolution verbs, {@code deleteContainer}) hold the
+   * managed row already, so the clear rides their transaction; the row write here is for the paths
+   * that do not.
+   */
+  private void decommissionFor(Long rowId) {
+    if (!commissioner.isResolvable() || rowId == null) {
+      return;
+    }
+    String clientId =
+        QuarkusTransaction.requiringNew()
+            .call(
+                () ->
+                    workspaceRepository
+                        .findByIdOptional(rowId)
+                        .map(
+                            wt -> {
+                              String held = wt.commissionedClientId;
+                              wt.commissionedClientId = null;
+                              wt.commissionedClientSecret = null;
+                              return held;
+                            })
+                        .orElse(null));
+    decommission(clientId);
+  }
+
+  /**
+   * The revocation itself, for callers that already hold the row and have cleared it themselves.
+   * Null or blank is the ordinary case — a workspace that never held a credential — and is silent.
+   */
+  private void decommission(String clientId) {
+    if (!commissioner.isResolvable() || clientId == null || clientId.isBlank()) {
+      return;
+    }
+    try {
+      commissioner.get().decommission(clientId);
+    } catch (RuntimeException e) {
+      LOG.warnf(
+          "Could not decommission %s; the reconcile will reap it: %s", clientId, e.toString());
+    }
   }
 
   /** Appends a history event to a workspace's timeline. */
@@ -1206,6 +1318,10 @@ public class WorkspaceService {
       // container is already absent on this path (we passed the isRunning/exists branches), so no
       // prior rm is needed. Best-effort.
       containers.removeWorkspaceVolume(workspaceId);
+      // And so is the credential that container held. Outside the transaction above, beside the
+      // volume reap, for the reason doDiscard states at length: the resolution transaction is where
+      // observers join and is not where an HTTP call belongs.
+      decommissionFor(rowId);
       throw new NotFoundException(
           "Workspace '" + workspaceId + "' has no branch to recreate from; abandoned");
     }
@@ -1346,6 +1462,14 @@ public class WorkspaceService {
     containerEvents.fireStopping(repoId, workspaceId, workspace.id, false);
     containers.rm(containers.containerName(workspaceId, repoId));
     containers.removeWorkspaceVolume(workspaceId);
+    // The row stays ACTIVE and fires no WorkspaceResolved, but the CONTAINER is gone — and the
+    // credential's lifetime is the container's, not the row's. So it goes back here too, and the
+    // next ensure commissions a fresh one for the container it provisions. This is the path an
+    // observer on the resolution event could never have covered.
+    workspace.commissionedClientSecret = null;
+    String commissioned = workspace.commissionedClientId;
+    workspace.commissionedClientId = null;
+    decommission(commissioned);
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
     workspace.runtimeError = null;
   }
@@ -1949,6 +2073,20 @@ public class WorkspaceService {
       containerEvents.fireStopping(repoId, workspace.workspaceId, workspace.id, false);
       containers.rm(containers.containerName(workspace.workspaceId, repoId));
       containers.removeWorkspaceVolume(workspace.workspaceId);
+      // The credential dies with the container, so it goes back here — beside the rm, not on the
+      // WorkspaceResolved event this method fires below.
+      //
+      // An observer on that event would be the tidier-looking seam and would be wrong twice. It
+      // covers the resolution paths and NOT deleteContainer, which removes a container while the row
+      // stays ACTIVE and fires nothing — so one mechanism would still need a second call site, and
+      // two mechanisms for one rule is how they drift apart. And the event is fired synchronously
+      // inside the resolving transaction so observers can join it, which is the one place this HTTP
+      // call must not be. Beside containers.rm — itself an HTTP call, best-effort for the same
+      // reason — is where the container's other teardown already sits.
+      workspace.commissionedClientSecret = null;
+      String commissioned = workspace.commissionedClientId;
+      workspace.commissionedClientId = null;
+      decommission(commissioned);
 
       if (branch != null && !branch.isBlank()) {
         try {

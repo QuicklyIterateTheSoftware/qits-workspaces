@@ -134,6 +134,26 @@ public class Workspace extends PanacheEntityBase implements CausedRow {
   @Column(columnDefinition = "text")
   public String result;
 
+  /**
+   * The idp client commissioned for this workspace's <em>current container</em>, and its secret.
+   * Both null whenever no container holds a credential — before the first provision, after a
+   * teardown, and in every deployment with no issuer wired.
+   *
+   * <p>They are two columns and not a value object because they are read back one at a time by
+   * {@code PersistedWorkspaceCredentials} and cleared together by every teardown seam. <b>Cleared
+   * with the decommission, never after it</b>: a row naming a client qits-idp no longer has is a
+   * credential nobody can find, and the reconcile would have to guess.
+   *
+   * <p>The secret is here for the reason {@code WorkspaceCredentials} spells out — the container's
+   * spec must be reproducible at every ensure, and the issuer hands a secret out once. It is
+   * {@code text} rather than {@code @Lob}, like every other unbounded string on this entity.
+   */
+  @Column(name = "commissioned_client_id", columnDefinition = "text")
+  public String commissionedClientId;
+
+  @Column(name = "commissioned_client_secret", columnDefinition = "text")
+  public String commissionedClientSecret;
+
   /** When the workspace was resolved (integrated/abandoned); null while ACTIVE. */
   @Column(name = "resolved_at")
   public Instant resolvedAt;

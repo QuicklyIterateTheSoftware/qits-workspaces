@@ -137,6 +137,13 @@ The lesson to carry to the next entity: `CausationScope` is a plain ThreadLocal,
 behind an executor or queue hop has no ambient scope and the stamp records null. Where the cause
 exists as data at such a write site, set `causationId` explicitly — qits-ci paid for that one live.
 
+**`V3__commissioned_credential.sql` adds two nullable `text` columns to `workspace`** — the idp
+client a container was commissioned with, and its secret. **No `ArchRulesTest` decision to make**:
+they are columns on an entity that is already a `CausedRow`, not a new entity, and the rule is about
+the entity. The reasoning that *is* worth knowing is in the file's header and in
+`WorkspaceCredentials` — why the secret is stored at all, and why the columns are cleared in the same
+breath as the revocation rather than after it.
+
 **The target is PostgreSQL 18.4** — the tag `images/qits-oci-postgresql` is built from, and the
 version the suites' embedded binaries are, so a migration is proved against the engine it ships on.
 Two H2 habits are gone with it: a rule that applies to some rows is a **partial unique index** now
@@ -931,6 +938,52 @@ real value will arrive through the train (or by hand at the first published calv
 workspace launch fails at the orchestrator's pull, which is the loud version of what used to be
 silent.
 
+## The credential a workspace container holds
+
+A workspace container gets an **idp client of its own** — commissioned at provision, injected as
+`QITS_COMMISSIONED_CLIENT_ID`/`QITS_COMMISSIONED_CLIENT_SECRET`, handed back at teardown. README has
+the operator's half; here is what the code decides and why.
+
+**The lifetime is the CONTAINER's, and that is the one thing to keep straight.** Not the row's:
+`deleteContainer` leaves an ACTIVE workspace with no credential, and the next ensure commissions a
+fresh one. Not a token's either — the pair is what lives long and tokens are re-minted underneath it,
+which is what makes "no TTL, no refresh" a property rather than an omission.
+
+**The pair lives on the workspace row, and the container factory looks it up.** It is not handed to
+`forWorkspace` as an argument, and the reason is `ContainerRuntime.start`: the orchestrator has no
+start verb, so a stopped container is started by presenting its spec **again**, under
+`Recreate.ifChanged`. A spec whose environment differs from the running container's is a spec change,
+and the orchestrator **replaces** the container — writable layer and all. A credential that arrived
+as a parameter on the provision path and was absent on the start path would therefore destroy a
+container on every resume. The row makes the spec reproducible at every ensure, which is also why the
+**secret** is a column and not something re-fetched: qits-idp hands it out once.
+`WorkspaceContainersTest` asserts the two specs differ, which is the same fact from the other side.
+
+**Four seams, and the reason there is no `WorkspaceResolved` observer.** Commissioning is in
+`provisionContainer` alone — the fresh arm of `ensureContainer` and, through it, recreate, so nothing
+else has to remember. Decommissioning is at three: `doDiscard` (every resolution verb), the
+branch-gone abandon in `ensureContainer`, and `deleteContainer`. An observer on `WorkspaceResolved`
+would cover the first two and **not** the third, which fires no event at all — so one mechanism would
+still need a second call site, and two mechanisms for one rule drift apart. It would also put an HTTP
+call inside the resolving transaction, which is fired synchronously so observers can join it. Each
+call therefore sits beside `containers.rm`, itself an HTTP call and best-effort for the same reason.
+
+**Commissioning fails a launch; decommissioning never fails a teardown.** The first is patient
+(`qits.workspace.commission.patience`, and 401/403 are held through for the idp-cutover reason
+`WorkspaceContainers.holdThrough` records), then throws — a workspace with no identity would pull as
+nobody and only discover it much later. The second logs and moves on, because everything after an
+accepted removal must not pretend it did not happen. **`CommissionReconciler` is what makes that
+safe**: hourly and at boot it asks qits-idp what it holds for this service and gives back every
+`workspace`-kind row no ACTIVE workspace claims **by client id** — so a recreate's replaced pair and a
+crashed teardown's leftover are both orphans the moment they stop being claimed. It only ever deletes
+what that listing just returned, and an unreadable listing comes back empty, so a blip reaps nothing
+rather than everything.
+
+**Absent is a supported configuration in two spellings and they behave identically**: no
+implementation of `CredentialCommissioner`, or one wired against no issuer. The switch is
+`quarkus.oidc-client.client-enabled` — the extension's own, read a third time here for the reason
+`ContainersClientProducer` reads it a second time. There is no key of ours, and there must not be.
+
 ## Tests
 
 - **App-level config lives in `service/src/main/resources/application.properties`, and the tests
@@ -1022,6 +1075,12 @@ silent.
   back with the old one must reproduce the original file exactly.
 - The `Fake*` doubles are duplicated between `domain/src/test` and `service/src/test`. That is
   deliberate and matches the monorepo — the two modules do not share a test classpath.
+- **`FakeCredentialCommissioner` starts UNWIRED, and must stay that way for everyone else.** A bean
+  in `src/test` is a bean for every `@QuarkusTest` in its module, so a double that commissioned by
+  default would put credential environment into every container the suite launches and quietly
+  change what dozens of unrelated tests are about. `wire()` turns it on, `reset()` turns it off, and
+  a test class that wires it resets in `@AfterEach` — a class that forgets leaks its issuer into
+  whatever runs next.
 - Integration tests needing real docker, a built `qits/workspace` image and the daemon binary **are**
   in this repo — `Daemon*IT`, tagged `extended`, `DaemonApiGateIT` the largest of them. They
   self-skip (`assumeTrue`) when docker or the image is absent, and `skipITs=true` is the default

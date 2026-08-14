@@ -1,0 +1,23 @@
+-- The credential a workspace's CURRENT CONTAINER holds toward the platform: the idp client
+-- commissioned when the container is provisioned, and its secret. Both are cleared by every teardown
+-- seam, in the same statement that decommissions the client — a row naming a client qits-idp no
+-- longer has would be a credential nobody can find.
+--
+-- Nullable, no backfill, no default and part of no constraint: a workspace with no container has no
+-- credential, and so does every workspace in a deployment with no issuer wired. That is the shipped
+-- posture, so the columns start empty and stay empty until something commissions.
+--
+-- Not a foreign key, and there is nothing it could point at: the client row lives in qits-idp's own
+-- store, the same reason every repository id in this schema is a bare string.
+--
+-- The SECRET is stored, deliberately. The orchestrator has no start verb — a stopped container is
+-- started by presenting its spec again, and a spec whose environment differs is a spec change that
+-- REPLACES the container — so the pair a container was launched with has to be reproducible at every
+-- ensure, and qits-idp hands a secret out exactly once. Its lifetime is the container's: the running
+-- container carries the same value in its own environment, and a teardown revokes the client and
+-- empties these two columns together.
+--
+-- text, not varchar(n): the id and the secret are the issuer's to shape, and a length this schema
+-- guessed would be a constraint on another service's format. Postgres stores both identically.
+alter table workspace add column commissioned_client_id text;
+alter table workspace add column commissioned_client_secret text;
