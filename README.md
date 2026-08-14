@@ -81,6 +81,7 @@ the consuming application implements:
 | `WorkspaceTerminalSessions` | no | the interactive service terminal refuses the upgrade; the live log is unaffected |
 | `WorkspaceChatInbox` | no | service events are spooled instead of delivered — the same path as "no chat is running" |
 | `WorkspaceProcessTracker` | *implemented here* | `TechnicalProcessRegistry` is the default; the port stays so an application can substitute its own |
+| `CredentialCommissioner` | no | no container is given a platform credential — today's behaviour |
 
 One port points the **other way**: `LogLineClassifier` (with `LogSeverity`) is *implemented* here
 and consumed by the command context's log persister, so a workspace's `?severity=` filter and the
@@ -196,6 +197,44 @@ jar, which ships every remaining key as a default — `qits.events.url` is the q
 when the bus lives somewhere else:
 
     QITS_EVENTS_URL=http://qits-events:8080
+
+### The credential a workspace container holds
+
+A workspace container is a **dynamic context**, so it gets an idp client of its own rather than a
+share of a durable one: commissioned from qits-idp when the container is provisioned, injected as
+container environment, and given back when the container is torn down. That pair is what lets a
+workspace pull and push through the edge as *itself* once anonymous reads are gated — the model is
+the superproject's `authenticated-reads-plan.md`.
+
+    QITS_COMMISSIONED_CLIENT_ID       the commissioned idp client
+    QITS_COMMISSIONED_CLIENT_SECRET   its secret
+
+Both or neither: half a pair is a credential that cannot be presented. They sit beside
+`QITS_WORKSPACE_DAEMON_API_TOKEN`, which points the **other** way — that one is the host proving
+itself to the in-container API, this one is the container proving itself to the platform.
+
+**It mirrors the container's lifetime, not the row's.** A provision commissions, a recreate
+commissions afresh and hands the old one back, `deleteContainer` hands it back while the workspace
+stays ACTIVE (the next start commissions again), and every resolution — integrate, release, discard,
+the branch-gone abandon — hands it back for good. **A stop-then-start keeps it**, because the
+orchestrator has no start verb: a stopped container is started by presenting its spec again, and a
+spec whose environment moved is a *replaced* container. That is also why the pair lives on the
+workspace row rather than being handed in at provision time.
+
+**It is off unless this service holds its own idp credential.** There is no key of ours:
+`quarkus.oidc-client.client-enabled` decides it, the same switch that decides whether a machine token
+is fetched for qits-containers. Off, nothing is commissioned and no container carries the two
+variables — exactly what every workspace did before. Where the commission API answers is derived from
+`quarkus.oidc-client.auth-server-url`, so the two can never name different idps.
+
+    QUARKUS_OIDC_CLIENT_CLIENT_ENABLED=true
+    QUARKUS_OIDC_CLIENT_CREDENTIALS_SECRET=<the secret qits-idp holds for this environment>
+
+**A commissioning failure fails the launch**, after holding through
+`qits.workspace.commission.patience` (30s, for an idp mid-redeploy). A workspace is never launched
+half-credentialed. **A decommissioning failure never blocks a teardown** — it is logged, and
+`wiring/CommissionReconciler` asks qits-idp hourly (and at boot) what it is holding and gives back
+whatever no live workspace container claims. That reconcile, not a TTL, is what answers a crash.
 
 ## Where it answers
 
