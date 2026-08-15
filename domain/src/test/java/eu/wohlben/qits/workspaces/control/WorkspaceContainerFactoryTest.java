@@ -136,6 +136,9 @@ class WorkspaceContainerFactoryTest {
     // (QITS_WORKSPACE_DAEMON_* -> qits.workspace-daemon.*) — workspace-daemon runs in-container so
     // it can't call QitsHostResolver; the URL is composed here.
     assertEnv(c, "QITS_WORKSPACE_DAEMON_URL", "ws://qits:8080/workspaces/daemon/1");
+    // The self-clone base, told rather than left to the daemon's pre-split derivation
+    // (/artifacts/git), which 404s now that the git host is qits-githost under /git.
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_GIT_BASE_URL", "http://qits:8080/git");
     // Where ContainerProxyRoute addresses this container. Asserted as a literal rather than through
     // ContainerProxyPath.base: the daemon in the other repo matches this string, so a test that
     // computed it the same way the production code does would rename itself along with the bug.

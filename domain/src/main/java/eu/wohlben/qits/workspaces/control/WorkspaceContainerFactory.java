@@ -415,6 +415,14 @@ public class WorkspaceContainerFactory {
             + qitsPort
             + "/workspaces/daemon/"
             + rowId);
+    // The git base the daemon self-clones from, told outright — never derived. The daemon's
+    // fallback derives the pre-split address (/artifacts/git off the dial-home authority) and
+    // 404s on a platform whose git host is qits-githost: the first real workspace on the
+    // 2026-08-15 bare-server platform failed exactly there. /git is the githost's root-level
+    // prefix, verbatim through the gateway, so the one authority above routes it too.
+    container.env(
+        "QITS_WORKSPACE_DAEMON_GIT_BASE_URL",
+        "http://" + qitsHostResolver.qitsHost() + ":" + qitsPort + "/git");
     // The path ContainerProxyRoute addresses this container at. The proxy forwards a caller's path
     // untouched, so the daemon has to be told which leading part of it is its own address rather
     // than a route it serves — the same arrangement a spawned dev server has with QITS_PUBLIC_BASE,
