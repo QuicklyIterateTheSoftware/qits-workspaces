@@ -56,6 +56,9 @@ class WorkspaceContainerFactoryTest {
     // home to.
     f.qitsHostResolver = resolver("qits");
     f.qitsPort = "8080";
+    f.containerGitUrl = "http://qits-platform-edge:8080";
+    f.gitHostAudience = "dev-qits-githost";
+    f.idpUrl = "http://qits-idp:8080/idp";
     // Mirrors the shipped default (qits.bootstrap.autorun-enabled): the daemon self-runs bootstrap.
     f.bootstrapAutorunEnabled = true;
     // Mirrors the shipped qits.services.* defaults, forwarded to the daemon's in-container
@@ -138,7 +141,7 @@ class WorkspaceContainerFactoryTest {
     assertEnv(c, "QITS_WORKSPACE_DAEMON_URL", "ws://qits:8080/workspaces/daemon/1");
     // The self-clone base, told rather than left to the daemon's pre-split derivation
     // (/artifacts/git), which 404s now that the git host is qits-githost under /git.
-    assertEnv(c, "QITS_WORKSPACE_DAEMON_GIT_BASE_URL", "http://qits:8080/git");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_GIT_BASE_URL", "http://qits-platform-edge:8080/git");
     // Where ContainerProxyRoute addresses this container. Asserted as a literal rather than through
     // ContainerProxyPath.base: the daemon in the other repo matches this string, so a test that
     // computed it the same way the production code does would rename itself along with the bug.
@@ -295,6 +298,10 @@ class WorkspaceContainerFactoryTest {
     // inside the container, once reads are gated. Two variables, both or neither.
     assertEnv(c, "QITS_COMMISSIONED_CLIENT_ID", "ws-1-a");
     assertEnv(c, "QITS_COMMISSIONED_CLIENT_SECRET", "s3cr3t");
+    assertEnv(c, "GIT_CONFIG_GLOBAL", "/etc/qits-gitconfig");
+    assertEnv(c, "QITS_GIT_AUTH_HOST", "qits-platform-edge:8080");
+    assertEnv(c, "QITS_GIT_AUTH_TOKEN_URL", "http://qits-idp:8080/idp/token");
+    assertEnv(c, "QITS_GIT_AUTH_AUDIENCE", "dev-qits-githost");
   }
 
   @Test

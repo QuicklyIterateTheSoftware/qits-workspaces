@@ -42,6 +42,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Path("/workspaces/{id}/prompt-attachments")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class WorkspacePromptAttachmentController {
 
   @Inject WorkspacePromptAttachmentService promptAttachments;

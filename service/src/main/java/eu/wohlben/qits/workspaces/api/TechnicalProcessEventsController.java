@@ -38,6 +38,7 @@ import org.jboss.resteasy.reactive.RestStreamElementType;
  * wire vocabulary.
  */
 @Path("/technical-processes/{id}/events")
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class TechnicalProcessEventsController {
 
   @Inject TechnicalProcessRegistry registry;

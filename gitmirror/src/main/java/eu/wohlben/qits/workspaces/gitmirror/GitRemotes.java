@@ -1,5 +1,7 @@
 package eu.wohlben.qits.workspaces.gitmirror;
 
+import java.util.Optional;
+
 /**
  * Where a repository answers as a git remote. The one thing this module refuses to know: an address
  * is deployment knowledge, and the suite points the same flow at a local bare so a real
@@ -18,4 +20,9 @@ public interface GitRemotes {
 
   /** The remote to push to, asked once per push. */
   String pushUrl(String repoId);
+
+  /** Verified bearer for this platform-only remote; production wiring must provide one. */
+  default Optional<String> httpExtraHeader() {
+    return Optional.empty();
+  }
 }

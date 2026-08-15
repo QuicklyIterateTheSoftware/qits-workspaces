@@ -22,6 +22,7 @@ import org.jboss.resteasy.reactive.RestStreamElementType;
  * Last-Event-ID} protocol is needed.
  */
 @Path("/workspaces/{id}/events")
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class WorkspaceEventsController {
 
   @Inject WorkspaceEventBroadcaster broadcaster;

@@ -18,7 +18,7 @@ import org.jboss.logging.Logger;
  *
  * <p>Reachability mirrors the container's other channels ({@code /artifacts/git}, {@code
  * /observability/api/otel}, {@code /projects/mcp}): a plain {@code ws://} connection over qits-net
- * on the main HTTP port, made token-free in {@code PublicPaths}. {@code SameOriginUpgradeCheck}
+ * on the main HTTP port, authenticated with {@code qits:system}. {@code SameOriginUpgradeCheck}
  * permits it because {@code workspace-daemon} is a non-browser client and sends no {@code Origin}.
  *
  * <p><strong>The path is a cross-repo contract.</strong> {@code WorkspaceContainerFactory} injects
@@ -34,6 +34,7 @@ import org.jboss.logging.Logger;
  * untouched.
  */
 @WebSocket(path = "/workspaces/daemon/{id}")
+@jakarta.annotation.security.RolesAllowed("qits:system")
 public class DaemonControlSocket {
 
   private static final Logger LOG = Logger.getLogger(DaemonControlSocket.class);

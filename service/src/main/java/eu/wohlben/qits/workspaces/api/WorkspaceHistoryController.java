@@ -22,6 +22,7 @@ import java.util.List;
 @Path("/history")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class WorkspaceHistoryController {
 
   @Inject WorkspaceHistoryService workspaceHistoryService;

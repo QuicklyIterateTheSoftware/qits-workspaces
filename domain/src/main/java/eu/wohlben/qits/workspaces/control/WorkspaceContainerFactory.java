@@ -3,6 +3,7 @@ package eu.wohlben.qits.workspaces.control;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
@@ -280,6 +281,17 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "qits.workspace.qits-port", defaultValue = "8080")
   String qitsPort;
 
+  /** The edge address containers use for Git; direct githost traffic is Bearer-only. */
+  @ConfigProperty(name = "qits.workspace.container-git-url", defaultValue = "http://qits-platform-edge:8080")
+  String containerGitUrl;
+
+  @ConfigProperty(name = "qits.githost.audience", defaultValue = "qits-githost")
+  String gitHostAudience;
+
+  /** Reuse the one IdP authority this service already uses for its own machine client. */
+  @ConfigProperty(name = "quarkus.oidc-client.auth-server-url")
+  String idpUrl;
+
   /**
    * The bearer every container's {@code WorkspaceApi} requires — injected as the fifteenth {@code
    * QITS_WORKSPACE_DAEMON_*} var. Read the config key's comment before treating it as a secret.
@@ -422,7 +434,7 @@ public class WorkspaceContainerFactory {
     // prefix, verbatim through the gateway, so the one authority above routes it too.
     container.env(
         "QITS_WORKSPACE_DAEMON_GIT_BASE_URL",
-        "http://" + qitsHostResolver.qitsHost() + ":" + qitsPort + "/git");
+        gitBase(containerGitUrl));
     // The path ContainerProxyRoute addresses this container at. The proxy forwards a caller's path
     // untouched, so the daemon has to be told which leading part of it is its own address rather
     // than a route it serves — the same arrangement a spawned dev server has with QITS_PUBLIC_BASE,
@@ -501,6 +513,14 @@ public class WorkspaceContainerFactory {
             credential -> {
               container.env("QITS_COMMISSIONED_CLIENT_ID", credential.clientId());
               container.env("QITS_COMMISSIONED_CLIENT_SECRET", credential.secret());
+              // The image's credential helper mints a fresh bearer for each Git authentication.
+              // It compares Git's requested authority with this value before it ever exchanges the
+              // client secret, so an absolute submodule or an ad-hoc external remote cannot obtain
+              // a platform token.
+              container.env("GIT_CONFIG_GLOBAL", "/etc/qits-gitconfig");
+              container.env("QITS_GIT_AUTH_HOST", gitAuthority(containerGitUrl));
+              container.env("QITS_GIT_AUTH_TOKEN_URL", tokenUrl(idpUrl));
+              container.env("QITS_GIT_AUTH_AUDIENCE", gitHostAudience);
             });
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
@@ -576,6 +596,26 @@ public class WorkspaceContainerFactory {
     // holds the socket open and is otherwise idle in Part 1. `init` is a spec field now rather
     // than a run flag, and it is what keeps a long-lived daemon from collecting its children.
     return container.image(image);
+  }
+
+  private static String tokenUrl(String idpBase) {
+    return idpBase.replaceAll("/+$", "") + "/token";
+  }
+
+  private static String gitAuthority(String gitBase) {
+    try {
+      URI uri = URI.create(gitBase);
+      if (uri.getScheme() == null || uri.getRawAuthority() == null || uri.getUserInfo() != null) {
+        throw new IllegalArgumentException("not an absolute git host URL");
+      }
+      return uri.getRawAuthority();
+    } catch (RuntimeException badUrl) {
+      throw new IllegalStateException("qits.githost.url must be an absolute URL", badUrl);
+    }
+  }
+
+  private static String gitBase(String base) {
+    return base.replaceAll("/+$", "") + "/git";
   }
 
   /**

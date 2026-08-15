@@ -486,10 +486,28 @@ public final class RepoMirror {
   /** A git call that talks to the git host, and therefore carries a deadline. */
   private GitCli.Result wire(String what, Path cwd, String... argv) {
     try {
-      return cli.run(cwd == null ? null : cwd.toFile(), Map.of(), null, networkTimeout, argv);
+      return cli.run(
+          cwd == null ? null : cwd.toFile(), Map.of(), null, networkTimeout, platformArgv(argv));
     } catch (Exception e) {
       throw new GitMirrorException(what + ": " + e.getMessage(), e);
     }
+  }
+
+  private String[] platformArgv(String... argv) {
+    boolean http = java.util.Arrays.stream(argv).anyMatch(arg -> arg.startsWith("http://") || arg.startsWith("https://"));
+    if (!http) {
+      return argv;
+    }
+    String header = remotes.httpExtraHeader().orElse(null);
+    if (header == null || header.isBlank()) {
+      throw new GitMirrorException("No machine bearer is available for qits-githost");
+    }
+    if (argv.length == 0 || !"git".equals(argv[0])) {
+      throw new GitMirrorException("A qits-githost command must start with git");
+    }
+    List<String> secured = new ArrayList<>(List.of("git", "-c", "http.extraHeader=" + header));
+    secured.addAll(List.of(argv).subList(1, argv.length));
+    return secured.toArray(String[]::new);
   }
 
   private static void deleteQuietly(Path root) {

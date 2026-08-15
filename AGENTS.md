@@ -872,11 +872,10 @@ Authentication happens at `qits-gateway`. This service resolves a principal from
 of the form `if (identity.isAnonymous()) deny` would look like a security control and be worth
 nothing, because reaching this service at all already implies you are inside the trusted network.
 
-There is no auth variant to select and no authorization policy here, and roles are deliberately not
-resolved — the single role check the system has (`qits.auth.required-role`) is the gateway's, and so
-is the choice of scheme: the gateway authenticates with OIDC, fixed at *its* build time, which is
-what makes the variant question single-instance instead of one per service.
-
+There is no auth variant to select in this service. The shared `qits-auth-core` resolves both
+`X-Qits-User` and `X-Qits-Roles`; human-facing REST boundaries use Jakarta
+`@RolesAllowed("qits:admin")`. Machine-facing boundaries require an authenticated identity and
+retain their narrower `MachineAuth` audience/scope checks.
 **`X-Qits-*` is the gateway's reserved namespace, stripped from every inbound request
 unconditionally**, so a client cannot forge one. That strip rule is the entire reason the header can
 be trusted here — and it is why `ForwardAuthTest` sets the real header rather than reaching for

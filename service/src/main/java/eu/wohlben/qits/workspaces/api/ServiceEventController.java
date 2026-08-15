@@ -24,6 +24,7 @@ import java.util.List;
 @Path("/service-events")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class ServiceEventController {
 
   @Inject ServiceEventService serviceEventService;

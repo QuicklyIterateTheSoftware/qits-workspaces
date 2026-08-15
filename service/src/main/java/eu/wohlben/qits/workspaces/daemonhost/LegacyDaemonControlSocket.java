@@ -43,6 +43,7 @@ import org.jboss.logging.Logger;
  * <p>Delete this once no container provisioned against the old URL can still be running.
  */
 @WebSocket(path = "/api/workspace-daemon/{workspaceId}")
+@jakarta.annotation.security.RolesAllowed("qits:system")
 public class LegacyDaemonControlSocket {
 
   private static final Logger LOG = Logger.getLogger(LegacyDaemonControlSocket.class);

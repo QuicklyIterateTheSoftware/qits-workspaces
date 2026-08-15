@@ -40,6 +40,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Path("/workspaces/{id}/prompt-draft")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class WorkspacePromptDraftController {
 
   @Inject WorkspacePromptDraftService promptDrafts;

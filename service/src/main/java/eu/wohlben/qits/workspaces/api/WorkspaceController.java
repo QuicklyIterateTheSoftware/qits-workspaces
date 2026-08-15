@@ -40,6 +40,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Path("/workspaces")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class WorkspaceController {
 
   @Inject WorkspaceService workspaceService;

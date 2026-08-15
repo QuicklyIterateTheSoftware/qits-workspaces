@@ -25,6 +25,7 @@ import org.jboss.resteasy.reactive.RestStreamElementType;
  * WorkspaceDaemonRegistry#onAgentActivity}). Same heartbeat/reconnect story as the siblings.
  */
 @Path("/events")
+@jakarta.annotation.security.RolesAllowed("qits:admin")
 public class GlobalEventsController {
 
   @Inject WorkspaceEventBroadcaster broadcaster;
