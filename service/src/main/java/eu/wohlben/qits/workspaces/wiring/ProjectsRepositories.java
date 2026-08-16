@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspaces.wiring;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -36,7 +37,8 @@ public interface ProjectsRepositories {
   @GET
   @Path("/{repoId}")
   @Produces(MediaType.APPLICATION_JSON)
-  GetRepositoryResponse get(@PathParam("repoId") String repoId);
+  GetRepositoryResponse get(
+      @PathParam("repoId") String repoId, @HeaderParam("Authorization") String authorization);
 
   /** qits-projects' {@code RepositoryController.GetRepositoryRequest.Response}. */
   @JsonIgnoreProperties(ignoreUnknown = true)

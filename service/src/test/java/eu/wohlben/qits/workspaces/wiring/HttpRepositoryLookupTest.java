@@ -65,6 +65,13 @@ public class HttpRepositoryLookupTest {
   private HttpRepositoryLookup lookupAgainst(String baseUrl) {
     HttpRepositoryLookup lookup = new HttpRepositoryLookup();
     lookup.baseUrl = Optional.ofNullable(baseUrl);
+    lookup.projectsBearer =
+        new IdpProjectsBearer() {
+          @Override
+          public Optional<String> authorization() {
+            return Optional.empty();
+          }
+        };
     if (baseUrl != null) {
       lookup.repositories =
           QuarkusRestClientBuilder.newBuilder()

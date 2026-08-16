@@ -64,6 +64,8 @@ public class HttpRepositoryLookup implements RepositoryLookup {
 
   @Inject @RestClient ProjectsRepositories repositories;
 
+  @Inject IdpProjectsBearer projectsBearer;
+
   void assertConfigured(@Observes StartupEvent event) {
     if (configuredAddress() != null) {
       LOG.infof("Repository registry: %s", configuredAddress());
@@ -106,7 +108,7 @@ public class HttpRepositoryLookup implements RepositoryLookup {
     }
     ProjectsRepositories.GetRepositoryResponse answer;
     try {
-      answer = repositories.get(repoId);
+      answer = repositories.get(repoId, projectsBearer.authorization().orElse(null));
     } catch (WebApplicationException http) {
       int status = http.getResponse().getStatus();
       if (status == 404) {
