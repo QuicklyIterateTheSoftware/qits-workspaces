@@ -313,9 +313,10 @@ literal and must carry `/workspaces` itself. Five do, each for its own reason:
 - `DaemonControlSocket` — `/workspaces/daemon/{id}`, and a **cross-repo contract**:
   `WorkspaceContainerFactory` injects `ws://<host>:<port>/workspaces/daemon/<id>` as
   `QITS_WORKSPACE_DAEMON_URL` and qits-workspace-daemon dials exactly that. Change both together.
-  That literal is also what must be allow-listed unauthenticated at the gateway (`PublicPaths`) —
-  the callers are daemons holding no user token. It fails *closed*: a stale allow-list rejects
-  daemons loudly rather than exposing anything.
+  A commissioned daemon exchanges its own client pair for a qits-workspaces-audience bearer and
+  presents it on every upgrade; the endpoint requires `qits:system`. The local/no-IdP topology
+  stays anonymous only while the machine-auth rollout gate is off. Do not make this path public to
+  repair a failed dial-home: a missing bearer is an integration failure, not a routing exception.
 - `ServiceProxyRoute` — `ServiceProxyPath.PREFIX`, `/workspaces/service/`, which is also baked into
   the dev server's `QITS_PUBLIC_BASE` at spawn, so the two cannot be changed apart.
 - `ContainerProxyRoute` — `ContainerProxyPath.PREFIX`, `/workspaces/container/`, **the only path by

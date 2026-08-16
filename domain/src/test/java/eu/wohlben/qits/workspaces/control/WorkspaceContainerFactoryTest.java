@@ -59,6 +59,7 @@ class WorkspaceContainerFactoryTest {
     f.containerGitUrl = "http://qits-platform-edge:8080";
     f.gitHostAudience = "dev-qits-githost";
     f.idpUrl = "http://qits-idp:8080/idp";
+    f.machineAudience = "dev-qits-workspaces";
     // Mirrors the shipped default (qits.bootstrap.autorun-enabled): the daemon self-runs bootstrap.
     f.bootstrapAutorunEnabled = true;
     // Mirrors the shipped qits.services.* defaults, forwarded to the daemon's in-container
@@ -302,6 +303,8 @@ class WorkspaceContainerFactoryTest {
     assertEnv(c, "QITS_GIT_AUTH_HOST", "qits-platform-edge:8080");
     assertEnv(c, "QITS_GIT_AUTH_TOKEN_URL", "http://qits-idp:8080/idp/token");
     assertEnv(c, "QITS_GIT_AUTH_AUDIENCE", "dev-qits-githost");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_AUTH_TOKEN_URL", "http://qits-idp:8080/idp/token");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE", "dev-qits-workspaces");
   }
 
   @Test
@@ -321,6 +324,8 @@ class WorkspaceContainerFactoryTest {
 
       assertFalse(c.env().containsKey("QITS_COMMISSIONED_CLIENT_ID"), c.env().toString());
       assertFalse(c.env().containsKey("QITS_COMMISSIONED_CLIENT_SECRET"), c.env().toString());
+      assertFalse(c.env().containsKey("QITS_WORKSPACE_DAEMON_AUTH_TOKEN_URL"), c.env().toString());
+      assertFalse(c.env().containsKey("QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE"), c.env().toString());
     }
   }
 

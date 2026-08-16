@@ -64,6 +64,10 @@ public final class TestWorkspaceContainerFactory {
     f.gitIdentity = identity();
     f.qitsHostResolver = resolver();
     f.qitsPort = "8080";
+    f.containerGitUrl = "http://qits-platform-edge:8080";
+    f.gitHostAudience = "qits-githost";
+    f.idpUrl = "http://qits-idp:8080/idp";
+    f.machineAudience = "qits-workspaces";
     f.daemonApiToken = "qits-workspace-daemon";
     f.bootstrapAutorunEnabled = true;
     f.autoPushEnabled = true;

@@ -106,6 +106,13 @@
             <artifactId>quarkus-oidc-client</artifactId>
         </dependency>
         <dependency>
+            <!-- A workspace daemon dials this service directly on qits-net. Its control WebSocket
+                 requires qits:system, so the commissioned bearer must become a validated
+                 SecurityIdentity here rather than relying on browser forward-auth at the edge. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>

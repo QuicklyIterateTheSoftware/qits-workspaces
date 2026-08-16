@@ -208,10 +208,15 @@ the superproject's `authenticated-reads-plan.md`.
 
     QITS_COMMISSIONED_CLIENT_ID       the commissioned idp client
     QITS_COMMISSIONED_CLIENT_SECRET   its secret
+    QITS_WORKSPACE_DAEMON_AUTH_TOKEN_URL  its token endpoint
+    QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE   the qits-workspaces audience
 
-Both or neither: half a pair is a credential that cannot be presented. They sit beside
+The client pair and its control-socket token coordinates are injected together or not at all; a
+partial set cannot authenticate and is never a valid container specification. They sit beside
 `QITS_WORKSPACE_DAEMON_API_TOKEN`, which points the **other** way — that one is the host proving
-itself to the in-container API, this one is the container proving itself to the platform.
+itself to the in-container API, this set is the container proving itself to the platform. The daemon
+uses the token URL and audience with its client pair to authenticate its dial-home control socket;
+Git still asks for its own qits-githost-audience bearer.
 
 **It mirrors the container's lifetime, not the row's.** A provision commissions, a recreate
 commissions afresh and hands the old one back, `deleteContainer` hands it back while the workspace

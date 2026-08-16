@@ -292,6 +292,10 @@ public class WorkspaceContainerFactory {
   @ConfigProperty(name = "quarkus.oidc-client.auth-server-url")
   String idpUrl;
 
+  /** The environment-qualified qits-workspaces audience the daemon's control socket requires. */
+  @ConfigProperty(name = "qits.auth.machine.audience", defaultValue = "qits-workspaces")
+  String machineAudience;
+
   /**
    * The bearer every container's {@code WorkspaceApi} requires — injected as the fifteenth {@code
    * QITS_WORKSPACE_DAEMON_*} var. Read the config key's comment before treating it as a secret.
@@ -521,6 +525,12 @@ public class WorkspaceContainerFactory {
               container.env("QITS_GIT_AUTH_HOST", gitAuthority(containerGitUrl));
               container.env("QITS_GIT_AUTH_TOKEN_URL", tokenUrl(idpUrl));
               container.env("QITS_GIT_AUTH_AUDIENCE", gitHostAudience);
+              // The same short-lived credential authenticates the daemon's dial-home socket, but
+              // its audience is qits-workspaces rather than qits-githost. Keep the token endpoint
+              // and target explicit: deriving either from the Git endpoint would silently put a
+              // workspace's control plane behind a different service's policy.
+              container.env("QITS_WORKSPACE_DAEMON_AUTH_TOKEN_URL", tokenUrl(idpUrl));
+              container.env("QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE", machineAudience);
             });
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
