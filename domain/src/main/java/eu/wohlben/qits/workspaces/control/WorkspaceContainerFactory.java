@@ -21,6 +21,14 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @ApplicationScoped
 public class WorkspaceContainerFactory {
 
+  /** qits-projects' service base; forwarded explicitly because the daemon control socket is not a gateway. */
+  @ConfigProperty(name = "qits.projects.url")
+  String projectsUrl;
+
+  /** qits-observability's service base, used by workspace-scoped coding agents. */
+  @ConfigProperty(name = "qits.observability.url", defaultValue = "http://qits-observability:8080")
+  String observabilityUrl;
+
   /**
    * The image every workspace container runs — registry-qualified and pinned to a released version
    * ({@code localhost:8081/qits/workspace:<calver>}). The value ships in this library's {@code
@@ -431,6 +439,12 @@ public class WorkspaceContainerFactory {
             + qitsPort
             + "/workspaces/daemon/"
             + rowId);
+    // MCP servers are owned by sibling services, not by the control-socket authority above.
+    // Tell the daemon each address outright so a direct qits-workspaces control socket is never
+    // mistaken for a gateway. The daemon adds the project/repository/workspace query scope later.
+    container.env("QITS_REPOSITORY_MCP_URL", serviceBase(projectsUrl) + "/projects/mcp");
+    container.env(
+        "QITS_OBSERVABILITY_MCP_URL", serviceBase(observabilityUrl) + "/observability/mcp");
     // The git base the daemon self-clones from, told outright — never derived. The daemon's
     // fallback derives the pre-split address (/artifacts/git off the dial-home authority) and
     // 404s on a platform whose git host is qits-githost: the first real workspace on the
@@ -606,6 +620,14 @@ public class WorkspaceContainerFactory {
     // holds the socket open and is otherwise idle in Part 1. `init` is a spec field now rather
     // than a run flag, and it is what keeps a long-lived daemon from collecting its children.
     return container.image(image);
+  }
+
+  private static String serviceBase(String configured) {
+    if (configured == null || configured.isBlank()) {
+      throw new IllegalStateException("service URL must not be blank");
+    }
+    String value = configured.trim();
+    return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
   }
 
   private static String tokenUrl(String idpBase) {

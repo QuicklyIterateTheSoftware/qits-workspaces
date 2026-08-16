@@ -39,6 +39,8 @@ class WorkspaceContainerFactoryTest {
   private WorkspaceContainerFactory factory() {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.image = IMAGE;
+    f.projectsUrl = "http://qits-projects:8080/";
+    f.observabilityUrl = "http://qits-observability:8080/";
     f.network = "qits-net";
     f.claudeVolume = "qits_shared_dot_claude";
     f.claudeMount = "/claude-home";
@@ -140,6 +142,11 @@ class WorkspaceContainerFactoryTest {
     // (QITS_WORKSPACE_DAEMON_* -> qits.workspace-daemon.*) — workspace-daemon runs in-container so
     // it can't call QitsHostResolver; the URL is composed here.
     assertEnv(c, "QITS_WORKSPACE_DAEMON_URL", "ws://qits:8080/workspaces/daemon/1");
+    assertEnv(c, "QITS_REPOSITORY_MCP_URL", "http://qits-projects:8080/projects/mcp");
+    assertEnv(
+        c,
+        "QITS_OBSERVABILITY_MCP_URL",
+        "http://qits-observability:8080/observability/mcp");
     // The self-clone base, told rather than left to the daemon's pre-split derivation
     // (/artifacts/git), which 404s now that the git host is qits-githost under /git.
     assertEnv(c, "QITS_WORKSPACE_DAEMON_GIT_BASE_URL", "http://qits-platform-edge:8080/git");

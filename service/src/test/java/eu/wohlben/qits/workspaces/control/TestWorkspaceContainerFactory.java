@@ -50,6 +50,8 @@ public final class TestWorkspaceContainerFactory {
   private static WorkspaceContainerFactory build(boolean persistWorkspace) {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.image = IMAGE;
+    f.projectsUrl = "http://qits-projects:8080";
+    f.observabilityUrl = "http://qits-observability:8080";
     f.network = "qits-net";
     f.claudeVolume = "qits_shared_dot_claude";
     f.claudeMount = "/claude-home";
