@@ -174,6 +174,22 @@ public final class TestOrigin {
     return null;
   }
 
+  /** Read one file directly from a branch in the bare fixture. */
+  public static String fileAtBranch(String dataDir, String repoId, String branch, String file)
+      throws Exception {
+    Path origin = Path.of(dataDir, repoId, "origin").toAbsolutePath();
+    Process process =
+        new ProcessBuilder(
+                "git", "--git-dir=" + origin, "show", branch + ":" + file)
+            .redirectErrorStream(true)
+            .start();
+    String output = new String(process.getInputStream().readAllBytes());
+    if (process.waitFor() != 0) {
+      throw new IllegalStateException("Could not read " + file + " from " + branch + ": " + output);
+    }
+    return output;
+  }
+
   /** Run a git command, failing the test with its combined output when it exits non-zero. */
   private static void run(File cwd, String... argv) throws Exception {
     ProcessBuilder pb = new ProcessBuilder(argv).directory(cwd).redirectErrorStream(true);

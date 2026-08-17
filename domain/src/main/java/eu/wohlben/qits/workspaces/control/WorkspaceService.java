@@ -26,11 +26,18 @@ import jakarta.enterprise.event.Event;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -977,6 +984,239 @@ public class WorkspaceService {
 
     return workspace;
   }
+
+  /**
+   * Extended create form for aggregate repositories. A branch-tree workspace forks the wrapper and
+   * every registered repository reachable from its committed submodule declarations, then adds the
+   * workspace hand-off document to the wrapper before the ordinary workspace row is recorded.
+   *
+   * <p>Deliberately NOT one {@code @Transactional}, for the reason {@link #landWorkspace} spells
+   * out: the tree is a fetch, a worktree and a push <em>per repository</em>, and a wrapper of twenty
+   * submodules outlasts Narayana's transaction timeout — which would surface as a transaction
+   * failure rather than as anything a caller could read. The guards read in one short transaction,
+   * the git work runs outside every transaction, and the row is written in another.
+   */
+  public Workspace createWorkspace(
+      String repoId,
+      String workspaceId,
+      String parent,
+      String branch,
+      String preamble,
+      boolean adoptExisting,
+      boolean branchTree) {
+    // A call on `this` never reaches the interceptor, so each delegation below opens its own
+    // transaction explicitly rather than relying on the annotation of the method it calls.
+    if (!branchTree) {
+      return QuarkusTransaction.requiringNew()
+          .call(
+              () -> createWorkspace(repoId, workspaceId, parent, branch, preamble, adoptExisting));
+    }
+    if (adoptExisting) {
+      throw new BadRequestException("A branch-tree workspace cannot adopt an existing branch");
+    }
+    if (workspaceId == null
+        || !workspaceId.matches("[A-Za-z0-9_-]{1,64}")
+        || workspaceId.startsWith("-")) {
+      throw new BadRequestException("Invalid workspace id: " + workspaceId);
+    }
+    var root = repositories.require(repoId);
+    String parentBranch = (parent == null || parent.isBlank()) ? defaultMainBranch(root) : parent;
+    String newBranch = (branch == null || branch.isBlank()) ? workspaceId : branch;
+    if (parentBranch.startsWith("-") || newBranch.startsWith("-")) {
+      throw new BadRequestException("Invalid branch name");
+    }
+    // The same two guards the ordinary form opens with, run before any ref is pushed: a tree is
+    // expensive to create and worse to undo, so a workspace that could never be recorded must fail
+    // before the first push rather than after the last one.
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              if (workspaceRepository.existsActiveByRepositoryAndWorkspaceId(repoId, workspaceId)) {
+                throw new BadRequestException("Workspace already exists: " + workspaceId);
+              }
+              if (workspaceRepository.existsActiveByRepositoryAndBranch(repoId, newBranch)) {
+                throw new ConflictException("Branch already has an active workspace: " + newBranch);
+              }
+            });
+    createBranchTree(root, newBranch, parentBranch);
+    return QuarkusTransaction.requiringNew()
+        .call(() -> createWorkspace(repoId, workspaceId, parentBranch, newBranch, preamble, true));
+  }
+
+  /**
+   * Creates {@code branch} in the wrapper and in every registered repository its committed
+   * submodule declarations reach, then publishes the hand-off document on the wrapper's copy.
+   *
+   * <p>Three phases, in this order for a reason: the closure is discovered first (no ref is written
+   * while it is being read), then <em>every</em> repository is checked for a colliding branch, and
+   * only then does the first push happen. A collision therefore refuses the whole request while it
+   * still costs nothing.
+   */
+  private void createBranchTree(
+      RepositoryLookup.RepositoryView root, String branch, String rootParent) {
+    Collection<RepositoryLookup.RepositoryView> closure = submoduleClosure(root, rootParent);
+
+    for (var repository : closure) {
+      if (mirrors.of(repository.id()).remoteHasBranch(branch)) {
+        throw new ConflictException("Branch already exists in " + repository.name() + ": " + branch);
+      }
+    }
+
+    List<RepositoryLookup.RepositoryView> created = new ArrayList<>();
+    try {
+      for (var repository : closure) {
+        createBranchOnHost(
+            mirrors.of(repository.id()), branch, sourceOf(repository, root, rootParent));
+        created.add(repository);
+      }
+      writeWorkspaceGuide(mirrors.of(root.id()), branch);
+    } catch (RuntimeException failure) {
+      undoBranchTree(created, branch);
+      throw failure;
+    }
+  }
+
+  /**
+   * Removes what a failed tree already created. Without it a tree that broke half way through would
+   * fail its own collision check on every retry, and the branch name would be spent for good — the
+   * caller cannot tell a ref this service left behind from one somebody else owns.
+   *
+   * <p>Best-effort by necessity: what brings us here is usually the git host refusing or being
+   * unreachable, and a deletion it will not take leaves a ref to remove by hand. The original
+   * failure is what the caller is told about either way.
+   */
+  private void undoBranchTree(List<RepositoryLookup.RepositoryView> created, String branch) {
+    for (var repository : created) {
+      try {
+        PushOutcome deleted = mirrors.of(repository.id()).deleteBranch(branch);
+        if (!deleted.accepted()) {
+          LOG.warnf(
+              "the git host refused to roll back branch '%s' of %s: %s",
+              branch, repository.name(), deleted.output());
+        }
+      } catch (RuntimeException e) {
+        LOG.warnf(e, "failed to roll back branch '%s' of %s", branch, repository.name());
+      }
+    }
+  }
+
+  /**
+   * The wrapper and every registered repository reachable from committed {@code .gitmodules} urls,
+   * wrapper first and each repository once.
+   *
+   * <p>Registered is the whole rule: a submodule url resolves through the project's repository list
+   * by the name it addresses ({@code ../<name>.git}) and, for an adopted repository that owns no
+   * alias row, by its id — the same two spellings qits-projects resolves a name through. A
+   * submodule naming nothing registered is skipped rather than guessed at.
+   */
+  private Collection<RepositoryLookup.RepositoryView> submoduleClosure(
+      RepositoryLookup.RepositoryView root, String rootParent) {
+    List<RepositoryLookup.RepositoryView> registered =
+        repositories.listByProject(root.projectId());
+    if (registered.isEmpty()) {
+      // The project holds at least this wrapper, so an empty answer is a registry that did not
+      // answer. Read as "no submodules" it would branch the wrapper alone and call that a tree.
+      throw new InternalServerErrorException(
+          "The repository registry listed no repositories in project " + root.projectId());
+    }
+    Map<String, RepositoryLookup.RepositoryView> byName = new LinkedHashMap<>();
+    Map<String, RepositoryLookup.RepositoryView> byId = new LinkedHashMap<>();
+    for (var repository : registered) {
+      if (repository.name() != null) {
+        byName.put(repository.name(), repository);
+      }
+      byId.put(repository.id(), repository);
+    }
+    byName.put(root.name(), root);
+    byId.put(root.id(), root);
+
+    Map<String, RepositoryLookup.RepositoryView> closure = new LinkedHashMap<>();
+    ArrayDeque<RepositoryLookup.RepositoryView> pending = new ArrayDeque<>();
+    pending.add(root);
+    while (!pending.isEmpty()) {
+      var repository = pending.removeFirst();
+      if (closure.putIfAbsent(repository.id(), repository) != null) {
+        continue;
+      }
+      RepoMirror mirror = mirrors.of(repository.id());
+      mirror.refreshNow();
+      String source = sourceOf(repository, root, rootParent);
+      try (MirrorWorktree worktree =
+          mirror.worktree("branch-tree-discovery", "refs/heads/" + source)) {
+        Path modules = worktree.path().resolve(".gitmodules");
+        if (!Files.isRegularFile(modules)) {
+          continue;
+        }
+        for (String line : Files.readAllLines(modules)) {
+          String trimmed = line.trim();
+          if (!trimmed.startsWith("url") || !trimmed.contains("=")) {
+            continue;
+          }
+          String name = repositoryName(trimmed.substring(trimmed.indexOf('=') + 1));
+          var child = byName.containsKey(name) ? byName.get(name) : byId.get(name);
+          if (child != null && !closure.containsKey(child.id())) {
+            pending.addLast(child);
+          }
+        }
+      } catch (IOException failure) {
+        throw new InternalServerErrorException(
+            "Could not read the submodule tree of "
+                + repository.name()
+                + ": "
+                + failure.getMessage());
+      }
+    }
+    return closure.values();
+  }
+
+  /** What a repository's copy of the workspace branch forks from: the wrapper's parent, or main. */
+  private static String sourceOf(
+      RepositoryLookup.RepositoryView repository,
+      RepositoryLookup.RepositoryView root,
+      String rootParent) {
+    return repository.id().equals(root.id()) ? rootParent : defaultMainBranch(repository);
+  }
+
+  private static String repositoryName(String url) {
+    String value = url.trim().replaceAll("/+$", "");
+    value = value.substring(Math.max(value.lastIndexOf('/'), value.lastIndexOf(':')) + 1);
+    return value.endsWith(".git") ? value.substring(0, value.length() - 4) : value;
+  }
+
+  /**
+   * Publishes the hand-off document on the wrapper's copy of the workspace branch — a commit and a
+   * push like any other write here, so the branch a workspace opens on already explains itself.
+   */
+  private void writeWorkspaceGuide(RepoMirror mirror, String branch) {
+    mirror.refreshNow();
+    try (MirrorWorktree worktree = mirror.worktree("workspace-guide", "refs/heads/" + branch)) {
+      Path guide = worktree.path().resolve("WORKSPACE.md");
+      Files.writeString(guide, WORKSPACE_GUIDE);
+      worktree.stage(List.of(Path.of("WORKSPACE.md")));
+      worktree.commit(
+          "docs: add workspace development flow",
+          "Record how changes from this aggregate workspace reach a running environment.",
+          gitIdentity.forMirror());
+      PushOutcome pushed = worktree.push(PushSpec.of(PushSpec.Ref.branch("HEAD", branch)));
+      if (!pushed.accepted()) {
+        throw new InternalServerErrorException(
+            "Failed to publish WORKSPACE.md: " + pushed.output());
+      }
+    } catch (IOException failure) {
+      throw new InternalServerErrorException(
+          "Could not write WORKSPACE.md: " + failure.getMessage());
+    }
+  }
+
+  private static final String WORKSPACE_GUIDE = """
+      # Workspace development flow
+
+      This checkout is an aggregate workspace. The wrapper and every checked-out submodule use the same workspace branch. Commit and push changes in the repository where they belong; the workspace credential has normal Git push access so each repository can move independently.
+
+      A local commit is not automatically part of the running environment. Changes have to be orchestrated by **releasing** them: shared libraries are released into `main`, while applications and services are released into the environment branch that runs them (for example `environment/dev`).
+
+      Release dependencies before their consumers, then let the affected application or service release carry the new versions into the environment. Keep the wrapper branch as the map of the workspace, but treat each submodule's own release as the unit that promotes code.
+      """;
 
   /**
    * Creates the default workspace for a repository's main branch: a workspace on the

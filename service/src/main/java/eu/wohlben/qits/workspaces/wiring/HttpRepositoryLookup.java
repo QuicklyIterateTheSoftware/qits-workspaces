@@ -8,6 +8,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.WebApplicationException;
+import java.util.List;
 import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
@@ -63,6 +64,8 @@ public class HttpRepositoryLookup implements RepositoryLookup {
   Optional<String> baseUrl;
 
   @Inject @RestClient ProjectsRepositories repositories;
+
+  @Inject @RestClient ProjectsProjectRepositories projectRepositories;
 
   @Inject IdpProjectsBearer projectsBearer;
 
@@ -136,6 +139,49 @@ public class HttpRepositoryLookup implements RepositoryLookup {
             answer.repository().name(),
             answer.repository().projectId(),
             answer.repository().mainBranch()));
+  }
+
+  /**
+   * The same distinction {@link #find} draws, and it matters more here: an empty list is a project
+   * with no repositories, so a failure folded into one would branch a wrapper alone and call that
+   * done. Every failure throws, a 404 included — the project id comes from a repository this
+   * service already resolved, so its absence is a broken registry rather than a caller's mistake.
+   */
+  @Override
+  public List<RepositoryView> listByProject(String projectId) {
+    if (projectId == null || projectId.isBlank()) {
+      return List.of();
+    }
+    String address = configuredAddress();
+    if (address == null) {
+      // Only reachable in dev/test, where assertConfigured warned instead of throwing.
+      return List.of();
+    }
+    ProjectsProjectRepositories.ListResponse answer;
+    try {
+      answer = projectRepositories.list(projectId, projectsBearer.authorization().orElse(null));
+    } catch (WebApplicationException http) {
+      throw new IllegalStateException(
+          "qits-projects answered "
+              + http.getResponse().getStatus()
+              + " while listing the repositories of project "
+              + projectId,
+          http);
+    } catch (RuntimeException transportFailure) {
+      throw new IllegalStateException(
+          "qits-projects unreachable at " + address + " while listing project " + projectId,
+          transportFailure);
+    }
+    if (answer == null || answer.entries() == null) {
+      return List.of();
+    }
+    return answer.entries().stream()
+        .filter(entry -> entry != null && entry.repository() != null)
+        .map(ProjectsProjectRepositories.Entry::repository)
+        .map(
+            repo ->
+                new RepositoryView(repo.id(), repo.name(), repo.projectId(), repo.mainBranch()))
+        .toList();
   }
 
   /** The configured address, or null when this service is unwired. */

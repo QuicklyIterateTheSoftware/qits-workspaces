@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspaces.control;
 
 import eu.wohlben.qits.workspaces.error.NotFoundException;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -37,6 +38,20 @@ public interface RepositoryLookup {
 
   /** The repository behind {@code repoId}, or empty when it does not exist. */
   Optional<RepositoryView> find(String repoId);
+
+  /**
+   * Every repository registered in a project — what resolves a wrapper's committed submodule urls
+   * to repositories this service may branch.
+   *
+   * <p>A {@code default} only because {@link #find} is the single abstract method a stub is written
+   * as a lambda against. Answering empty is not a supported implementation: a project always holds
+   * at least the repository being asked about, so {@code WorkspaceService} reads an empty list as a
+   * registry that did not answer and refuses — branching a wrapper alone and leaving every
+   * submodule behind reads as success and is not.
+   */
+  default List<RepositoryView> listByProject(String projectId) {
+    return List.of();
+  }
 
   /** {@link #find} or 404 — the guard nearly every workspace entry point opens with. */
   default RepositoryView require(String repoId) {

@@ -174,6 +174,56 @@ public final class TestOrigin {
     return null;
   }
 
+  /** Whether the origin holds {@code branch} — read from the bare, not through a mirror. */
+  public static boolean hasBranch(String dataDir, String repoId, String branch) throws Exception {
+    Path origin = Path.of(dataDir, repoId, "origin").toAbsolutePath();
+    return git(origin, "show-ref", "--verify", "--quiet", "refs/heads/" + branch).exitCode() == 0;
+  }
+
+  /** Read one file directly from a branch in the bare fixture. */
+  public static String fileAtBranch(String dataDir, String repoId, String branch, String file)
+      throws Exception {
+    Path origin = Path.of(dataDir, repoId, "origin").toAbsolutePath();
+    Captured shown = git(origin, "show", branch + ":" + file);
+    if (shown.exitCode() != 0) {
+      throw new IllegalStateException(
+          "Could not read " + file + " from " + branch + ": " + shown.output());
+    }
+    return shown.output();
+  }
+
+  /**
+   * Install a {@code pre-receive} hook that refuses every push, so a test can fail one repository
+   * of a tree while its siblings still accept. Real receive-pack, real refusal.
+   */
+  public static void refusePushes(String dataDir, String repoId) throws Exception {
+    Path origin = Path.of(dataDir, repoId, "origin").toAbsolutePath();
+    Path hook = origin.resolve("hooks").resolve("pre-receive");
+    Files.createDirectories(hook.getParent());
+    Files.writeString(hook, "#!/bin/sh\necho 'refused by the fixture' >&2\nexit 1\n");
+    Files.setPosixFilePermissions(hook, PosixFilePermissions.fromString("rwxr-xr-x"));
+  }
+
+  /** Take the refusal off again, so the same push can be retried. */
+  public static void acceptPushes(String dataDir, String repoId) throws Exception {
+    Files.deleteIfExists(
+        Path.of(dataDir, repoId, "origin", "hooks", "pre-receive").toAbsolutePath());
+  }
+
+  private record Captured(int exitCode, String output) {}
+
+  /** A git call in a bare fixture whose exit code is an answer rather than a failure. */
+  private static Captured git(Path gitDir, String... argv) throws Exception {
+    String[] full = new String[argv.length + 1];
+    full[0] = "git";
+    System.arraycopy(argv, 0, full, 1, argv.length);
+    ProcessBuilder pb = new ProcessBuilder(full).redirectErrorStream(true);
+    pb.environment().put("GIT_DIR", gitDir.toString());
+    Process process = pb.start();
+    String output = new String(process.getInputStream().readAllBytes());
+    return new Captured(process.waitFor(), output);
+  }
+
   /** Run a git command, failing the test with its combined output when it exits non-zero. */
   private static void run(File cwd, String... argv) throws Exception {
     ProcessBuilder pb = new ProcessBuilder(argv).directory(cwd).redirectErrorStream(true);

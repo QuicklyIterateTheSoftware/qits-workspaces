@@ -77,6 +77,10 @@ public class HttpRepositoryLookupTest {
           QuarkusRestClientBuilder.newBuilder()
               .baseUri(URI.create(baseUrl))
               .build(ProjectsRepositories.class);
+      lookup.projectRepositories =
+          QuarkusRestClientBuilder.newBuilder()
+              .baseUri(URI.create(baseUrl))
+              .build(ProjectsProjectRepositories.class);
     }
     return lookup;
   }
@@ -143,6 +147,39 @@ public class HttpRepositoryLookupTest {
     lookupAgainst(base).find("repo-1");
 
     assertEquals(List.of("/projects/api/repositories/repo-1"), requestedPaths);
+  }
+
+  /**
+   * The second cross-repo path, read by aggregate workspace creation: the project's repository
+   * listing. Its wrapper field is deliberately not bound, so the fixture carries one.
+   */
+  @Test
+  public void theProjectRepositoryListingGoesToTheProjectsSegment() throws Exception {
+    String base =
+        serve(
+            200,
+            """
+            {"entries":[{"repository":{"id":"repo-1","name":"qits-qits","mainBranch":"main",\
+            "projectId":"p-1"}},{"repository":{"id":"repo-2","name":"qits-workspaces",\
+            "mainBranch":"main","projectId":"p-1"}}],"wrapper":{"entries":[]}}""");
+
+    List<RepositoryLookup.RepositoryView> found = lookupAgainst(base).listByProject("p-1");
+
+    assertEquals(List.of("/projects/api/projects/p-1/repositories"), requestedPaths);
+    assertEquals(2, found.size());
+    assertEquals("qits-qits", found.get(0).name());
+    assertEquals("repo-2", found.get(1).id());
+  }
+
+  /**
+   * An empty list means "this project has no repositories", which for a branch tree means "branch
+   * the wrapper alone". An outage must not be able to say that.
+   */
+  @Test
+  public void anUnreachableRegistryThrowsRatherThanReadingAsAnEmptyProject() {
+    HttpRepositoryLookup lookup = lookupAgainst("http://127.0.0.1:1");
+
+    assertThrows(IllegalStateException.class, () -> lookup.listByProject("p-1"));
   }
 
   @Test

@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspaces.control;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,6 +42,19 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     return mainBranch == null
         ? Optional.empty()
         : Optional.of(new RepositoryView(repoId, nameOf(repoId), PROJECT_ID, mainBranch));
+  }
+
+  @Override
+  public List<RepositoryView> listByProject(String projectId) {
+    if (!PROJECT_ID.equals(projectId)) {
+      return List.of();
+    }
+    return mainBranches.entrySet().stream()
+        .map(
+            entry ->
+                new RepositoryView(
+                    entry.getKey(), nameOf(entry.getKey()), PROJECT_ID, entry.getValue()))
+        .toList();
   }
 
   /** Make {@code repoId} resolvable, with {@code master} as its main branch. */

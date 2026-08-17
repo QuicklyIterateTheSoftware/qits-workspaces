@@ -99,6 +99,8 @@ components:
           type: string
         adoptExisting:
           type: boolean
+        branchTree:
+          type: boolean
     DiscardWorkspaceRequest:
       type: object
       properties:

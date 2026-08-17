@@ -89,6 +89,26 @@ public class WorkspaceControllerTest {
         .body("success", equalTo(true));
   }
 
+  @Test
+  public void testCreateBranchTreeAddsWorkspaceGuide() throws Exception {
+    String repoId = createProjectAndRepository();
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new WorkspaceController.CreateWorkspaceRequest(
+                repoId, "adhoc-changes", "master", "adhoc-changes", null, false, true))
+        .when()
+        .post("/workspaces/api/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("workspace.workspaceId", equalTo("adhoc-changes"));
+
+    String guide = TestOrigin.fileAtBranch(dataDir, repoId, "adhoc-changes", "WORKSPACE.md");
+    org.junit.jupiter.api.Assertions.assertTrue(guide.contains("shared libraries are released into `main`"));
+    org.junit.jupiter.api.Assertions.assertTrue(guide.contains("environment branch"));
+  }
+
   /**
    * The rule that makes "integrate is the only flow into the default branch" true in the API and
    * not only at the git host. Merge keeps every other target — merging into a parent branch is what

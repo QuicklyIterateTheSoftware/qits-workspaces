@@ -123,11 +123,23 @@ public class WorkspaceController {
       String parent,
       String branch,
       String preamble,
-      boolean adoptExisting) {
+      boolean adoptExisting,
+      boolean branchTree) {
+    /** Backward-compatible form used before aggregate wrapper workspaces were introduced. */
+    public CreateWorkspaceRequest(
+        String repositoryId,
+        String id,
+        String parent,
+        String branch,
+        String preamble,
+        boolean adoptExisting) {
+      this(repositoryId, id, parent, branch, preamble, adoptExisting, false);
+    }
+
     /** Backward-compatible "branch off" form: create a new branch, never adopt an existing one. */
     public CreateWorkspaceRequest(
         String repositoryId, String id, String parent, String branch, String preamble) {
-      this(repositoryId, id, parent, branch, preamble, false);
+      this(repositoryId, id, parent, branch, preamble, false, false);
     }
 
     public record Response(WorkspaceDto workspace) {}
@@ -142,7 +154,8 @@ public class WorkspaceController {
             request.parent(),
             request.branch(),
             request.preamble(),
-            request.adoptExisting());
+            request.adoptExisting(),
+            request.branchTree());
     return new CreateWorkspaceRequest.Response(workspaceMapper.toDto(wt));
   }
 
