@@ -592,6 +592,11 @@ components:
       - ACTIVE
       - INTEGRATED
       - ABANDONED
+  securitySchemes:
+    SecurityScheme:
+      type: openIdConnect
+      openIdConnectUrl: http://qits-platform-idp:8080/idp/.well-known/openid-configuration
+      description: Authentication
 paths:
   /workspaces/api/branches/cleanup:
     post:
@@ -626,9 +631,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Cleanup Branch
       tags:
       - Branch Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/branches/merge:
     post:
       parameters:
@@ -669,9 +681,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Merge Branch
       tags:
       - Branch Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/branches/release:
     post:
       parameters:
@@ -712,9 +731,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Release Branch
       tags:
       - Branch Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/history:
     get:
       parameters:
@@ -729,9 +755,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response15"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: List
       tags:
       - Workspace History Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/history/{id}:
     patch:
       parameters:
@@ -754,9 +787,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response14"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Update
       tags:
       - Workspace History Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
     get:
       parameters:
       - name: id
@@ -772,9 +812,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response16"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Get
       tags:
       - Workspace History Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/service-events:
     get:
       parameters:
@@ -820,9 +867,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response3"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: List
       tags:
       - Service Event Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces:
     get:
       parameters:
@@ -837,9 +891,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response7"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: List
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
     post:
       requestBody:
         content:
@@ -854,11 +915,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response12"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
         "400":
           description: Bad Request
       summary: Create
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}:
     get:
       parameters:
@@ -881,9 +949,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Get
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/active-process:
     get:
       parameters:
@@ -900,9 +975,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response13"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Active Process
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/bootstrap-runs:
     get:
       parameters:
@@ -925,9 +1007,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: List
       tags:
       - Workspace Bootstrap Run Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/delete-container:
     post:
       parameters:
@@ -944,9 +1033,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceDto"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Delete Container
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/discard:
     post:
       parameters:
@@ -969,11 +1065,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response11"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
         "400":
           description: Bad Request
       summary: Discard
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/ensure-container:
     post:
       parameters:
@@ -990,9 +1093,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response10"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Ensure Container
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/integrate:
     post:
       parameters:
@@ -1036,9 +1146,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Integrate
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/merge:
     post:
       parameters:
@@ -1074,11 +1191,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
         "400":
           description: Bad Request
       summary: Merge
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/prompt-attachments:
     get:
       parameters:
@@ -1101,9 +1225,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: List
       tags:
       - Workspace Prompt Attachment Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
     post:
       parameters:
       - name: id
@@ -1143,9 +1274,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Add
       tags:
       - Workspace Prompt Attachment Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/prompt-attachments/{attachmentId}:
     put:
       parameters:
@@ -1187,9 +1325,16 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "413":
           description: The image exceeds the configured limit.
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Update
       tags:
       - Workspace Prompt Attachment Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
     delete:
       parameters:
       - name: attachmentId
@@ -1212,9 +1357,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Delete
       tags:
       - Workspace Prompt Attachment Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/prompt-attachments/{attachmentId}/content:
     get:
       parameters:
@@ -1244,9 +1396,16 @@ paths:
             image/jpeg:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Content
       tags:
       - Workspace Prompt Attachment Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/prompt-draft:
     put:
       parameters:
@@ -1287,9 +1446,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Save
       tags:
       - Workspace Prompt Draft Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
     get:
       parameters:
       - name: id
@@ -1311,9 +1477,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Get
       tags:
       - Workspace Prompt Draft Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
     delete:
       parameters:
       - name: id
@@ -1331,9 +1504,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Delete
       tags:
       - Workspace Prompt Draft Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/recreate-container:
     post:
       parameters:
@@ -1350,9 +1530,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response5"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Recreate Container
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/release:
     post:
       parameters:
@@ -1395,9 +1582,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Release
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
   /workspaces/api/workspaces/{id}/stop-container:
     post:
       parameters:
@@ -1414,9 +1608,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceDto"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       summary: Stop Container
       tags:
       - Workspace Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.810.192141
+  version: 2026.817.193638
