@@ -630,9 +630,15 @@ public class WorkspaceContainerFactory {
         .filter(url -> !url.isBlank())
         .ifPresent(url -> container.env("QITS_MAVEN_REPOSITORY_URL", url));
     npmProxyUrl.filter(url -> !url.isBlank()).ifPresent(url -> container.env("npm_config_registry", url));
+    // NOT `npm_config_@qits:registry`, which is npm's own spelling and what this line used to be:
+    // qits-containers refuses that name outright (`Invalid environment key`) because its env keys
+    // are POSIX-shaped, and it is right to — `@` and `:` are not an environment variable's
+    // business. The container spec therefore carries the ADDRESS under a POSIX name and the
+    // workspace image's npm shim spells the scope, which is also the only place that outranks the
+    // .npmrc every SPA commits. Renaming this breaks that shim silently: keep the two matched.
     npmRegistryUrl
         .filter(url -> !url.isBlank())
-        .ifPresent(url -> container.env("npm_config_@qits:registry", url));
+        .ifPresent(url -> container.env("QITS_WORKSPACE_NPM_REGISTRY_URL", url));
     // The per-workspace /workspace volume: the workspace's checkout, persisted across container
     // recreation instead of dying with the writable layer. The first mount populates the empty
     // volume from the image's world-writable /workspace (docker copies the image dir's contents AND
