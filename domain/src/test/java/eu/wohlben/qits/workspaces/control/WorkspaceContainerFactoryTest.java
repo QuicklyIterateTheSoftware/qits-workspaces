@@ -46,6 +46,11 @@ class WorkspaceContainerFactoryTest {
     f.claudeMount = "/claude-home";
     f.mavenVolume = "qits_shared_m2";
     f.pnpmVolume = "qits_shared_pnpm";
+    // The shipped posture is the three registry keys BLANK — no default address exists to ship —
+    // so the default factory here carries none, and the test that wants them sets them itself.
+    f.mavenRepositoryUrl = Optional.empty();
+    f.npmRegistryUrl = Optional.empty();
+    f.npmProxyUrl = Optional.empty();
     f.timezone = Optional.empty();
     // Mirrors the shipped default (service/cli application.properties): a hard memory cap on every
     // container, pids/cpus off.
@@ -347,4 +352,40 @@ class WorkspaceContainerFactoryTest {
     assertTrue(container.labels().containsKey(key), () -> "no " + key + " in " + container.labels());
     assertEquals(value, container.labels().get(key), key);
   }
+
+  @Test
+  void tellsTheContainerWhereThePlatformRegistriesAreWhenItHasBeenTold() {
+    WorkspaceContainerFactory f = factory();
+    f.mavenRepositoryUrl = Optional.of("http://dev-qits-artifacts:8080/artifacts/maven/maven");
+    f.npmProxyUrl = Optional.of("http://qits-platform-mirror:8080/artifacts/npm/npmjs/");
+    f.npmRegistryUrl = Optional.of("http://dev-qits-artifacts:8080/artifacts/npm/npm/");
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    // The names are the CONTRACT and not an implementation detail, which is why they are asserted
+    // literally: the two npm keys are npm's own environment form (npm_config_*), which is what
+    // outranks the .npmrc every SPA commits, and the Maven key is what the image's profile snippet
+    // reads before it adds its -s. Rename any of the three here and a workspace goes back to
+    // resolving the public internet, silently, with a green build.
+    assertEquals(
+        "http://dev-qits-artifacts:8080/artifacts/maven/maven", c.env().get("QITS_MAVEN_REPOSITORY_URL"));
+    assertEquals(
+        "http://qits-platform-mirror:8080/artifacts/npm/npmjs/", c.env().get("npm_config_registry"));
+    assertEquals(
+        "http://dev-qits-artifacts:8080/artifacts/npm/npm/", c.env().get("npm_config_@qits:registry"));
+  }
+
+  @Test
+  void tellsTheContainerNothingAboutRegistriesItWasNotToldAbout() {
+    // Absent is a supported configuration, not a misconfiguration: a deployment that wires none of
+    // the three gets a container identical to the one it got before these keys existed. Asserted
+    // because the alternative — injecting a derived or defaulted address — would point builds at a
+    // host that does not exist on that deployment, which is worse than leaving them as they were.
+    WorkspaceContainer c = factory().forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    assertNull(c.env().get("QITS_MAVEN_REPOSITORY_URL"));
+    assertNull(c.env().get("npm_config_registry"));
+    assertNull(c.env().get("npm_config_@qits:registry"));
+  }
+
 }

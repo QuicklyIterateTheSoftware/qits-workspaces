@@ -57,6 +57,12 @@ public final class TestWorkspaceContainerFactory {
     f.claudeMount = "/claude-home";
     f.mavenVolume = "qits_shared_m2";
     f.pnpmVolume = "qits_shared_pnpm";
+    // The registry addresses a deployment tells the factory. Empty here, which is the shipped
+    // posture — there is no default address to ship — and enough to keep every container this
+    // builder makes identical to one built before these keys existed.
+    f.mavenRepositoryUrl = Optional.empty();
+    f.npmRegistryUrl = Optional.empty();
+    f.npmProxyUrl = Optional.empty();
     f.workspaceVolumePrefix = "qits_workspace_";
     f.persistWorkspace = persistWorkspace;
     f.timezone = Optional.of("UTC");

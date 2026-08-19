@@ -80,6 +80,34 @@ public class WorkspaceContainerFactory {
   String pnpmVolume;
 
   /**
+   * The platform's own package registries, as a workspace container must dial them — told outright,
+   * never derived, the same rule {@code qits.workspace.container-git-url} follows and for the same
+   * reason. Every qits pom and every SPA lockfile names the DEPLOYMENT HOST's published address
+   * ({@code registry.dev.localhost:8080}, {@code localhost:8081}); inside a container on qits-net
+   * that resolves to loopback, where nothing listens, so a build that is told nothing fails with
+   * "Blocked mirror" (Maven refuses plain http) or installs the public internet's packages instead
+   * of the platform's. CI has always been told these three addresses — {@code
+   * QITS_ARTIFACTS_MAVEN_REGISTRY_URL} and friends — and a workspace was not; that asymmetry is
+   * what this closes.
+   *
+   * <p><b>Absent is a supported configuration.</b> Unset, nothing is injected and the container
+   * behaves exactly as it did before: the image's profile snippet adds no {@code -s} without a
+   * Maven address, and npm keeps whatever the repository's own {@code .npmrc} says. A wrong guess
+   * would be worse than silence — there is no address to derive, because the artifacts alias
+   * carries the environment name and the npm proxy is a platform service that does not.
+   */
+  @ConfigProperty(name = "qits.workspace.maven-repository-url")
+  Optional<String> mavenRepositoryUrl;
+
+  /** The hosted {@code @qits} npm scope — qits-artifacts. See {@link #mavenRepositoryUrl}. */
+  @ConfigProperty(name = "qits.workspace.npm-registry-url")
+  Optional<String> npmRegistryUrl;
+
+  /** The npmjs pull-through cache — qits-platform-mirror. See {@link #mavenRepositoryUrl}. */
+  @ConfigProperty(name = "qits.workspace.npm-proxy-url")
+  Optional<String> npmProxyUrl;
+
+  /**
    * Name prefix for the per-workspace {@code /workspace} volume — {@code prefix + workspaceId} (the
    * stable {@code workspace_id}, safe as a docker volume name and 1:1 with the branch).
    * Branch/repo/ project ride as labels, not the name, so a rename never strands the volume. See
@@ -593,6 +621,18 @@ public class WorkspaceContainerFactory {
       container.volume(pnpmVolume, PNPM_MOUNT);
       container.env("npm_config_store_dir", PNPM_MOUNT + "/store");
     }
+    // The registries those caches fill FROM. Environment, not a file: npm ranks a project
+    // .npmrc above ~/.npmrc, so every SPA's committed .npmrc — which names the deployment host's
+    // port — would outrank anything written into HOME, and npm_config_* outranks both. Maven is
+    // told the address only; the -s that makes it usable lives in the image, because the settings
+    // file is the image's to own and the address is the deployment's.
+    mavenRepositoryUrl
+        .filter(url -> !url.isBlank())
+        .ifPresent(url -> container.env("QITS_MAVEN_REPOSITORY_URL", url));
+    npmProxyUrl.filter(url -> !url.isBlank()).ifPresent(url -> container.env("npm_config_registry", url));
+    npmRegistryUrl
+        .filter(url -> !url.isBlank())
+        .ifPresent(url -> container.env("npm_config_@qits:registry", url));
     // The per-workspace /workspace volume: the workspace's checkout, persisted across container
     // recreation instead of dying with the writable layer. The first mount populates the empty
     // volume from the image's world-writable /workspace (docker copies the image dir's contents AND
