@@ -372,7 +372,27 @@ class WorkspaceContainerFactoryTest {
     assertEquals(
         "http://qits-platform-mirror:8080/artifacts/npm/npmjs/", c.env().get("npm_config_registry"));
     assertEquals(
-        "http://dev-qits-artifacts:8080/artifacts/npm/npm/", c.env().get("npm_config_@qits:registry"));
+        "http://dev-qits-artifacts:8080/artifacts/npm/npm/",
+        c.env().get("QITS_WORKSPACE_NPM_REGISTRY_URL"));
+    // The name qits-containers would REFUSE. Asserted absent because the refusal is a 400 that
+    // fails the whole container launch, not a dropped variable — a workspace simply never starts.
+    assertNull(c.env().get("npm_config_@qits:registry"));
+  }
+
+  @Test
+  void neverSpellsAnEnvironmentKeyTheContainerServiceWouldRefuse() {
+    // Every key on a container spec must be POSIX-shaped: qits-containers validates them and
+    // answers 400 INVALID, which surfaces as a workspace stuck in FAILED with no container at all.
+    WorkspaceContainerFactory f = factory();
+    f.mavenRepositoryUrl = Optional.of("http://a/maven");
+    f.npmProxyUrl = Optional.of("http://b/npmjs/");
+    f.npmRegistryUrl = Optional.of("http://c/npm/");
+
+    for (String key : f.forWorkspace("repo12345678abc", "work", 1L, "main", null).env().keySet()) {
+      assertTrue(
+          key.matches("[A-Za-z_][A-Za-z0-9_]*"),
+          "environment key is not POSIX-shaped and would be refused: " + key);
+    }
   }
 
   @Test
