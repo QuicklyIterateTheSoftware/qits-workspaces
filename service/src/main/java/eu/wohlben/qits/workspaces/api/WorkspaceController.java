@@ -10,6 +10,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -422,12 +423,22 @@ public class WorkspaceController {
     public record Response(boolean success) {}
   }
 
+  /**
+   * {@code ?ignore-changes=true} overrides the clean-working-tree guard: the discard proceeds even
+   * while the daemon reports uncommitted changes, which are then lost with the container and the
+   * branch. It rides the URL and not the body <b>on purpose</b>: the ordinary discard request must
+   * be incapable of carrying the override by accident, so a client first discards plainly, is
+   * refused by the guard, and only a person who confirmed that refusal re-sends with the parameter
+   * spelled out. Absent means guarded, always.
+   */
   @POST
   @Path("/{id}/discard")
   public DiscardWorkspaceRequest.Response discard(
       @PathParam("id") Long id,
+      @QueryParam("ignore-changes") @DefaultValue("false") boolean ignoreChanges,
       @Valid DiscardWorkspaceRequest request) {
-    workspaceService.discardWorkspace(id, request == null ? null : request.result());
+    workspaceService.discardWorkspace(
+        id, request == null ? null : request.result(), ignoreChanges);
     return new DiscardWorkspaceRequest.Response(true);
   }
 

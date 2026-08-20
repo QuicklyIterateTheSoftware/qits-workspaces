@@ -546,6 +546,30 @@ public class WorkspaceContainerLifecycleServiceTest {
         "the refused abandon left the workspace in place");
   }
 
+  /**
+   * The override behind the UI's second confirmation: the same dirty workspace the guard just
+   * refused is discarded when the caller spells {@code force} — the person has read what will be
+   * thrown away. Everything else about the discard is the ordinary one.
+   */
+  @Test
+  public void abandonWithForceDiscardsADirtyWorkspace() throws Exception {
+    String repoId = clonedRepo();
+    repositories.setMainBranch(repoId, "feature");
+    workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "feat"));
+    makeDirty(containers.containerName("feat", repoId));
+    gitStatus.report(workspaceIds.of(repoId, "feat"), false);
+    Long id = workspaceIds.of(repoId, "feat");
+
+    assertThrows(BadRequestException.class, () -> workspaceService.discardWorkspace(id));
+
+    workspaceService.discardWorkspace(id, "abandoning half-done work on purpose", true);
+    assertFalse(
+        workspaceService.listWorkspaces(repoId).stream()
+            .anyMatch(w -> "feat".equals(w.workspaceId())),
+        "the forced abandon resolved the workspace despite the dirty tree");
+  }
+
   @Test
   public void abandonSucceedsOnACleanWorkspace() throws Exception {
     String repoId = clonedRepo();
