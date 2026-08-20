@@ -36,6 +36,7 @@ public class BranchTreeWorkspaceTest {
   public void branchesEveryRegisteredSubmoduleAndPublishesTheGuide() throws Exception {
     String library = TestOrigin.create(dataDir);
     String wrapper = wrapperOver(library, "ghost");
+    TestOrigin.recordPushOptions(dataDir, library);
 
     Workspace workspace =
         workspaceService.createWorkspace(
@@ -51,6 +52,11 @@ public class BranchTreeWorkspaceTest {
         TestOrigin.fileAtBranch(dataDir, wrapper, "adhoc-changes", "WORKSPACE.md")
             .contains("aggregate workspace"),
         "the hand-off document rides the wrapper's branch");
+    assertTrue(
+        TestOrigin.pushOptionsFor(dataDir, library, "refs/heads/adhoc-changes")
+            .contains("qits.no-ci"),
+        "a branch create points at a commit the host already built — the push is quiet, or an"
+            + " aggregate tree queues one redundant run per registered repository");
   }
 
   /** An unregistered submodule is skipped rather than guessed at: nothing names it here. */

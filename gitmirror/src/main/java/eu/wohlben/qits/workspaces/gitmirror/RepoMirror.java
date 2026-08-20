@@ -367,10 +367,25 @@ public final class RepoMirror {
    * <p>Pushed by ref name rather than by sha: the mirror was just refreshed, so {@code
    * refs/heads/<from>} is the tip the host has, and naming it keeps the create honest if the two
    * ever disagree — the push is refused rather than resurrecting an old commit.
+   *
+   * <p><b>The push is quiet ({@code -o qits.no-ci})</b>, which is the filesystem era's behaviour
+   * restored deliberately: a create points at a commit the host already holds, so there is nothing
+   * new to build, and building it anyway is measurable waste — an aggregate branch tree creates a
+   * branch in every registered repository at once, which queued one redundant run per repository on
+   * a single-build queue. The option suppresses no event; the git host still announces the ref with
+   * {@code suppressCi} as a fact, exactly as the release flow's trunk push does.
    */
   public PushOutcome createBranch(String branch, String from) {
-    return push(PushSpec.of(PushSpec.Ref.branch("refs/heads/" + from, branch)));
+    return push(
+        PushSpec.of(PushSpec.Ref.branch("refs/heads/" + from, branch)).withOption(NO_CI_OPTION));
   }
+
+  /**
+   * The push option the git host reads as "do not build this push". A literal here for the same
+   * reason the causation header name is one: this module has no Quarkus and no dependency on the
+   * control layer, and the string is a wire contract with qits-githost either way.
+   */
+  static final String NO_CI_OPTION = "qits.no-ci";
 
   /** Delete a branch on the git host. */
   public PushOutcome deleteBranch(String branch) {
