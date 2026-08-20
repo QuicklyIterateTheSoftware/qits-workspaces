@@ -984,6 +984,51 @@ implementation of `CredentialCommissioner`, or one wired against no issuer. The 
 `quarkus.oidc-client.client-enabled` — the extension's own, read a third time here for the reason
 `ContainersClientProducer` reads it a second time. There is no key of ours, and there must not be.
 
+## Admin workspaces: the one privilege a workspace can be granted
+
+An **admin workspace** is an ordinary workspace whose container holds the **host's docker socket**,
+so that platform administration can be done from inside a workspace. It is asked for at creation —
+`POST /workspaces/api/workspaces` with `admin: true`, which the workspaces SPA offers as a checkbox
+on the ad-hoc create form — and it is the only thing about a workspace container that is not the
+same for every workspace.
+
+**A container holding that socket is root-equivalent on the host.** Everything below follows from
+that one sentence, and each piece is a place the property could be lost:
+
+- **The posture is a column on the row** (`Workspace.admin`, `V4`), not a flag on a launch. The
+  orchestrator has no start verb — a stopped container is started by presenting its spec *again*
+  under `Recreate.ifChanged` — so a posture that arrived as an argument on the provision path and
+  was missing on the start path would make every resume a spec change, and a spec change **replaces
+  the container**. That is the same reasoning the commissioned credential's columns carry, and it is
+  why `WorkspacePostures` is a lookup by row id rather than a parameter threaded through
+  `ContainerRuntime`.
+- **It is decided once, in the request that created the workspace.** There is no promote verb and
+  there must not be one: the point of the posture is that the socket belongs to the few workspaces
+  somebody deliberately created for it, and a workspace that has been running for a week cannot
+  acquire it. `recordWorkspace` is the only writer, private, with both its callers in
+  `WorkspaceService`.
+- **Every absence falls to false.** No port wired, no row, a read that threw — all of them mean *no
+  socket*. That asymmetry with the credential lookup beside it is deliberate and is asserted:
+  a credential lookup that stumbles costs a container something it was meant to have, while a
+  posture lookup that stumbles must never **give** it something it was not.
+- **Nothing else about the container changes.** Same image, same user, same limits, same mounts,
+  same environment — `WorkspaceContainersTest` makes that claim as the admin spec with the socket
+  taken back out, which fails if any other field moved. A posture that quietly relaxed the sandbox
+  as well would be a privilege nobody asked for riding along with the one somebody did.
+- **The socket is usable despite the host uid because qits-containers joins the socket's own
+  group** beside the bind (`--group-add`, read off the socket by the orchestrator — its README's
+  "The docker socket" section). A workspace-side group would be a privilege assembled here rather
+  than granted there, and this service does not get to name a group. The client that talks to it is
+  the workspace image's business: `images/qits-oci-workspace` carries the docker CLI, because a
+  socket with nothing to speak to it is a bind and not a capability.
+- **The read model says so.** `WorkspaceDto.admin` rides the listing and the create response,
+  because a client that cannot see which workspaces are privileged cannot say so, and "which ones
+  hold the socket" is the question the whole posture exists to keep answerable.
+
+Who may ask is `WorkspaceController`'s standing `@RolesAllowed("qits:admin")`: creating **any**
+workspace already requires the platform admin role, and the socket is granted per workspace rather
+than per caller. A second role invented here would be a vocabulary qits-idp does not issue.
+
 ## Tests
 
 - **App-level config lives in `service/src/main/resources/application.properties`, and the tests

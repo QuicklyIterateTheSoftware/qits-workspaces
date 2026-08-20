@@ -154,6 +154,25 @@ public class Workspace extends PanacheEntityBase implements CausedRow {
   @Column(name = "commissioned_client_secret", columnDefinition = "text")
   public String commissionedClientSecret;
 
+  /**
+   * Whether this workspace runs in <b>admin mode</b>: its container is started with the host's
+   * docker socket bound into it, so platform administration can be done from inside a workspace.
+   *
+   * <p><b>A container holding that socket is root-equivalent on the host</b>, which is why this is
+   * a column on the row rather than a flag on a launch. It has to be reproducible at every ensure —
+   * the orchestrator has no start verb, so a stopped container is started by presenting its spec
+   * again and a spec that differs REPLACES the container ({@link
+   * eu.wohlben.qits.workspaces.control.WorkspaceCredentials} carries the same reasoning for the
+   * credential pair) — and it makes the posture a property of the workspace, decided once, in the
+   * request that created it, where a reviewer can see it.
+   *
+   * <p><b>False for everything that did not ask.</b> There is no verb that promotes an existing
+   * workspace: the whole point is that the socket is granted to the few workspaces somebody
+   * deliberately asked for it in, and never acquired by one that has been running for a week.
+   */
+  @Column(name = "admin", nullable = false)
+  public boolean admin = false;
+
   /** When the workspace was resolved (integrated/abandoned); null while ACTIVE. */
   @Column(name = "resolved_at")
   public Instant resolvedAt;

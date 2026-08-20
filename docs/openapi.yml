@@ -101,6 +101,8 @@ components:
           type: boolean
         branchTree:
           type: boolean
+        admin:
+          type: boolean
     DiscardWorkspaceRequest:
       type: object
       properties:
@@ -475,6 +477,8 @@ components:
         daemonBuildTime:
           $ref: "#/components/schemas/Instant"
         daemonOutdated:
+          type: boolean
+        admin:
           type: boolean
     WorkspaceEventDto:
       type: object
@@ -1625,4 +1629,4 @@ paths:
         - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.820.73213
+  version: 2026.820.140021

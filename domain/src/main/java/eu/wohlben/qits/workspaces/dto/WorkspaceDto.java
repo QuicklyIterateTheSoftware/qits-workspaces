@@ -64,6 +64,12 @@ import java.time.Instant;
  *     (no live daemon, no reported build time on either side) — no warning; only ever {@code true}
  *     or {@code null} in practice, since the newest and any tied daemons are simply not outdated
  *     (docs/epics/qits-workspace-registry/)
+ * @param admin whether this workspace runs in admin mode — its container holds the host's docker
+ *     socket, which makes it root-equivalent on the host. Decided in the request that created the
+ *     workspace and never afterwards, so it is a fact about the workspace rather than about its
+ *     current container. It is on the read model because a client that cannot see which workspaces
+ *     are privileged cannot say so, and "which ones have the socket" is the question this whole
+ *     posture exists to keep answerable
  */
 public record WorkspaceDto(
     Long id,
@@ -86,4 +92,5 @@ public record WorkspaceDto(
     Instant daemonConnectedAt,
     String daemonVersion,
     Instant daemonBuildTime,
-    Boolean daemonOutdated) {}
+    Boolean daemonOutdated,
+    boolean admin) {}
