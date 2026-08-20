@@ -1052,6 +1052,11 @@ paths:
         schema:
           type: integer
           format: int64
+      - name: ignore-changes
+        in: query
+        schema:
+          type: boolean
+          default: false
       requestBody:
         content:
           application/json:
@@ -1620,4 +1625,4 @@ paths:
         - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.817.193638
+  version: 2026.820.73213

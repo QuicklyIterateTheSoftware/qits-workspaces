@@ -2270,13 +2270,26 @@ public class WorkspaceService {
     discardWorkspace(id, null);
   }
 
-  @Transactional
   public void discardWorkspace(Long id, String result) {
+    discardWorkspace(id, result, false);
+  }
+
+  /**
+   * Abandon the workspace. The clean-tree guard is the default and stays the API's posture; {@code
+   * force} is the person-in-front-of-a-dialog override — the discard UI shows what will be thrown
+   * away and asks twice, and only that confirmed press sends {@code true}. Discard is already
+   * deliberately lossy (container, volume and branch all go); what force skips is only the refusal
+   * to lose work the daemon still reports as uncommitted.
+   */
+  @Transactional
+  public void discardWorkspace(Long id, String result, boolean force) {
     Workspace workspace = requireActive(id);
     String repoId = workspace.repositoryId;
     repositories.require(repoId);
 
-    requireCleanWorkingTree(repoId, workspace, "abandon");
+    if (!force) {
+      requireCleanWorkingTree(repoId, workspace, "abandon");
+    }
     doDiscard(repoId, workspace, WorkspaceStatus.ABANDONED, result);
   }
 

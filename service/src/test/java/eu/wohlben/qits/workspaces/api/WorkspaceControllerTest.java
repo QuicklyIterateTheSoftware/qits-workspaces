@@ -78,12 +78,18 @@ public class WorkspaceControllerTest {
         .statusCode(Response.Status.OK.getStatusCode())
         .body("hasConflicts", equalTo(false));
 
-    // discard
+    // discard — carrying ?ignore-changes=true, the UI's confirmed override. Here the tree is
+    // clean, so this proves only the wiring: the parameter is accepted and the discard proceeds.
+    // The semantics (a dirty tree refused plainly, discarded with force) are the domain suite's
+    // abandonWithForceDiscardsADirtyWorkspace.
     given()
         .contentType(ContentType.JSON)
         .body(new WorkspaceController.DiscardWorkspaceRequest(null))
         .when()
-        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "step-01") + "/discard")
+        .post(
+            "/workspaces/api/workspaces/"
+                + workspaceIds.of(repoId, "step-01")
+                + "/discard?ignore-changes=true")
         .then()
         .statusCode(Response.Status.OK.getStatusCode())
         .body("success", equalTo(true));
