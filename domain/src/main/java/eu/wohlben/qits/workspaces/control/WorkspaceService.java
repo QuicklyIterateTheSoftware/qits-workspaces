@@ -1191,6 +1191,12 @@ public class WorkspaceService {
     mirror.refreshNow();
     try (MirrorWorktree worktree = mirror.worktree("workspace-guide", "refs/heads/" + branch)) {
       Path guide = worktree.path().resolve("WORKSPACE.md");
+      // A parent that already carries the guide verbatim leaves nothing to commit — and a commit
+      // with a clean index fails, which used to fail the whole creation once a released guide had
+      // reached the fork point.
+      if (Files.exists(guide) && WORKSPACE_GUIDE.equals(Files.readString(guide))) {
+        return;
+      }
       Files.writeString(guide, WORKSPACE_GUIDE);
       worktree.stage(List.of(Path.of("WORKSPACE.md")));
       worktree.commit(
@@ -1208,7 +1214,7 @@ public class WorkspaceService {
     }
   }
 
-  private static final String WORKSPACE_GUIDE = """
+  static final String WORKSPACE_GUIDE = """
       # Workspace development flow
 
       This checkout is an aggregate workspace. The wrapper and every checked-out submodule use the same workspace branch. Commit and push changes in the repository where they belong; the workspace credential has normal Git push access so each repository can move independently.

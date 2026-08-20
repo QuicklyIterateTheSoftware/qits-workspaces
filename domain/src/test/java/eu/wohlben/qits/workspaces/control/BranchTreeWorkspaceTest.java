@@ -123,6 +123,36 @@ public class BranchTreeWorkspaceTest {
     assertTrue(TestOrigin.hasBranch(dataDir, library, "adhoc-changes"));
   }
 
+  /**
+   * The fork point may already carry the guide verbatim — a previous workspace released it into the
+   * parent branch. A clean index is then nothing to publish, not a failure; before this case the
+   * whole creation died on {@code git commit} refusing an empty commit.
+   */
+  @Test
+  public void createsTheTreeWhenTheParentAlreadyCarriesTheGuide() throws Exception {
+    String library = TestOrigin.create(dataDir);
+    String wrapper = wrapperOver(library, "ghost");
+    TestOrigin.commitOnBranch(
+        dataDir,
+        wrapper,
+        "master",
+        "WORKSPACE.md",
+        WorkspaceService.WORKSPACE_GUIDE,
+        "docs: add workspace development flow");
+
+    Workspace workspace =
+        workspaceService.createWorkspace(
+            wrapper, "adhoc-changes", null, "adhoc-changes", null, false, true);
+
+    assertEquals(WorkspaceStatus.ACTIVE, workspace.status);
+    assertTrue(TestOrigin.hasBranch(dataDir, wrapper, "adhoc-changes"));
+    assertTrue(TestOrigin.hasBranch(dataDir, library, "adhoc-changes"));
+    assertTrue(
+        TestOrigin.fileAtBranch(dataDir, wrapper, "adhoc-changes", "WORKSPACE.md")
+            .contains("aggregate workspace"),
+        "the guide the parent already carried still rides the workspace branch");
+  }
+
   /** Adoption is a single-repository idea: there is no existing tree to adopt. */
   @Test
   public void refusesToAdoptAnExistingBranch() throws Exception {
