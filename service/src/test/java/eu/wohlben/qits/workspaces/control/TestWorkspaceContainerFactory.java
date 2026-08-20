@@ -91,6 +91,20 @@ public final class TestWorkspaceContainerFactory {
     f.repositories = StubInstance.empty();
     // No issuer wired — the shipped posture, so no container carries a commissioned pair.
     f.credentials = StubInstance.empty();
+    // No posture lookup — an ordinary workspace, which is what every workspace is unless somebody
+    // asked otherwise at creation. `admin()` below is the other one.
+    f.postures = StubInstance.empty();
+    return f;
+  }
+
+  /**
+   * A factory whose workspaces are the ADMIN kind — the posture that binds the host's docker socket
+   * into the container. Its own builder rather than a flag on {@link #persistent()}, because the
+   * adapter's test asserts the whole spec twice and the difference between the two is the claim.
+   */
+  public static WorkspaceContainerFactory admin() {
+    WorkspaceContainerFactory f = build(true);
+    f.postures = StubInstance.of(rowId -> true);
     return f;
   }
 

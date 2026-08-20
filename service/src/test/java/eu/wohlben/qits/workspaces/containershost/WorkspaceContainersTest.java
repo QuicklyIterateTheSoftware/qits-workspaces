@@ -114,7 +114,8 @@ class WorkspaceContainersTest {
     // The pin is a version, so what is local under that name IS the release — the inspect-then-pull
     // this service used to do itself, enforced one hop out.
     assertEquals(PullPolicy.MISSING, spec.pullPolicy());
-    // A workspace container never gets the host's docker socket, and nothing can ask for one.
+    // An ordinary workspace container never gets the host's docker socket — only a workspace whose
+    // row says admin does, and this one's does not.
     assertFalse(spec.hostDockerSocket());
     assertNull(spec.aliases());
 
@@ -147,6 +148,43 @@ class WorkspaceContainersTest {
     // The release train moves the image pin, so a workspace whose spec no longer matches what is
     // running must be replaced rather than silently left on the old image with a 200 saying so.
     assertEquals(Recreate.ifChanged, request.recreate());
+  }
+
+  @Test
+  void theAdminPostureAddsTheSocketAndChangesNothingElse() {
+    Spec ordinary = adapter().ensureRequest(REPO, "work", 1L, "main", "0parent").spec();
+    Spec admin =
+        adapter(TestWorkspaceContainerFactory.admin())
+            .ensureRequest(REPO, "work", 1L, "main", "0parent")
+            .spec();
+
+    assertFalse(ordinary.hostDockerSocket());
+    assertTrue(admin.hostDockerSocket());
+
+    // …and that is the WHOLE difference. An admin workspace is an ordinary workspace holding the
+    // host's docker socket: same image, same user, same limits, same mounts, same environment. A
+    // posture that quietly relaxed something else would be a privilege nobody asked for riding
+    // along with the one somebody did — so the claim is made as the spec with the socket taken back
+    // out, which fails on any other field that moved.
+    Spec adminWithoutTheSocket =
+        new Spec(
+            admin.image(),
+            admin.entrypoint(),
+            admin.args(),
+            admin.env(),
+            admin.extraLabels(),
+            admin.network(),
+            admin.aliases(),
+            admin.addHosts(),
+            admin.volumeMounts(),
+            admin.sharedMounts(),
+            false,
+            admin.security(),
+            admin.pullPolicy(),
+            admin.explicitName(),
+            admin.user(),
+            admin.init());
+    assertEquals(ordinary, adminWithoutTheSocket);
   }
 
   @Test

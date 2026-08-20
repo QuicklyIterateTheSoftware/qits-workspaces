@@ -1,0 +1,19 @@
+-- Whether this workspace was created in ADMIN MODE — the posture that mounts the host's docker
+-- socket into its container, so that platform administration can be done from inside a workspace.
+--
+-- It is a column and not a decision made at launch, for the reason the credential columns above are
+-- columns: the orchestrator has no start verb, so a stopped container is started by presenting its
+-- spec AGAIN, and a spec that differs from the running container's is a spec change that REPLACES
+-- the container. The posture therefore has to be reproducible at every ensure, which makes the row
+-- its carrier — and it makes admin a property of the WORKSPACE rather than of one launch of it.
+--
+-- NOT NULL DEFAULT false, and that is the whole security stance in one line: every row that exists
+-- today, and every row written by a caller that says nothing, is an ordinary workspace with no
+-- socket. Admin is only ever what somebody asked for in the request that created the workspace, and
+-- there is no verb that promotes an existing one — a workspace's posture is decided once, where a
+-- reviewer of the creating request can see it.
+--
+-- boolean rather than a mode enum: today there is exactly one thing admin means, and inventing a
+-- vocabulary for postures nobody has asked for would be a schema written before the code. A second
+-- privilege is a second column, or a widening this file's successor can argue for.
+alter table workspace add column admin boolean not null default false;

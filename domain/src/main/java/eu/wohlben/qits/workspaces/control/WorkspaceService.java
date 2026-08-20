@@ -540,7 +540,8 @@ public class WorkspaceService {
                   info != null ? info.connectedAt() : null,
                   info != null ? info.version() : null,
                   info != null ? info.buildTime() : null,
-                  daemonOutdated(info, latestDaemon));
+                  daemonOutdated(info, latestDaemon),
+                  wt.admin);
             })
         .toList();
   }
@@ -897,6 +898,7 @@ public class WorkspaceService {
     return createWorkspace(repoId, workspaceId, parent, branch, preamble, false);
   }
 
+
   /**
    * Creates a workspace for a branch. Normally {@code branch} is a <em>new</em> branch this
    * workspace owns, forked off {@code parent} — a fresh ref is created in the origin. When {@code
@@ -904,6 +906,12 @@ public class WorkspaceService {
    * <em>adopts</em> that existing branch in place: no ref is created, the row is simply recorded
    * over it (the branch-list "Create workspace" button on a branch that has no workspace yet). The
    * container is provisioned lazily from the branch ref on first use either way.
+   *
+   * <p>An ordinary workspace, which is what every caller that says nothing about a posture gets:
+   * {@code admin} is false, so its container is launched with no docker socket. The admin posture
+   * arrives through the seven-argument form below and, from there, through {@link #recordWorkspace}
+   * — there is deliberately no overload of this shape that takes it, because two adjacent booleans
+   * a caller passes positionally is how {@code branchTree} would one day be read as {@code admin}.
    */
   @Transactional
   public Workspace createWorkspace(
@@ -913,6 +921,25 @@ public class WorkspaceService {
       String branch,
       String preamble,
       boolean adoptExisting) {
+    return recordWorkspace(repoId, workspaceId, parent, branch, preamble, adoptExisting, false);
+  }
+
+  /**
+   * The row-writing core of every create: the guards, the branch push and the row itself, with the
+   * posture the caller asked for.
+   *
+   * <p>Private, and it is the only writer of {@code Workspace.admin}. A public overload carrying the
+   * flag would be one whose call sites are read positionally; keeping it here means the two callers
+   * that can set it are both in this file and both visible in one screen.
+   */
+  private Workspace recordWorkspace(
+      String repoId,
+      String workspaceId,
+      String parent,
+      String branch,
+      String preamble,
+      boolean adoptExisting,
+      boolean admin) {
     var repo = repositories.require(repoId);
 
     // `workspaceId` becomes a path segment under the repo's workspaces dir, so it must be a strict
@@ -974,6 +1001,10 @@ public class WorkspaceService {
     workspace.status = WorkspaceStatus.ACTIVE;
     workspace.runtimeStatus = WorkspaceRuntimeStatus.STOPPED;
     workspace.preamble = preamble;
+    // The posture, written once and never again: no verb promotes a workspace to admin later, so
+    // the socket a container gets is the one the request that created it asked for. See
+    // Workspace.admin.
+    workspace.admin = admin;
     workspaceRepository.persist(workspace);
     recordEvent(workspace, WorkspaceEventType.CREATED, newBranch, parentBranch, null);
 
@@ -1004,12 +1035,42 @@ public class WorkspaceService {
       String preamble,
       boolean adoptExisting,
       boolean branchTree) {
+    return createWorkspace(
+        repoId, workspaceId, parent, branch, preamble, adoptExisting, branchTree, false);
+  }
+
+  /**
+   * The same create, told the <b>posture</b> the workspace is to run in.
+   *
+   * <p>{@code admin} is the request to bind the host's docker socket into this workspace's
+   * container, so that platform administration can be done from inside it — the one privilege a
+   * workspace can be granted, and a container holding it is root-equivalent on the host. It is a
+   * property of the workspace from here on: it is written to the row (the only writer is {@link
+   * #recordWorkspace}), read back at every ensure by {@link WorkspacePostures}, and no verb
+   * promotes a workspace to it afterwards. Everything else about an admin workspace — its image,
+   * its user, its limits, its mounts — is what every other workspace gets.
+   *
+   * <p>The eighth argument rather than a widened seventh: the seven-argument form above is what
+   * every existing caller means, and it keeps meaning it. Who is <em>allowed</em> to ask for admin
+   * is the API boundary's question, not this method's — {@code WorkspaceController} answers it.
+   */
+  public Workspace createWorkspace(
+      String repoId,
+      String workspaceId,
+      String parent,
+      String branch,
+      String preamble,
+      boolean adoptExisting,
+      boolean branchTree,
+      boolean admin) {
     // A call on `this` never reaches the interceptor, so each delegation below opens its own
     // transaction explicitly rather than relying on the annotation of the method it calls.
     if (!branchTree) {
       return QuarkusTransaction.requiringNew()
           .call(
-              () -> createWorkspace(repoId, workspaceId, parent, branch, preamble, adoptExisting));
+              () ->
+                  recordWorkspace(
+                      repoId, workspaceId, parent, branch, preamble, adoptExisting, admin));
     }
     if (adoptExisting) {
       throw new BadRequestException("A branch-tree workspace cannot adopt an existing branch");
@@ -1040,7 +1101,10 @@ public class WorkspaceService {
             });
     createBranchTree(root, newBranch, parentBranch);
     return QuarkusTransaction.requiringNew()
-        .call(() -> createWorkspace(repoId, workspaceId, parentBranch, newBranch, preamble, true));
+        .call(
+            () ->
+                recordWorkspace(
+                    repoId, workspaceId, parentBranch, newBranch, preamble, true, admin));
   }
 
   /**

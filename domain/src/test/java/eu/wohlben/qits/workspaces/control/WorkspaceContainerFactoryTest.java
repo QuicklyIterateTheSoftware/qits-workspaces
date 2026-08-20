@@ -86,6 +86,9 @@ class WorkspaceContainerFactoryTest {
     // No credential lookup by default: the shipped posture is no issuer wired, so a container
     // carries no commissioned pair. The two cases that do have one set this themselves.
     f.credentials = StubInstance.empty();
+    // No posture lookup either, which is the "port not installed" answer and must read as no admin
+    // workspace exists — the socket is the one thing an absence may never grant.
+    f.postures = StubInstance.empty();
     return f;
   }
 
@@ -408,4 +411,43 @@ class WorkspaceContainerFactoryTest {
     assertNull(c.env().get("npm_config_@qits:registry"));
   }
 
+  // --- the admin posture ------------------------------------------------------------------------
+
+  @Test
+  void bindsTheDockerSocketForAWorkspaceWhoseRowSaysAdmin() {
+    WorkspaceContainerFactory f = factory();
+    f.postures = StubInstance.of((WorkspacePostures) rowId -> true);
+
+    assertTrue(f.forWorkspace("repo12345678abc", "work", 7L, "main", null).hostDockerSocket());
+  }
+
+  @Test
+  void bindsNothingForAnOrdinaryWorkspace() {
+    // The claim that matters. The socket is root-equivalent on the host, so the default has to be
+    // "no", and it has to be "no" for the workspace that simply did not ask rather than only for
+    // the one that asked not to.
+    WorkspaceContainerFactory f = factory();
+    f.postures = StubInstance.of((WorkspacePostures) rowId -> false);
+
+    assertFalse(f.forWorkspace("repo12345678abc", "work", 7L, "main", null).hostDockerSocket());
+  }
+
+  @Test
+  void aPostureLookupThatFailsGrantsNothing() {
+    // Both absences, and they must fall the same way: no port installed at all, and a port that
+    // threw. A credential lookup that stumbles costs the container something it was meant to have;
+    // a posture lookup that stumbles must not GIVE it something it was not. That asymmetry is the
+    // reason this is a test rather than a comment.
+    WorkspaceContainerFactory absent = factory();
+    assertFalse(absent.forWorkspace("repo12345678abc", "work", 7L, "main", null).hostDockerSocket());
+
+    WorkspaceContainerFactory broken = factory();
+    broken.postures =
+        StubInstance.of(
+            (WorkspacePostures)
+                rowId -> {
+                  throw new IllegalStateException("the database blinked");
+                });
+    assertFalse(broken.forWorkspace("repo12345678abc", "work", 7L, "main", null).hostDockerSocket());
+  }
 }

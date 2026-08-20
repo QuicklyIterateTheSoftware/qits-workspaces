@@ -44,6 +44,7 @@ public final class WorkspaceContainer {
   private String pidsLimit;
   private String cpus;
   private String image;
+  private boolean hostDockerSocket;
 
   public WorkspaceContainer name(String name) {
     this.name = name;
@@ -119,6 +120,21 @@ public final class WorkspaceContainer {
     return this;
   }
 
+  /**
+   * Bind the host's docker socket into the container — <b>admin mode</b>, and the one privilege a
+   * workspace can be granted beyond being a workspace.
+   *
+   * <p>A boolean and not a path, deliberately, and it is the same boolean qits-containers' own spec
+   * carries for the same reason: what gets mounted must not be something anything upstream of the
+   * orchestrator gets to choose. A container holding it is root-equivalent on the host, so the only
+   * thing that may turn it on is the workspace row's own {@code admin} column ({@link
+   * WorkspacePostures}), written by the request that created the workspace.
+   */
+  public WorkspaceContainer hostDockerSocket(boolean value) {
+    this.hostDockerSocket = value;
+    return this;
+  }
+
   // --- what was decided, for the one adapter that turns it into a wire spec --------------------
   //
   // Same names as the setters, arity apart. There is deliberately no `command`: a workspace
@@ -176,5 +192,10 @@ public final class WorkspaceContainer {
 
   public String image() {
     return image;
+  }
+
+  /** Whether this container is the admin kind — see {@link #hostDockerSocket(boolean)}. */
+  public boolean hostDockerSocket() {
+    return hostDockerSocket;
   }
 }

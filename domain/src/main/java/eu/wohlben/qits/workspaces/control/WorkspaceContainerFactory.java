@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.time.ZoneId;
 import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 
 /**
  * Produces a {@link WorkspaceContainer} already seeded with the cross-cutting configuration every
@@ -20,6 +21,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  */
 @ApplicationScoped
 public class WorkspaceContainerFactory {
+
+  private static final Logger LOG = Logger.getLogger(WorkspaceContainerFactory.class);
 
   /** qits-projects' service base; forwarded explicitly because the daemon control socket is not a gateway. */
   @ConfigProperty(name = "qits.projects.url")
@@ -227,6 +230,14 @@ public class WorkspaceContainerFactory {
    */
   @Inject Instance<WorkspaceCredentials> credentials;
 
+  /**
+   * Whether this workspace is the admin kind — the one input that changes what the container is
+   * allowed. A lookup rather than an argument, for the reason {@link WorkspacePostures} spells out,
+   * and optional for the reason above it: absent means no admin workspace exists, which is the
+   * answer an ordinary workspace gets anyway.
+   */
+  @Inject Instance<WorkspacePostures> postures;
+
   /** The repo's project-scoped name, from an override resolver or the repository registry. */
   private Optional<RepositoryAddressResolver.ProjectScopedName> scopedName(String repoId) {
     if (nameResolver.isResolvable()) {
@@ -263,6 +274,25 @@ public class WorkspaceContainerFactory {
    * hand (or that there is none to have), and a read that stumbles here must not turn a resume into
    * a failed launch. A blank half is no credential — see the env block for why never half a pair.
    */
+  /**
+   * Whether this workspace's container is the admin kind. <b>Every failure direction is false</b>:
+   * no port wired, no row, a read that stumbled. A privilege that could be acquired by a lookup
+   * going wrong would be a privilege nobody granted — unlike the credential above, where an absence
+   * costs the container something it was meant to have, an absence here costs it something it was
+   * meant not to have.
+   */
+  private boolean adminWorkspace(Long rowId) {
+    if (rowId == null || !postures.isResolvable()) {
+      return false;
+    }
+    try {
+      return postures.get().isAdmin(rowId);
+    } catch (RuntimeException e) {
+      LOG.warnf(e, "could not read the posture of workspace %s; launching it without the socket", rowId);
+      return false;
+    }
+  }
+
   private Optional<WorkspaceCredential> workspaceCredential(Long rowId) {
     if (!credentials.isResolvable()) {
       return Optional.empty();
@@ -649,6 +679,25 @@ public class WorkspaceContainerFactory {
     // behavior). See docs/epics/qits-workspaces/features/2026-07-25_persistent-workspace-volume.md.
     if (persistWorkspace) {
       container.volume(workspaceVolumeName(workspaceId), "/workspace");
+    }
+    // ADMIN MODE: the host's docker socket, for the few workspaces somebody deliberately created
+    // that way. It is the one thing about a workspace container that is not the same for every
+    // workspace, and it is read off the row rather than passed in — see WorkspacePostures for why
+    // the spec has to be reproducible at every ensure, and Workspace.admin for why the posture is
+    // decided once, in the request that created the workspace.
+    //
+    // A container holding this socket is ROOT-EQUIVALENT ON THE HOST: it can start a container that
+    // mounts anything, on the host's behalf. That is the whole point (administration is what an
+    // admin workspace is for) and it is exactly why nothing here derives it from a config key, a
+    // repository, an image or a branch name. The default is no socket, everywhere, and the only
+    // way past it is a row that says otherwise.
+    //
+    // Nothing else about the container changes with it — same user, same limits, same mounts, same
+    // image. The socket is usable despite the host uid because qits-containers joins the socket's
+    // own group beside the bind (its README's "The docker socket" section); a workspace-side
+    // --group-add would be a privilege assembled here rather than granted there.
+    if (adminWorkspace(rowId)) {
+      container.hostDockerSocket(true);
     }
     // The container runs ONLY the workspace-daemon, via the image ENTRYPOINT
     // (docker/qits/Dockerfile),

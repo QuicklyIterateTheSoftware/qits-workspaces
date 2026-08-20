@@ -296,6 +296,13 @@ public class WorkspaceContainers implements ContainerRuntime {
    * thing it exists to be. The caps that are kept are bounded by the resource limits beside them
    * (memory, swap, pids, cpus), which are what actually stop a dev server from taking the host down.
    *
+   * <p><b>{@code hostDockerSocket} is the one field here that is not the same for every
+   * workspace.</b> It is true exactly for a workspace whose row carries {@code admin} — the posture
+   * asked for in the request that created it — and false for every other, which is what this service
+   * sent unconditionally until admin workspaces existed. It is derived from nothing a repository, an
+   * image or a branch name says: a container holding that socket is root-equivalent on the host, and
+   * a privilege that can be derived is a privilege nobody granted.
+   *
    * <p><b>The three shared volumes are {@link SharedMount}s and the workspace's own is a {@link
    * VolumeMount}, and the difference is ownership.</b> The shared ones — the agent credential store
    * and the Maven/pnpm caches — are the platform's: the orchestrator creates exactly those three at
@@ -348,9 +355,11 @@ public class WorkspaceContainers implements ContainerRuntime {
             described.addHosts(),
             own,
             platform,
-            // A workspace container never gets the host's docker socket. Nothing declares it and
-            // there is no key that could.
-            false,
+            // The host's docker socket, and ONLY for a workspace whose row says admin. Nothing
+            // else can put it here: the factory reads the posture off the row, no config key
+            // widens it, and every failure direction of that read is false. An ordinary workspace
+            // renders this exactly as it always did.
+            described.hostDockerSocket(),
             new Security(
                 false,
                 false,

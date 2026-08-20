@@ -117,6 +117,18 @@ public class WorkspaceController {
    * false for the normal "branch off" flow, which creates a fresh branch and 409s on a name
    * collision. Either way the branch must have no active workspace already — it is the resource
    * being claimed.
+   *
+   * <p>{@code admin} asks for the <b>admin posture</b>: the workspace's container is launched with
+   * the host's docker socket bound into it, so that platform administration can be done from inside
+   * the workspace. It is <b>off unless the request says otherwise</b> — a field absent from the body
+   * is an ordinary workspace, which is what every existing client sends — and it is decided here and
+   * never again: no route promotes an existing workspace, because the point of the posture is that
+   * the socket belongs to the few workspaces somebody deliberately created for it.
+   *
+   * <p>Who may ask is answered by this class's own {@code @RolesAllowed("qits:admin")}: creating any
+   * workspace already requires the platform admin role, and the socket is granted per workspace
+   * rather than per caller. A second role invented here would be a vocabulary the platform's idp
+   * does not issue and a gate nothing could pass.
    */
   public static record CreateWorkspaceRequest(
       @NotBlank String repositoryId,
@@ -125,7 +137,20 @@ public class WorkspaceController {
       String branch,
       String preamble,
       boolean adoptExisting,
-      boolean branchTree) {
+      boolean branchTree,
+      boolean admin) {
+    /** The form before the admin posture existed: an ordinary, socket-free workspace. */
+    public CreateWorkspaceRequest(
+        String repositoryId,
+        String id,
+        String parent,
+        String branch,
+        String preamble,
+        boolean adoptExisting,
+        boolean branchTree) {
+      this(repositoryId, id, parent, branch, preamble, adoptExisting, branchTree, false);
+    }
+
     /** Backward-compatible form used before aggregate wrapper workspaces were introduced. */
     public CreateWorkspaceRequest(
         String repositoryId,
@@ -134,13 +159,13 @@ public class WorkspaceController {
         String branch,
         String preamble,
         boolean adoptExisting) {
-      this(repositoryId, id, parent, branch, preamble, adoptExisting, false);
+      this(repositoryId, id, parent, branch, preamble, adoptExisting, false, false);
     }
 
     /** Backward-compatible "branch off" form: create a new branch, never adopt an existing one. */
     public CreateWorkspaceRequest(
         String repositoryId, String id, String parent, String branch, String preamble) {
-      this(repositoryId, id, parent, branch, preamble, false, false);
+      this(repositoryId, id, parent, branch, preamble, false, false, false);
     }
 
     public record Response(WorkspaceDto workspace) {}
@@ -156,7 +181,8 @@ public class WorkspaceController {
             request.branch(),
             request.preamble(),
             request.adoptExisting(),
-            request.branchTree());
+            request.branchTree(),
+            request.admin());
     return new CreateWorkspaceRequest.Response(workspaceMapper.toDto(wt));
   }
 

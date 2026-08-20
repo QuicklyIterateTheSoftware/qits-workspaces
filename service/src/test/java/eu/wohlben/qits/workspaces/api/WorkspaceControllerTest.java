@@ -111,7 +111,11 @@ public class WorkspaceControllerTest {
         .body("workspace.workspaceId", equalTo("adhoc-changes"));
 
     String guide = TestOrigin.fileAtBranch(dataDir, repoId, "adhoc-changes", "WORKSPACE.md");
-    org.junit.jupiter.api.Assertions.assertTrue(guide.contains("shared libraries are released into `main`"));
+    // The sentence, as the shipped guide spells it: the assertion drifted from WORKSPACE_GUIDE when
+    // SPAs joined libraries on the main-only side of it, and a quoted fragment is only worth
+    // asserting while it is the one a workspace really receives.
+    org.junit.jupiter.api.Assertions.assertTrue(
+        guide.contains("shared libraries and SPAs are released into `main` only"), guide);
     org.junit.jupiter.api.Assertions.assertTrue(guide.contains("environment branch"));
   }
 
@@ -252,6 +256,53 @@ public class WorkspaceControllerTest {
         .body(
             "entries.find { it.workspace.workspaceId == 'feature-ws' }.workspace.branch",
             equalTo("feature"));
+  }
+
+  @Test
+  public void testCreateWorkspaceRecordsTheAdminPostureItWasAskedFor() {
+    String repoId = createProjectAndRepository();
+
+    // The posture rides the create and lands on the row, so the read model can say which
+    // workspaces hold the host's docker socket. It is answered on the create response and on the
+    // listing, because "which ones are privileged" is a question a client must be able to ask
+    // without opening each workspace.
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new WorkspaceController.CreateWorkspaceRequest(
+                repoId, "admin-ws", "master", "admin-branch", null, false, false, true))
+        .when()
+        .post("/workspaces/api/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("workspace.admin", equalTo(true));
+
+    given()
+        .contentType(ContentType.JSON)
+        .when()
+        .get("/workspaces/api/workspaces?repositoryId=" + repoId)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body(
+            "entries.find { it.workspace.workspaceId == 'admin-ws' }.workspace.admin",
+            equalTo(true));
+  }
+
+  @Test
+  public void testCreateWorkspaceIsOrdinaryUnlessTheRequestAsksForAdmin() {
+    String repoId = createProjectAndRepository();
+
+    // The claim worth holding: a body that says nothing about the posture creates a workspace with
+    // no socket. Every client that predates admin mode sends exactly that body, and a default that
+    // ever flipped would grant the host's docker socket to all of them at once.
+    given()
+        .contentType(ContentType.JSON)
+        .body("{\"repositoryId\":\"" + repoId + "\",\"id\":\"plain-ws\",\"branch\":\"plain-branch\"}")
+        .when()
+        .post("/workspaces/api/workspaces")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("workspace.admin", equalTo(false));
   }
 
   @Test
