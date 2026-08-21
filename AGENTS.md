@@ -548,7 +548,7 @@ are ten lines each and differ only in the target and the mode.
 
 ## The third spelling: releasing a branch by name
 
-**`POST /workspaces/api/branches/release?repositoryId=…`** `{branch, summary}` →
+**`POST /workspaces/api/branches/release?projectId=…&repositoryName=…`** `{branch, summary}` →
 `{version, commitSha, branch, promotions[]}`. It really is a resolver: `releaseBranch` picks the target and calls
 `landOnBranch` with the arguments the workspace path passes, so nothing about the release is
 re-implemented. It answers with the record `/workspaces/{id}/release` answers with — the *same Java
@@ -562,6 +562,20 @@ carried: which workspace claims it, and who deletes it afterwards.
   lets the maintenance train's next force-push be a create, which the git host's hook allows.
 - 404 for a branch the origin does not have, 400 for the default branch itself, and the 409 family
   unchanged.
+
+**The repository is addressed exactly one way per call, and the door refuses to choose for you.**
+Either `repositoryId=<id>` — the internal row id, the spelling this endpoint had alone — or
+`projectId=<project>&repositoryName=<name>`, the **public identity**: the pair a clone url, a
+committed pipeline and a person all spell, while a row id is minted per platform instance and is
+addressable only through the registry that minted it. Both at once, neither, or half the name form
+is a **400 naming the rule**; a precedence order would be a release landing in a repository nobody
+named twice. The name is resolved through `RepositoryLookup.findByName`, which is qits-projects'
+alias table (`GET /projects/api/projects/{projectId}/repositories/by-name/{repoName}`, `qits:system`)
+followed by the ordinary by-id read — two calls, because the alias route answers an id alone and a
+view built from the caller's own two strings would report a main branch nobody looked up. A name
+that resolves to nothing is a **404** naming the pair; a registry that could not be asked is a
+**5xx**, which is the distinction the whole port exists to keep — an outage folded into the 404
+would tell a pipeline step its repository had been deleted.
 
 The caller this exists for is a pipeline step, not a person: a `maintenance/<upstream>` ref is
 force-pushed by a build container, and a workspace is a container lifecycle plus a branch claim plus

@@ -235,6 +235,49 @@ class WorkspaceContainerFactoryTest {
   }
 
   @Test
+  void aRegistryThatStumblesCostsTheAddressAndNeverTheContainer() {
+    // The registry is an HTTP call to another service, so it can be down while a workspace still
+    // has to start. The address is enrichment — the daemon id-addresses without it — and enrichment
+    // may never be a provisioning gate. Blank, not absent: the daemon reads the var either way.
+    WorkspaceContainerFactory f = factory();
+    f.nameResolver = nameResolver(Optional.empty());
+    f.repositories =
+        StubInstance.of(
+            (RepositoryLookup)
+                repoId -> {
+                  throw new IllegalStateException("qits-projects unreachable");
+                });
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_PROJECT_ID", "");
+    assertEnv(c, "QITS_WORKSPACE_DAEMON_REPO_NAME", "");
+    assertLabel(c, "qits.project", "");
+    assertEquals(IMAGE, c.image());
+  }
+
+  @Test
+  void aRepositoryWithNoRegisteredNameLeavesTheAddressBlankRatherThanHalfOfIt() {
+    // A row the registry answers for but cannot name is not addressable by name, and half an
+    // address is not one: the daemon would compose /git/<projectId>/ and clone nothing. So both
+    // halves go blank together and the daemon id-addresses, which is correct pre-cutover and quiet
+    // after it.
+    WorkspaceContainerFactory f = factory();
+    f.nameResolver = nameResolver(Optional.empty());
+    f.repositories =
+        StubInstance.of(
+            (RepositoryLookup)
+                repoId ->
+                    Optional.of(
+                        new RepositoryLookup.RepositoryView(repoId, null, "proj-9", "main")));
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    assertEquals("", c.env().get("QITS_WORKSPACE_DAEMON_REPO_NAME"));
+    assertEquals("proj-9", c.env().get("QITS_WORKSPACE_DAEMON_PROJECT_ID"), "the id still resolves");
+  }
+
+  @Test
   void aConfiguredIdentityFlowsIntoTheContainerEnv() {
     WorkspaceContainerFactory f = factory();
     f.gitIdentity = identity("qits-bot", "qits-bot@example.com");

@@ -1,6 +1,9 @@
 package eu.wohlben.qits.workspaces.api;
 
+import eu.wohlben.qits.workspaces.control.RepositoryLookup;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
+import eu.wohlben.qits.workspaces.error.BadRequestException;
+import eu.wohlben.qits.workspaces.error.NotFoundException;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -45,6 +48,14 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 public class BranchController {
 
   @Inject WorkspaceService workspaceService;
+
+  /**
+   * The registry that turns the public identity {@code (projectId, repositoryName)} into the row id
+   * every verb below is keyed by. Injected here rather than pushed into {@link WorkspaceService}
+   * because resolution is <em>addressing</em>, not release: the service keeps one entry point taking
+   * an id, and the door decides how the caller was allowed to name it.
+   */
+  @Inject RepositoryLookup repositories;
 
   public static record MergeBranchRequest(@NotBlank String source, String target, String result) {
     /**
@@ -116,6 +127,15 @@ public class BranchController {
    * resolves to {@code INTEGRATED} exactly as the workspace-keyed door leaves it, because this door
    * must not strand a workspace on a branch that just merged. Either way the source branch is
    * deleted afterwards.
+   *
+   * <p><b>Two ways to name the repository, and exactly one per call.</b> {@code repositoryId} is
+   * the internal row id — opaque, minted per platform instance, and the only spelling this door had.
+   * {@code projectId} + {@code repositoryName} is the <em>public</em> identity: the pair a clone
+   * url, a pipeline and a person all spell, resolved through {@link RepositoryLookup#findByName}.
+   * Callers move to the name form because an id is not addressable outside the registry that minted
+   * it; the id form stays for whatever already holds one. Mixing them, or sending neither, is a 400
+   * naming the rule rather than a silent precedence order — a caller that sent both meant one of
+   * them, and guessing which would be a release landing somewhere it was not asked to.
    */
   @POST
   @Path("/release")
@@ -124,11 +144,14 @@ public class BranchController {
       responseCode = "400",
       description =
           "A blank, dash-leading or oversized field — or the default branch itself, which a release"
-              + " lands on and cannot be released into.",
+              + " lands on and cannot be released into — or the repository addressed both ways at"
+              + " once, or neither.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   @APIResponse(
       responseCode = "404",
-      description = "No such repository, or the origin has no such branch.",
+      description =
+          "No such repository, no repository by that name in that project, or the origin has no such"
+              + " branch.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   @APIResponse(
       responseCode = "409",
@@ -136,9 +159,58 @@ public class BranchController {
           "Nothing was released and the default branch is unchanged. `reason` says which refusal.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   public WorkspaceController.ReleaseRequest.Response releaseBranch(
-      @QueryParam("repositoryId") String repoId, @Valid ReleaseBranchRequest request) {
+      @QueryParam("repositoryId") String repoId,
+      @QueryParam("projectId") String projectId,
+      @QueryParam("repositoryName") String repositoryName,
+      @Valid ReleaseBranchRequest request) {
     return WorkspaceController.ReleaseRequest.Response.of(
-        workspaceService.releaseBranch(repoId, request.branch(), request.summary()));
+        workspaceService.releaseBranch(
+            addressedRepository(repoId, projectId, repositoryName),
+            request.branch(),
+            request.summary()));
+  }
+
+  /** What both addressing forms have to say, spelled once so the two 400s cannot disagree. */
+  private static final String ADDRESSING_RULE =
+      "Address the repository exactly one way: repositoryId=<id>, or"
+          + " projectId=<project>&repositoryName=<name>.";
+
+  /**
+   * The row id the caller addressed, whichever way they spelled it.
+   *
+   * <p>Three answers and no fourth: the id as given, the id the alias table holds for {@code
+   * (projectId, repositoryName)}, or a refusal. A name that resolves to nothing is a <b>404</b>
+   * naming the pair — the caller asked about a repository that is not there. A registry that could
+   * not be asked throws out of {@link RepositoryLookup#findByName} and surfaces as a 5xx, which is
+   * the distinction that port exists to keep: an outage reported as a 404 would tell a pipeline its
+   * repository had been deleted.
+   */
+  private String addressedRepository(String repoId, String projectId, String repositoryName) {
+    boolean addressedById = present(repoId);
+    boolean addressedByName = present(projectId) || present(repositoryName);
+    if (addressedById && addressedByName) {
+      throw new BadRequestException(ADDRESSING_RULE + " Both were given.");
+    }
+    if (addressedById) {
+      return repoId.trim();
+    }
+    if (!(present(projectId) && present(repositoryName))) {
+      throw new BadRequestException(
+          ADDRESSING_RULE + " The name form needs both halves; neither addressing form is complete.");
+    }
+    String project = projectId.trim();
+    String name = repositoryName.trim();
+    return repositories
+        .findByName(project, name)
+        .map(RepositoryLookup.RepositoryView::id)
+        .orElseThrow(
+            () ->
+                new NotFoundException(
+                    "No repository named '" + name + "' in project " + project));
+  }
+
+  private static boolean present(String value) {
+    return value != null && !value.isBlank();
   }
 
   public static record CleanupBranchRequest(@NotBlank String branch, String result) {

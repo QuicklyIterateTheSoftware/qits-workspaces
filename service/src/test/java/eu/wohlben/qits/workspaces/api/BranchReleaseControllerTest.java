@@ -63,6 +63,7 @@ public class BranchReleaseControllerTest {
   void resetDoubles() {
     announcer.reset();
     gitHost.reset();
+    repositories.nameResolutionOutage(false);
   }
 
   // -----------------------------------------------------------------------------------------
@@ -87,11 +88,25 @@ public class BranchReleaseControllerTest {
   }
 
   private io.restassured.response.Response release(String repoId, String branch, String summary) {
+    return releaseAddressedBy("repositoryId=" + repoId, branch, summary);
+  }
+
+  /** The public identity form: {@code (projectId, repositoryName)} instead of the row id. */
+  private io.restassured.response.Response releaseByName(
+      String projectId, String repositoryName, String branch, String summary) {
+    return releaseAddressedBy(
+        "projectId=" + projectId + "&repositoryName=" + repositoryName, branch, summary);
+  }
+
+  private io.restassured.response.Response releaseAddressedBy(
+      String query, String branch, String summary) {
     return given()
         .contentType(ContentType.JSON)
         .body(new BranchController.ReleaseBranchRequest(branch, summary))
         .when()
-        .post("/workspaces/api/branches/release?repositoryId=" + repoId);
+        // RestAssured refuses a URI ending in "?", so the no-address case is the bare path — which
+        // is the same request a caller who named nothing makes anyway.
+        .post("/workspaces/api/branches/release" + (query.isEmpty() ? "" : "?" + query));
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
@@ -312,5 +327,147 @@ public class BranchReleaseControllerTest {
     release(repoId, "", "no branch named")
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // addressing the repository: the row id, or the public identity
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * The form pipelines move to. A row id is minted per platform instance and is addressable only
+   * through the registry that minted it; {@code (projectId, repoName)} is what a clone url, a
+   * committed pipeline and a person all spell — so the door takes it and resolves it, and
+   * <b>everything after the resolution is the id path unchanged</b>. That is what this asserts: the
+   * same merge commit, the same tag, the same announcement, reached through a name.
+   */
+  @Test
+  public void aRepositoryAddressedByProjectAndNameReleasesExactlyAsItsIdDoes() throws Exception {
+    String repoId = seedRepository();
+    TestOrigin.commitOnBranch(dataDir, repoId, "master", "pom.xml", POM, "add a pom");
+    seedMaintenanceBranch(repoId);
+
+    String summary = "bump(@qits/ui-components@2026.731.193059): follow the release";
+    var response =
+        releaseByName(
+                FakeRepositoryLookup.PROJECT_ID,
+                FakeRepositoryLookup.nameOf(repoId),
+                MAINTENANCE,
+                summary)
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .body("version", matchesRegex(VERSION.pattern()))
+            .body("branch", equalTo(MAINTENANCE))
+            .extract();
+    String version = response.path("version");
+    String commitSha = response.path("commitSha");
+
+    assertEquals(commitSha, inOrigin(repoId, "git", "rev-parse", "master"));
+    assertEquals(
+        "release(" + version + "): " + summary,
+        inOrigin(repoId, "git", "log", "-1", "--format=%s", "master"));
+    assertEquals(version, inOrigin(repoId, "git", "tag", "-l"));
+    assertFalse(originBranches(repoId).contains(MAINTENANCE), "the source is spent either way");
+
+    // The event names the repository by the id the name resolved to — the door resolves addressing
+    // and nothing else, so the announcement cannot differ between the two forms.
+    assertEquals(1, announcer.announced().size());
+    assertEquals(repoId, announcer.announced().get(0).repoId());
+    assertEquals(FakeRepositoryLookup.nameOf(repoId), announcer.announced().get(0).repoName());
+  }
+
+  /**
+   * A name that resolves to nothing is a <b>404</b> naming the pair the caller asked about. Not a
+   * 400: the request is well-formed and the answer is that no such repository is registered, which
+   * is the same answer an unknown row id gets.
+   */
+  @Test
+  public void aNameNoRepositoryCarriesIs404NamingTheProjectAndTheName() throws Exception {
+    seedRepository();
+
+    releaseByName(FakeRepositoryLookup.PROJECT_ID, "never-registered", "feature", "no such name")
+        .then()
+        .statusCode(Response.Status.NOT_FOUND.getStatusCode())
+        .body("message", containsString("never-registered"))
+        .body("message", containsString(FakeRepositoryLookup.PROJECT_ID));
+
+    assertEquals(List.of(), announcer.announced());
+  }
+
+  /**
+   * The distinction the whole {@code RepositoryLookup} port exists to keep. A registry that cannot
+   * be asked is a 5xx; folded into the 404 above it would tell a pipeline step its repository had
+   * been deleted, and the step would stop retrying something a minute would have fixed.
+   */
+  @Test
+  public void aRegistryOutageIs5xxRatherThanANameThatDoesNotResolve() throws Exception {
+    String repoId = seedRepository();
+    seedMaintenanceBranch(repoId);
+    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+
+    repositories.nameResolutionOutage(true);
+    try {
+      releaseByName(
+              FakeRepositoryLookup.PROJECT_ID,
+              FakeRepositoryLookup.nameOf(repoId),
+              MAINTENANCE,
+              "the registry is down")
+          .then()
+          .statusCode(greaterThanOrEqualTo(500));
+    } finally {
+      repositories.nameResolutionOutage(false);
+    }
+
+    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
+    assertEquals(List.of(), announcer.announced());
+  }
+
+  /**
+   * Both forms at once is a 400 rather than a precedence order. A caller that sent both meant one
+   * of them, and picking silently would be a release landing in a repository nobody named twice.
+   */
+  @Test
+  public void addressingTheRepositoryBothWaysIsRefusedAndNamesTheRule() throws Exception {
+    String repoId = seedRepository();
+    seedMaintenanceBranch(repoId);
+
+    releaseAddressedBy(
+            "repositoryId="
+                + repoId
+                + "&projectId="
+                + FakeRepositoryLookup.PROJECT_ID
+                + "&repositoryName="
+                + FakeRepositoryLookup.nameOf(repoId),
+            MAINTENANCE,
+            "two addresses")
+        .then()
+        .statusCode(Response.Status.BAD_REQUEST.getStatusCode())
+        .body("message", containsString("repositoryId"))
+        .body("message", containsString("repositoryName"));
+
+    assertTrue(originBranches(repoId).contains(MAINTENANCE), "a refused release deletes nothing");
+    assertEquals(List.of(), announcer.announced());
+  }
+
+  /**
+   * Neither form, and half of the name form, are the same refusal — a half address is not an
+   * address. Before this door took names, no repository at all resolved to a 404 out of the
+   * registry; it is a 400 now, because the request never named one.
+   */
+  @Test
+  public void addressingTheRepositoryNoWayAtAllIsRefusedAndNamesTheRule() throws Exception {
+    String repoId = seedRepository();
+
+    for (String query :
+        List.of(
+            "",
+            "projectId=" + FakeRepositoryLookup.PROJECT_ID,
+            "repositoryName=" + FakeRepositoryLookup.nameOf(repoId))) {
+      releaseAddressedBy(query, "feature", "no repository named")
+          .then()
+          .statusCode(Response.Status.BAD_REQUEST.getStatusCode())
+          .body("message", containsString("projectId"));
+    }
+
+    assertEquals(List.of(), announcer.announced());
   }
 }

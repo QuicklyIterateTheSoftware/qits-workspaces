@@ -698,7 +698,15 @@ paths:
   /workspaces/api/branches/release:
     post:
       parameters:
+      - name: projectId
+        in: query
+        schema:
+          type: string
       - name: repositoryId
+        in: query
+        schema:
+          type: string
+      - name: repositoryName
         in: query
         schema:
           type: string
@@ -717,13 +725,15 @@ paths:
                 $ref: "#/components/schemas/Response"
         "400":
           description: "A blank, dash-leading or oversized field — or the default\
-            \ branch itself, which a release lands on and cannot be released into."
+            \ branch itself, which a release lands on and cannot be released into\
+            \ — or the repository addressed both ways at once, or neither."
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "404":
-          description: "No such repository, or the origin has no such branch."
+          description: "No such repository, no repository by that name in that project,\
+            \ or the origin has no such branch."
           content:
             application/json:
               schema:
@@ -1629,4 +1639,4 @@ paths:
         - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.820.140021
+  version: 2026.820.154722

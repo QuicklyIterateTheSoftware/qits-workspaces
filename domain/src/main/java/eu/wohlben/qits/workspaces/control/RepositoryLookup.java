@@ -40,6 +40,28 @@ public interface RepositoryLookup {
   Optional<RepositoryView> find(String repoId);
 
   /**
+   * The repository a project-scoped <b>name</b> addresses — {@code (projectId, name)}, the public
+   * identity — or empty when that project holds no repository by that name.
+   *
+   * <p>The row id is opaque and per-instance; the name is the coordinate a pipeline, a clone url
+   * and a human all spell. So a caller that has a name must be able to reach a repository without
+   * ever learning the id, and this is the seam that lets it: {@code POST /branches/release} takes
+   * {@code projectId} + {@code repositoryName} and resolves here.
+   *
+   * <p><b>Empty means "no such name", never "could not ask"</b> — the same distinction {@link
+   * #find} draws and for the same reason: the caller turns empty into a 404, so an unreachable
+   * registry has to throw instead of reporting a live repository as absent.
+   *
+   * <p>A {@code default} for the reason {@link #listByProject} is one: {@link #find} stays the
+   * single abstract method, so a stub can still be written as a lambda. Answering empty is a
+   * supported implementation here — an embedding with no alias table has no names to resolve, and a
+   * caller that addresses by id never asks.
+   */
+  default Optional<RepositoryView> findByName(String projectId, String name) {
+    return Optional.empty();
+  }
+
+  /**
    * Every repository registered in a project — what resolves a wrapper's committed submodule urls
    * to repositories this service may branch.
    *

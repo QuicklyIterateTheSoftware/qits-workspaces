@@ -36,6 +36,16 @@ public class FakeRepositoryLookup implements RepositoryLookup {
 
   private final Map<String, String> mainBranches = new ConcurrentHashMap<>();
 
+  /**
+   * Whether a by-name resolution behaves as an unreachable qits-projects does — it throws. The
+   * release door's name form has to tell "no such name" (a 404) from "could not ask" (a 5xx), and
+   * an in-memory map can only be one of them without this switch.
+   *
+   * <p>It is off unless a test turns it on, and a test that turns it on turns it back off: this is
+   * one {@code @ApplicationScoped} bean for the whole module's suite.
+   */
+  private volatile boolean nameResolutionOutage;
+
   @Override
   public Optional<RepositoryView> find(String repoId) {
     String mainBranch = mainBranches.get(repoId);
@@ -57,6 +67,30 @@ public class FakeRepositoryLookup implements RepositoryLookup {
         .toList();
   }
 
+  /**
+   * The alias table, standing in for qits-projects': {@code (projectId, name)} → the row. Names are
+   * derived from ids by {@link #nameOf}, so a registered repository is addressable both ways and a
+   * caller that confuses the two resolves nothing — which is the whole point of the pair.
+   */
+  @Override
+  public Optional<RepositoryView> findByName(String projectId, String name) {
+    if (nameResolutionOutage) {
+      throw new IllegalStateException("qits-projects unreachable (fake outage)");
+    }
+    if (!PROJECT_ID.equals(projectId) || name == null) {
+      return Optional.empty();
+    }
+    return mainBranches.keySet().stream()
+        .filter(repoId -> nameOf(repoId).equals(name))
+        .findFirst()
+        .flatMap(this::find);
+  }
+
+  /** Make every by-name resolution fail the way an unreachable registry does. Reset it. */
+  public void nameResolutionOutage(boolean broken) {
+    this.nameResolutionOutage = broken;
+  }
+
   /** Make {@code repoId} resolvable, with {@code master} as its main branch. */
   public void register(String repoId) {
     register(repoId, "master");
@@ -75,5 +109,6 @@ public class FakeRepositoryLookup implements RepositoryLookup {
   /** Drop everything — call from {@code @BeforeEach} when a test needs a clean registry. */
   public void clear() {
     mainBranches.clear();
+    nameResolutionOutage = false;
   }
 }
