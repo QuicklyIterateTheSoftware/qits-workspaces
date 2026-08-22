@@ -28,7 +28,10 @@ public interface GitHostAddress extends GitRemotes {
 
   /**
    * The remote for {@code repoId}. Any string {@code git} accepts as a remote: the platform's is
-   * {@code <qits.githost.url>/git/<repoId>}.
+   * the <b>public</b> route {@code <qits.githost.url>/git/<projectId>/<repoName>}, which {@link
+   * ConfiguredGitHostAddress} builds by resolving the row id to its {@code (projectId, name)}. The
+   * storage-UUID route {@code /git/<repoId>} is reserved for the qits-projects client and answers
+   * every other consumer a 403.
    */
   @Override
   String fetchUrl(String repoId);
