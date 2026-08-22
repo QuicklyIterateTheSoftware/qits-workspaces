@@ -43,6 +43,7 @@ public final class WorkspaceContainer {
   private String memory;
   private String pidsLimit;
   private String cpus;
+  private Integer oomScoreAdj;
   private String image;
   private boolean hostDockerSocket;
 
@@ -112,6 +113,11 @@ public final class WorkspaceContainer {
   /** Cap the container's CPU share. Blank/null caps nothing. */
   public WorkspaceContainer cpus(String cpus) {
     this.cpus = cpus;
+    return this;
+  }
+
+  public WorkspaceContainer oomScoreAdj(Integer oomScoreAdj) {
+    this.oomScoreAdj = oomScoreAdj;
     return this;
   }
 
@@ -188,6 +194,11 @@ public final class WorkspaceContainer {
 
   public String cpus() {
     return cpus;
+  }
+
+  /** The oom-score-adj, or null for none. Higher = reaped sooner under host memory pressure. */
+  public Integer oomScoreAdj() {
+    return oomScoreAdj;
   }
 
   public String image() {

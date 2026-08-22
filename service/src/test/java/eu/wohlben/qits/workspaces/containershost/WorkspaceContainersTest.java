@@ -196,7 +196,7 @@ class WorkspaceContainersTest {
     // person works in — it has to be able to su, chown its own checkout and install a toolchain.
     // What bounds it instead is the resource caps beside them. The memory cap is the swap cap too,
     // so the container cannot spill the difference into host swap.
-    assertEquals(new Security(false, false, "4g", "4g", null, null), spec.security());
+    assertEquals(new Security(false, false, "4g", "4g", null, null, 600), spec.security());
   }
 
   @Test

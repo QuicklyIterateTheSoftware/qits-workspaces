@@ -172,6 +172,14 @@ public class WorkspaceContainerFactory {
   Optional<String> cpus;
 
   /**
+   * OOM score adjustment ({@code --oom-score-adj}). Higher = the host kills this container sooner
+   * under memory pressure. 600 sits above the platform services (0) yet is reaped after ci build
+   * containers (1000) and agents (800), so a workspace yields before them.
+   */
+  @ConfigProperty(name = "qits.workspace.oom-score-adj", defaultValue = "600")
+  Integer oomScoreAdj;
+
+  /**
    * The provision-time bootstrap kill switch, forwarded to the in-container daemon (which self-runs
    * the chain on boot — docs/epics/qits-workspace-daemon/ Part 3). Mirrors the host-side {@code
    * qits.bootstrap.autorun-enabled} default; when false the daemon skips the chain.
@@ -619,6 +627,7 @@ public class WorkspaceContainerFactory {
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
     pidsLimit.filter(v -> !v.isBlank()).ifPresent(container::pidsLimit);
     cpus.filter(v -> !v.isBlank()).ifPresent(container::cpus);
+    container.oomScoreAdj(oomScoreAdj);
     // The commit identity, as container-level env so *every* git process in the container — qits'
     // own verbs, the coding agent, actions, ad-hoc shells — inherits it regardless of cwd or
     // .git/config (identity env beats every git config level).
