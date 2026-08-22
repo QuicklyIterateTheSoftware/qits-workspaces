@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import jakarta.enterprise.inject.Instance;
+import org.eclipse.microprofile.config.ConfigProvider;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
@@ -24,21 +25,27 @@ import org.junit.jupiter.api.Test;
 class WorkspaceContainerFactoryTest {
 
   /**
-   * A stand-in for {@code qits.workspace.image}, in the shape the service now ships: registry host
-   * with a port, repository path, calver tag. The shape is what earns its keep here — the reference
-   * carries two colons, so anything that ever tried to split it into name and tag would fail on
-   * this reference rather than on a container launch.
-   *
-   * <p>The version is invented, and stays invented. The real pin lives in {@code
-   * META-INF/microprofile-config.properties} and the release train moves it; a test that copied it
-   * would only add a place the train forgets. This test proves the factory carries whatever image
-   * it is handed, which is a claim no particular version makes truer.
+   * The shipped default image reference, composed from the two keys the service now ships: {@code
+   * qits.workspace.image-repo} (registry host with a port, repository path) and {@code
+   * qits.workspace.image-version} (the calver tag). Read from config rather than written down — the
+   * version half is a fallback the deployer overrides at runtime (from qits-configuration), so a
+   * literal here would go red on a bump that works as intended. The composed reference carries two
+   * colons, so anything that ever tried to split it into name and tag would fail on it rather than
+   * on a container launch. {@link #composesTheShippedDefaultReference} pins the exact default; the
+   * reuse here asserts the factory joins the same halves the config carries.
    */
-  private static final String IMAGE = "localhost:8081/qits/workspace:2026.101.1";
+  private static final String IMAGE_REPO =
+      ConfigProvider.getConfig().getValue("qits.workspace.image-repo", String.class);
+
+  private static final String IMAGE_VERSION =
+      ConfigProvider.getConfig().getValue("qits.workspace.image-version", String.class);
+
+  private static final String IMAGE = IMAGE_REPO + ":" + IMAGE_VERSION;
 
   private WorkspaceContainerFactory factory() {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
-    f.image = IMAGE;
+    f.imageRepo = IMAGE_REPO;
+    f.imageVersion = IMAGE_VERSION;
     f.projectsUrl = "http://qits-projects:8080/";
     f.observabilityUrl = "http://qits-observability:8080/";
     f.network = "qits-net";
@@ -492,5 +499,35 @@ class WorkspaceContainerFactoryTest {
                   throw new IllegalStateException("the database blinked");
                 });
     assertFalse(broken.forWorkspace("repo12345678abc", "work", 7L, "main", null).hostDockerSocket());
+  }
+
+  /**
+   * The two keys compose to the fully qualified default the deployment starts with. This pins the
+   * shipped {@code META-INF/microprofile-config.properties} default exactly, because the version
+   * half no longer moves in this file — the deployer overrides it from qits-configuration — so the
+   * default is now stable.
+   */
+  @Test
+  void composesTheShippedDefaultReference() {
+    assertEquals(
+        "registry.dev.localhost:8080/qits/workspace:2026.820.155203",
+        factory().image(),
+        "repo and version joined as <repo>:<version>, fully qualified");
+  }
+
+  /**
+   * The deployer injects {@code QITS_WORKSPACE_IMAGE_VERSION}, which SmallRye maps onto {@code
+   * qits.workspace.image-version}, and the injected value wins over the default. A hand-built factory
+   * stands in for that injection so the override is exercised without booting the app: the factory
+   * composes whatever version it is handed against the committed repo, staying fully qualified.
+   */
+  @Test
+  void theInjectedVersionWinsOverTheDefault() {
+    WorkspaceContainerFactory overridden = new WorkspaceContainerFactory();
+    overridden.imageRepo = "registry.dev.localhost:8080/qits/workspace";
+    overridden.imageVersion = "2026.999.000000";
+
+    assertEquals(
+        "registry.dev.localhost:8080/qits/workspace:2026.999.000000", overridden.image());
   }
 }

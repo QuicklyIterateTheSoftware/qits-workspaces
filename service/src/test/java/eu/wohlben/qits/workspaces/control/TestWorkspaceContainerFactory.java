@@ -21,8 +21,16 @@ import java.util.Optional;
  */
 public final class TestWorkspaceContainerFactory {
 
-  /** The image every test container runs. Invented, and deliberately not a copy of the shipped pin. */
-  public static final String IMAGE = "localhost:8081/qits/workspace:2026.101.1";
+  /**
+   * The image every test container runs, split into the two keys the factory now composes. Invented,
+   * and deliberately not a copy of the shipped pin.
+   */
+  public static final String IMAGE_REPO = "localhost:8081/qits/workspace";
+
+  public static final String IMAGE_VERSION = "2026.101.1";
+
+  /** The composed reference, {@code <repo>:<version>} — what a spec carries. */
+  public static final String IMAGE = IMAGE_REPO + ":" + IMAGE_VERSION;
 
   private TestWorkspaceContainerFactory() {}
 
@@ -49,7 +57,8 @@ public final class TestWorkspaceContainerFactory {
 
   private static WorkspaceContainerFactory build(boolean persistWorkspace) {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
-    f.image = IMAGE;
+    f.imageRepo = IMAGE_REPO;
+    f.imageVersion = IMAGE_VERSION;
     f.projectsUrl = "http://qits-projects:8080";
     f.observabilityUrl = "http://qits-observability:8080";
     f.network = "qits-net";

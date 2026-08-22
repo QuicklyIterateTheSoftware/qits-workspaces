@@ -377,8 +377,9 @@ public class WorkspaceContainers implements ContainerRuntime {
     // orchestrator keeps it restarted. It is also what makes a spec change recreatable rather than a
     // SPEC_CONFLICT, which is what Recreate.ifChanged below relies on.
     //
-    // ifChanged rather than the safer never, and the image pin is why: the release train moves
-    // qits.workspace.image, and a workspace whose spec no longer matches what is running must be
+    // ifChanged rather than the safer never, and the image pin is why: the deployer moves
+    // qits.workspace.image-version (from qits-configuration), and a workspace whose spec no longer
+    // matches what is running must be
     // replaced rather than silently left on the old image with a 200 saying so. Every path that
     // reaches here has already established that nothing is running at this place.
     return new EnsureRequest(spec, Policy.explicitLifetime(), Recreate.ifChanged);

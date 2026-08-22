@@ -33,21 +33,28 @@ public class WorkspaceContainerFactory {
   String observabilityUrl;
 
   /**
-   * The image every workspace container runs — registry-qualified and pinned to a released version
-   * ({@code localhost:8081/qits/workspace:<calver>}). The value ships in this library's {@code
-   * META-INF/microprofile-config.properties}, which carries the reasoning for both halves of that
-   * shape, and which is also the single file the release train rewrites.
+   * The registry host and path of the image every workspace container runs — the released toolchain
+   * with the workspace-daemon as its entrypoint ({@code registry.dev.localhost:8080/qits/workspace}).
+   * It is the fixed half of the reference: {@link #imageVersion} carries the calver tag, and {@link
+   * #image()} joins them as {@code <repo>:<version>}.
    *
-   * <p><b>No {@code defaultValue}</b>, deliberately, and unlike every other key on this class. A
-   * default here would be a second copy of the pin that the train does not move, so it would be
-   * stale from the first bump onward — and it would be a stale copy of the exact thing the pin
-   * exists to end: an unqualified {@code qits/workspace:latest} resolving to whatever a host
-   * happens to have lying in its local image store. A deployment that loses the property should
-   * fail at startup and say which key is missing, not quietly launch a hand-built tag. Same
-   * arrangement, same reason, as {@code ReleaseIntegrator.entryBranch}.
+   * <p><b>The registry host is part of the value.</b> A bare name would resolve against whatever is
+   * lying in the host daemon's local image store — the {@code qits/workspace:latest} drift this
+   * shape exists to end — so the value handed to {@code docker run} must be fully qualified. The
+   * reasoning for both halves lives in {@code META-INF/microprofile-config.properties}.
    */
-  @ConfigProperty(name = "qits.workspace.image")
-  String image;
+  @ConfigProperty(name = "qits.workspace.image-repo")
+  String imageRepo;
+
+  /**
+   * The released calver the workspace image is pinned to. Read from config, never a constant,
+   * because the deployer injects {@code QITS_WORKSPACE_IMAGE_VERSION} — sourced from
+   * qits-configuration, kept in step by the {@code qits/workspace} image's own {@code
+   * SoftwareRelease} event — and SmallRye maps that env var onto this property automatically, so the
+   * injected value wins over the {@code META-INF/microprofile-config.properties} default.
+   */
+  @ConfigProperty(name = "qits.workspace.image-version")
+  String imageVersion;
 
   /**
    * The shared Docker network every workspace container joins (and qits is on), so qits reaches a
@@ -373,13 +380,16 @@ public class WorkspaceContainerFactory {
   static final String PNPM_MOUNT = "/caches/pnpm";
 
   /**
-   * The pinned workspace image reference. Exposed rather than read from config a second time, so
-   * the reference the spec carries and the reference anything else names cannot be two values. Who
-   * pulls it is the orchestrator, under pull policy MISSING — the inspect-then-pull this service
-   * used to do itself went with the docker socket.
+   * The fully qualified, version-pinned workspace image reference: {@code <repo>:<version>}. Composed
+   * rather than stored so the version half can be overridden at runtime by an env var while the
+   * registry host and path stay committed; the result is byte-identical in shape to the old single
+   * key ({@code registry.dev.localhost:8080/qits/workspace:<calver>}). Exposed rather than read from
+   * config a second time, so the reference the spec carries and the reference anything else names
+   * cannot be two values. Who pulls it is the orchestrator, under pull policy MISSING — the
+   * inspect-then-pull this service used to do itself went with the docker socket.
    */
   public String image() {
-    return image;
+    return imageRepo + ":" + imageVersion;
   }
 
   /**
@@ -714,7 +724,7 @@ public class WorkspaceContainerFactory {
     // daemon
     // holds the socket open and is otherwise idle in Part 1. `init` is a spec field now rather
     // than a run flag, and it is what keeps a long-lived daemon from collecting its children.
-    return container.image(image);
+    return container.image(image());
   }
 
   private static String serviceBase(String configured) {
