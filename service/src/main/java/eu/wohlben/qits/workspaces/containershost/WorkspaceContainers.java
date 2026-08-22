@@ -368,7 +368,8 @@ public class WorkspaceContainers implements ContainerRuntime {
                 // into host swap.
                 described.memory(),
                 pids(described.pidsLimit()),
-                described.cpus()),
+                described.cpus(),
+                described.oomScoreAdj()),
             PullPolicy.MISSING,
             described.name(),
             described.user(),
