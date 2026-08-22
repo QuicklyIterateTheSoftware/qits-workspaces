@@ -1472,14 +1472,14 @@ public class WorkspaceService {
    * newer {@code workspace-daemon} build (docs/epics/qits-workspace-registry/). Unlike {@link
    * #beginEnsureContainer} (which resumes an existing container in place), this deliberately tears
    * the old container down and provisions a fresh one, so a {@code docker run} picks up whatever
-   * {@code qits.workspace.image} now resolves to.
+   * {@code qits.workspace.image-repo}:{@code qits.workspace.image-version} now resolves to.
    *
    * <p><b>That now resolves to a pinned, published release</b> rather than a local {@code :latest}
    * tag, which narrows what a recreate can reach. It rolls a workspace forward exactly as far as
-   * the pin this qits-workspaces build carries, and no further: reaching a newer daemon takes the
-   * pin moving first (the qits-workspace-daemon release train rewrites it, then qits-workspaces
-   * releases and deploys). Recreate is still the operation that applies a new image — it just no
-   * longer picks up a rebuild nobody released.
+   * the version this deployment carries, and no further: reaching a newer daemon takes the injected
+   * {@code QITS_WORKSPACE_IMAGE_VERSION} moving first (qits-configuration, kept in step by the
+   * {@code qits/workspace} SoftwareRelease event, then a redeploy). Recreate is still the operation
+   * that applies a new image — it just no longer picks up a rebuild nobody released.
    *
    * <p><b>Requires a provably clean working tree.</b> Recreating is lossy for uncommitted work, so
    * the gate is stricter than {@link #requireCleanWorkingTree}: it consults the daemon-reported
