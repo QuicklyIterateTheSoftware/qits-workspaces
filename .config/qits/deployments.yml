@@ -42,3 +42,8 @@ navigation-entries: services.details.Workspaces:5, daemons.details.Workspaces:5,
 # own config defaults, which the domain jar's META-INF/microprofile-config.properties does for the
 # first and the qits-eventstream jar does for the second.
 resources: postgresql:db, postgresql:eventstream:qits_workspaces_eventstream
+
+# Where the browsable API document lives: swagger-ui under this service's non-application
+# root, which sits under the primary route above. The shell's Api Docs viewer reads it off
+# /main-navigation and frames it for this repository.
+api-docs: /workspaces/q/swagger-ui
