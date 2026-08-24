@@ -302,9 +302,11 @@ such container can still be running.
 
 ## Where this service answers
 
-`/workspaces/<second level>/…`, always. The gateway routes **verbatim by prefix**, so the service
-serves the prefixed path itself; there is no unprefixed form, on the gateway or on `qits-net`, and
-anything left at the root is unreachable. `README.md` has the table.
+Two surfaces on one host. The **client is at `/`** — this service has a host of its own,
+`workspaces.<env>.<domain>`, and the SPA is what it answers with. Every **machine** route is
+`/workspaces/<second level>/…`, always: the edge routes **verbatim by prefix**, so the service serves
+the prefixed path itself, on its own host and on every other one; there is no unprefixed form, on the
+edge or on `qits-net`. `README.md` has the table.
 
 The one thing to know before you add a route: **`quarkus.rest.path` moves the JAX-RS routes and
 nothing else.** A raw Vert.x route or a `@WebSocket` path registers straight onto the router with a
@@ -362,22 +364,22 @@ literal and must carry `/workspaces` itself. Five do, each for its own reason:
 `quarkus.http.non-application-root-path`. `quarkus.swagger-ui.path` is relative and follows on its
 own — do not pin it.
 
-**Every one of those literals has to be repeated in `quarkus.quinoa.ignored-path-prefixes`, and
-that is the one place a new route here is easy to forget.** Quinoa's SPA fallback is registered last
-and rewrites anything under `/workspaces` it is not told to skip; the skip list it *derives* holds
-only `quarkus.rest.path` and `quarkus.http.non-application-root-path`, so the raw routes above are
-outside it. Measured on the packaged fast-jar before the key was set, `GET /workspaces/daemon`,
-`/workspaces/daemon/` and `/workspaces/daemon/{id}` — a plain GET, since websockets-next claims only
-the upgrade — each answered **200 `text/html`** with the SPA's `index.html`. A machine client parses
-a web page as data; the correct answer is a 404. Setting the key **replaces** the derivation instead
-of extending it, which is why the list spells `/api` and `/q` out again, and the values are
-**relative** to `ui-root-path` (`/api`, never `/workspaces/api` — an absolute value matches nothing
-and looks exactly like an unset key). `application.properties` carries the reasoning; add a literal
-route there and here in the same commit. A sibling service whose whole machine surface is
-`quarkus.rest.path` plus the non-application root would leave the key unset and let the derivation
-track the paths — none of the five qualifies today (each carries an MCP root, a git host or a daemon
-socket outside the derivation, and qits-ci's own `/ci/daemon` was measured falling through to the
-SPA the same way), but the rule stands for the next one.
+**`quarkus.quinoa.ignored-path-prefixes` is what keeps the SPA fallback off all of that, and it is
+now one entry: `/workspaces`.** The values are **absolute** — Quinoa strips `ui-root-path` before
+matching, and stripping `/` leaves the path as it is — so a prefix match on `/workspaces` covers the
+JAX-RS routes, `/workspaces/q` and all four literals above at once. They used to be **relative**
+(`/api`, never `/workspaces/api`), because the client was rooted at the segment; that is the one line
+of this paragraph that inverted with the move to a host of its own, and an entry left in the old
+spelling matches nothing and looks exactly like an unset key.
+
+The key cannot go back to being unset. Quinoa derives its skip list from `quarkus.rest.path` and
+`quarkus.http.non-application-root-path` only, and with the client at `/` the fallback sees every
+path this service does not otherwise serve. Measured on the packaged fast-jar before the key was set,
+`GET /workspaces/daemon`, `/workspaces/daemon/` and `/workspaces/daemon/{id}` — a plain GET, since
+websockets-next claims only the upgrade — each answered **200 `text/html`** with the SPA's
+`index.html`. A machine client parses a web page as data; the correct answer is a 404. Add a route
+under `/workspaces` and there is nothing to do here; add a **root-level** one and add its prefix in
+the same commit. `application.properties` carries the reasoning.
 
 **A workspace is not a sub-resource of a repository.** This context holds a repository id as a
 string, in another database, with no FK — so collections filter by `?repositoryId=` and an item is

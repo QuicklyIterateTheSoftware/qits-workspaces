@@ -3,7 +3,8 @@
 The **host side** of qits workspaces: the workspace entity and its lifecycle, container
 orchestration, host-side git through a mirror of each repository, the workspace-daemon registry, dev-server
 supervision, the bootstrap-chain runner, the technical-process framework, prompt composition,
-feature capture, and the routes over all of it — at `/workspaces`, its gateway segment.
+feature capture, and the routes over all of it — the machine surface at `/workspaces`, its segment,
+and the client at the root of `workspaces.<env>.<domain>`.
 
 A workspace is a branch of a repository **plus** a per-workspace container that clones that branch
 into `/workspace`. This service creates, merges, releases and deletes that branch the same way
@@ -22,7 +23,7 @@ the boundary. Everything that runs *inside* the container belongs to
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
 | `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SCMRelease`. Plain records; a consumer depends on this jar and gets no domain. |
-| `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/workspaces`. |
+| `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/`. |
 
 So a checkout needs one command a plain clone does not give you:
 
@@ -243,10 +244,11 @@ whatever no live workspace container claims. That reconcile, not a TTL, is what 
 
 ## Where it answers
 
-Everything this service serves is under `/workspaces`, its gateway segment. qits-gateway routes
-**verbatim by prefix** — `/workspaces/*` reaches `qits-workspaces`, with no rewriting — so the
-service serves the prefixed path itself and there is no unprefixed form, on the gateway or on
-`qits-net`. Anything left at the root is simply unreachable.
+This service has a **host of its own** — `workspaces.<env>.<domain>` — and serves two things on it.
+The **client is at `/`**, and every **machine** route stays under `/workspaces`, its segment. The
+edge routes `/workspaces/*` **verbatim by prefix** on that host and on every other one, with no
+rewriting, so the service serves the prefixed path itself and there is no unprefixed form, on the
+edge or on `qits-net`.
 
 | Prefix | What | Set by |
 |---|---|---|
@@ -256,15 +258,17 @@ service serves the prefixed path itself and there is no unprefixed form, on the 
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
 | `/workspaces/container/{id}/*` | the workspace-daemon reverse proxy | `ContainerProxyPath.PREFIX`, literal |
 | `/workspaces/daemon/stream/{nonce}` | where a daemon's tunnel dial-back lands | `WorkspaceTunnels.STREAM_PATH_PREFIX`, literal |
-| `/workspaces/` | the SPA, and every client-side route under it | `quarkus.quinoa.ui-root-path` + `enable-spa-routing` |
+| `/` | the SPA, and every client-side route under it — its own paths and the scoped `/<project>/<category>/<repo>/…` | `quarkus.quinoa.ui-root-path` + `enable-spa-routing` |
 
-The last row is a **fallback**, and the six above it are what it must not swallow. Quinoa derives its
-skip list from `quarkus.rest.path` and `quarkus.http.non-application-root-path` only, so the four
-literal routes are outside it and are named again in `quarkus.quinoa.ignored-path-prefixes`
-(`/api,/q,/daemon,/service,/container` — relative to the UI root, and repeating `/api` and `/q`
-because setting the key replaces the derivation rather than extending it). Without it a mistyped
-`/workspaces/daemon…` answers `200 text/html` with `index.html`, which a machine client parses as
-data; with it, it answers 404. Add a literal route, add its prefix.
+The last row is a **fallback over the whole port**, and the six above it are what it must not
+swallow. Quinoa derives its skip list from `quarkus.rest.path` and
+`quarkus.http.non-application-root-path` only, so the four literal routes would be outside it. The
+key is set instead, to one **absolute** entry — `quarkus.quinoa.ignored-path-prefixes=/workspaces` —
+which prefix-matches all six rows at once. The values used to be relative to the UI root (`/api`
+rather than `/workspaces/api`); stripping a UI root of `/` changes nothing, so they are now what the
+request spells. Without the key a mistyped `/workspaces/daemon…` answers `200 text/html` with
+`index.html`, which a machine client parses as data; with it, it answers 404. Add a **root-level**
+route, add its prefix.
 
 These are second-level segments beside `api` because none is a JSON API, and all are
 literals for the same reason: **raw Vert.x routes and `@WebSocket` paths do not follow

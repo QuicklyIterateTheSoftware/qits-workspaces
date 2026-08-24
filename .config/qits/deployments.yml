@@ -10,8 +10,18 @@
 # qits-workspaces is an ENVIRONMENT service: one instance per tier, the default target, so the
 # `deployment_target` key is left off rather than written out as its own default.
 #
+# The path prefix the edge routes here on EVERY host, browser and machine alike. The client itself
+# is served at `/` on this service's own host (workspaces.<env>.<domain>), so this covers the machine
+# surface only: /workspaces/api, /workspaces/q and the four literal wire routes under it.
 routes: /workspaces
-navigation: Workspaces:5
+
+# Where this application appears in the chrome's navigation tree. `<slot>.<Label>:<position>`, and
+# the slot is what places it. `<category>.details` is a child of a repository in scope, so Workspaces
+# shows up under a repository of any kind; `project.detail` is a child of the Project node, where it
+# means the project wrapper's own workspaces — the aggregate ones, which is what this service exists
+# for. Positions are per slot: 5 is the platform's fixed order of the per-repository applications
+# (Docs 1, CI 2, Artifacts 3, Configuration 4, Workspaces 5).
+navigation-entries: services.details.Workspaces:5, daemons.details.Workspaces:5, libs.details.Workspaces:5, frontends.details.Workspaces:5, cli.details.Workspaces:5, images.details.Workspaces:5, project.detail.Workspaces:1
 
 # ONE KEY, AND IT ASKS FOR TWO DATABASES, because two jars in this deployable each own one.
 #
