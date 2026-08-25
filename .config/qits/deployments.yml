@@ -19,9 +19,9 @@ routes: /workspaces
 # the slot is what places it. `<category>.details` is a child of a repository in scope, so Workspaces
 # shows up under a repository of any kind; `project.detail` is a child of the Project node, where it
 # means the project wrapper's own workspaces — the aggregate ones, which is what this service exists
-# for. Positions are per slot: 5 is the platform's fixed order of the per-repository applications
-# (Docs 1, CI 2, Artifacts 3, Configuration 4, Workspaces 5).
-navigation-entries: services.details.Workspaces:5, daemons.details.Workspaces:5, libs.details.Workspaces:5, frontends.details.Workspaces:5, cli.details.Workspaces:5, images.details.Workspaces:5, project.detail.Workspaces:1
+# for. Positions are per slot: 7 is Workspaces' place in the platform's fixed order of the
+# per-repository applications (Api Docs 1, Docs 2, Code 3, CI 4, Artifacts 5, Configuration 6, Workspaces 7).
+navigation-entries: services.details.Workspaces:7, daemons.details.Workspaces:7, libs.details.Workspaces:7, frontends.details.Workspaces:7, cli.details.Workspaces:7, images.details.Workspaces:7, project.detail.Workspaces:1
 
 # ONE KEY, AND IT ASKS FOR TWO DATABASES, because two jars in this deployable each own one.
 #
