@@ -69,6 +69,25 @@ components:
           format: int32
         ranAt:
           $ref: "#/components/schemas/Instant"
+    BranchSweepReport:
+      type: object
+      properties:
+        dryRun:
+          type: boolean
+        repositoriesExamined:
+          type: integer
+          format: int32
+        branchesExamined:
+          type: integer
+          format: int32
+        removed:
+          type: array
+          items:
+            $ref: "#/components/schemas/SweptBranch"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/SweepError"
     CleanupBranchRequest:
       type: object
       required:
@@ -407,6 +426,48 @@ components:
       - RESTARTING
       - CRASHED
       - STOPPED
+    SweepBranchesRequest:
+      type: object
+      required:
+      - repositories
+      properties:
+        dryRun:
+          type: boolean
+        repositories:
+          type: array
+          items:
+            $ref: "#/components/schemas/SweepRepository"
+        keepPrefixes:
+          type: array
+          items:
+            type: string
+    SweepError:
+      type: object
+      properties:
+        repositoryId:
+          type: string
+        branch:
+          type: string
+        error:
+          type: string
+    SweepRepository:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        mainBranch:
+          type: string
+    SweptBranch:
+      type: object
+      properties:
+        repositoryId:
+          type: string
+        repositoryName:
+          type: string
+        branch:
+          type: string
     UpdateHistoryRequest:
       type: object
       properties:
@@ -755,6 +816,34 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+  /workspaces/api/gc/branches:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SweepBranchesRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BranchSweepReport"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
+        "400":
+          description: Bad Request
+      summary: Sweep Branches
+      tags:
+      - Gc Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
+        - qits:system
   /workspaces/api/history:
     get:
       parameters:
@@ -1639,4 +1728,4 @@ paths:
         - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.820.154722
+  version: 2026.825.143810

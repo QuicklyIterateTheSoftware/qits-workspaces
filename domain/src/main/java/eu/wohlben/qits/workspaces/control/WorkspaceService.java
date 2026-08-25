@@ -2305,6 +2305,100 @@ public class WorkspaceService {
     }
   }
 
+  /** One repository the sweep is asked to examine — the caller's catalogue row, not a lookup. */
+  public record SweepRepository(String id, String name, String mainBranch) {}
+
+  /** One branch the sweep removed (or, on a dry run, would remove). */
+  public record SweptBranch(String repositoryId, String repositoryName, String branch) {}
+
+  /** One branch (or whole repository) the sweep could not judge; the sweep went on without it. */
+  public record SweepError(String repositoryId, String branch, String error) {}
+
+  /**
+   * @param removed what was deleted — or, on a dry run, what would have been
+   * @param errors what could not be judged or deleted; never a reason to stop the rest
+   */
+  public record BranchSweepReport(
+      boolean dryRun,
+      int repositoriesExamined,
+      int branchesExamined,
+      List<SweptBranch> removed,
+      List<SweepError> errors) {}
+
+  /**
+   * The nightly half of branch cleanup: remove every <b>plain</b> branch that is fully merged —
+   * the refs the branch dropdowns collect after a release deletes a workspace but an ad-hoc push,
+   * an abandoned epic or a typo left its branch behind.
+   *
+   * <p><b>What it never touches, and why each refusal is hard-coded here</b> rather than left to
+   * configuration:
+   *
+   * <ul>
+   *   <li><b>The repository's main branch</b> — {@link #canCleanupBranch} refuses it too; belt and
+   *       braces for the ref everything else forks from.
+   *   <li><b>{@code environment/*}</b> — the deploy refs are fully merged <i>by construction</i>
+   *       (a promotion pushes a released main sha onto them), which is exactly the shape this
+   *       sweep condemns; deleting one would sever the tier's deploy trigger. The caller may pass
+   *       more prefixes to keep; it cannot pass fewer.
+   *   <li><b>Workspace-backed branches</b> — {@link #cleanupBranch} deletes the workspace along
+   *       with the branch, which is right under a human's click and wrong overnight: a freshly
+   *       provisioned workspace with nothing committed yet is "fully merged", and its owner would
+   *       find their container gone by morning. An automated run removes only what no active
+   *       workspace stands on.
+   * </ul>
+   *
+   * <p>Everything that survives those refusals still goes through {@link #canCleanupBranch} — the
+   * same single criterion the UI and the endpoint use, mirror-refreshed per question — and then
+   * {@link #cleanupBranch}, which re-checks under its transaction. A branch or repository this
+   * cannot judge (an unreachable mirror, a race with a concurrent delete) is recorded and skipped:
+   * a sweep is a best-effort pass over the whole estate, and one broken repository must not keep
+   * every other one's refs.
+   */
+  public BranchSweepReport sweepMergedBranches(
+      List<SweepRepository> repositories, Set<String> keepPrefixes, boolean dryRun) {
+    List<SweptBranch> removed = new ArrayList<>();
+    List<SweepError> errors = new ArrayList<>();
+    Set<String> protectedPrefixes = new java.util.HashSet<>(keepPrefixes == null ? Set.of() : keepPrefixes);
+    protectedPrefixes.add("environment/");
+    int repositoriesExamined = 0;
+    int branchesExamined = 0;
+
+    for (SweepRepository repository : repositories == null ? List.<SweepRepository>of() : repositories) {
+      if (repository == null || repository.id() == null || repository.id().isBlank()) {
+        continue;
+      }
+      List<String> branches;
+      try {
+        branches = mirrors.of(repository.id()).remoteBranches();
+      } catch (RuntimeException e) {
+        errors.add(new SweepError(repository.id(), null, e.getMessage()));
+        continue;
+      }
+      repositoriesExamined += 1;
+      for (String branch : branches) {
+        branchesExamined += 1;
+        if (branch.isBlank()
+            || branch.equals(repository.mainBranch())
+            || protectedPrefixes.stream().anyMatch(branch::startsWith)
+            || findWorkspaceByBranch(repository.id(), branch) != null) {
+          continue;
+        }
+        try {
+          if (!canCleanupBranch(repository.id(), branch, repository.mainBranch())) {
+            continue;
+          }
+          if (!dryRun) {
+            cleanupBranch(repository.id(), branch);
+          }
+          removed.add(new SweptBranch(repository.id(), repository.name(), branch));
+        } catch (RuntimeException e) {
+          errors.add(new SweepError(repository.id(), branch, e.getMessage()));
+        }
+      }
+    }
+    return new BranchSweepReport(dryRun, repositoriesExamined, branchesExamined, removed, errors);
+  }
+
   /**
    * Merges {@code sourceBranch} into {@code resolvedTarget}, in a detached worktree on the
    * repository's <b>mirror</b>, and <b>pushes</b> the result.
