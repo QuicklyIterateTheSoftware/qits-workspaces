@@ -51,6 +51,16 @@
         <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
         <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
         <qits.containers-client.version>2026.822.190148</qits.containers-client.version>
+        <!-- The user-story framework (test scope everywhere): TokenValidationBootstrapIT is written
+             as @UserStory methods, so the packaged-boot proof also regenerates
+             service/target/userstories/ — the story's own documentation, sequence diagram
+             included. Nothing in src/main knows it exists. -->
+        <qits.userflows.version>2026.828.153026</qits.userflows.version>
+        <!-- The recording service mocks that IT boots against (the generic MockService plus
+             idp.MockIdp), released out of libs/qits-integrations-quarkus like qits-db-core and
+             qits-auth-core above — the same-string policy applies the day this repo consumes a
+             newer reactor of it. -->
+        <qits.service-mock.version>2026.827.71232</qits.service-mock.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -92,7 +102,18 @@
 
         <!-- The container ITs need docker, a pulled qits/workspace image (the published, layered
              one — see AGENTS.md) and the daemon native binary, none of which a fresh clone has.
-             `mvn verify` must be green without them. -->
+             `mvn verify` must be green without them.
+
+             AND IT STAYS true NOW THAT A PACKAGED IT EXISTS. TokenValidationBootstrapIT needs no
+             docker at all — it boots the fast-jar against an embedded postgres and a MockIdp — but
+             failsafe has one run per module, so flipping this on would turn the five docker-backed
+             Daemon*IT back on with it. They self-skip, yet a `mvn verify` that shells `docker image
+             inspect` five times is exactly what the clone-alone rule forbids, and the qits-githost
+             precedent (skipITs=false in its service module) only works there because that repo has
+             no such siblings. So the userflow run opts itself in by NAME instead:
+             .config/qits/ci-event-userflows.yml passes
+             `-DskipITs=false -Dit.test=TokenValidationBootstrapIT`, which is also the incantation
+             to run it by hand. -->
         <skipITs>true</skipITs>
         <!-- Surefire's @{argLine} has no value unless something (jacoco/quarkus) sets it. -->
         <argLine/>
@@ -173,6 +194,19 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-arch-rules</artifactId>
                 <version>${qits.arch-rules.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Test scope at every declaration site, like qits-arch-rules: the stories run in
+                     the build and ship in nothing. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-userflows</artifactId>
+                <version>${qits.userflows.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Test scope at every declaration site, like qits-arch-rules. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-service-mock</artifactId>
+                <version>${qits.service-mock.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>

@@ -138,6 +138,17 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- The fourth arch, and it is CI's. .config/qits/ci-event-userflows.yml runs
+                 `mvn verify` over the whole reactor inside maven-base as `user: build`, and those
+                 step containers are Alpine (musl) — zonky picks the -alpine binaries there at run
+                 time, so without this line this module's suite dies before the packaged IT two
+                 modules later ever gets a chance to run. qits-db-core's pom carries the same
+                 fourth arch for the same pipeline. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>io.zonky.test.postgres</groupId>
             <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
