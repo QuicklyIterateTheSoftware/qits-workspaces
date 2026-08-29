@@ -41,6 +41,7 @@ public final class WorkspaceContainer {
   private final List<Mount> volumes = new ArrayList<>();
   private String network;
   private String memory;
+  private String memorySwap;
   private String pidsLimit;
   private String cpus;
   private Integer oomScoreAdj;
@@ -94,13 +95,24 @@ public final class WorkspaceContainer {
   }
 
   /**
-   * Cap the container's memory. The same value becomes the swap cap too, so the container can
-   * neither exceed the cap nor swap-thrash the host past it. With the cgroup limit in place every
-   * JVM inside sizes its default heap against it (container support is on by default), so no
-   * per-tool {@code -Xmx} plumbing is needed. Blank/null caps nothing.
+   * Cap the container's memory ({@code --memory}). With the cgroup limit in place every JVM inside
+   * sizes its default heap against it (container support is on by default), so no per-tool {@code
+   * -Xmx} plumbing is needed. Blank/null caps nothing. Unless {@link #memorySwap} grants headroom,
+   * this value becomes the swap cap too, so the container can neither exceed the cap nor
+   * swap-thrash the host past it.
    */
   public WorkspaceContainer memory(String limit) {
     this.memory = limit;
+    return this;
+  }
+
+  /**
+   * The memory+swap total ({@code --memory-swap}). Docker's semantics: the value INCLUDES {@link
+   * #memory}, so {@code 4g}/{@code 8g} is 4G of RAM plus 4G of swap. Blank/null grants no swap —
+   * the adapter then sends {@link #memory} for both, the hard cap this service always had.
+   */
+  public WorkspaceContainer memorySwap(String limit) {
+    this.memorySwap = limit;
     return this;
   }
 
@@ -183,9 +195,14 @@ public final class WorkspaceContainer {
     return network;
   }
 
-  /** The memory cap, or null/blank for none. It is the swap cap as well — see {@link #memory}. */
+  /** The memory cap, or null/blank for none — see {@link #memory(String)}. */
   public String memory() {
     return memory;
+  }
+
+  /** The memory+swap total, or null/blank for "no swap" — see {@link #memorySwap(String)}. */
+  public String memorySwap() {
+    return memorySwap;
   }
 
   public String pidsLimit() {

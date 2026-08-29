@@ -7,7 +7,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-workspaces</artifactId>
-        <version>2026.825.181754</version>
+        <version>2026.829.94330</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -214,6 +214,28 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- The user-story framework: TokenValidationBootstrapIT is written as @UserStory
+                 methods, so the packaged-boot proof doubles as documentation — steps, interactions
+                 and a sequence diagram emitted under target/userstories/. Both its stories are
+                 browserless (they take Interactions and no Flow), so the transitive Playwright
+                 never launches anything and no Chromium is needed to build this module. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-userflows</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The recording service mocks. The IT points quarkus.oidc at idp.MockIdp — a
+                 MockService plus key material: it serves the JWKS for a generated keypair, mints
+                 tokens signed by it (and, on demand, by a key it never published), and records what
+                 it answered, which is the far end of the story's interactions. It is the one thing
+                 DaemonControlSocketMachineAuthTest cannot be: that test hands Quarkus a static
+                 quarkus.oidc.public-key, so the shipped auth-server-url + jwks-path pair — a real
+                 fetch over a real listener at startup — is exercised nowhere else in this repo. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-service-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <!-- The store every @QuarkusTest here boots against — BOTH of this module's datasources,
                  `workspaces` and the qits-eventstream jar's `eventstream`. Zonky spawns real
                  postgres binaries as a child process, a maven dependency rather than a container,
@@ -235,6 +257,18 @@
         <dependency>
             <groupId>io.zonky.test.postgres</groupId>
             <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The fourth arch, and it is CI's. .config/qits/ci-event-userflows.yml runs
+                 `mvn verify` in maven-base as `user: build`, and those step containers are Alpine
+                 (musl): zonky picks the -alpine binaries there at run time, and
+                 TokenValidationBootstrapIT's own embedded postgres is spawned by this module's
+                 failsafe JVM. `user: build` for the same family of reason — initdb refuses to run
+                 as root and calls getpwuid, so the step needs a passwd-backed non-root user.
+                 qits-db-core's pom carries the same fourth arch for the same pipeline. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -294,11 +328,19 @@
                                      application.properties, NOT ${project.build.finalName}-runner:
                                      with an output-name set that path does not exist, so the two
                                      drifting apart means a native IT launches nothing and passes.
-                                     Inert today — this repo's *IT.java are the docker-backed
-                                     `extended` suite, and there is no artifact-level IT to write
-                                     until a real RepositoryLookup exists (see the `native` profile
-                                     below). Set now so it cannot be got wrong later. -->
+                                     No longer inert: TokenValidationBootstrapIT is the
+                                     artifact-level IT this line was set in advance for, and a
+                                     `-Dnative -DskipITs=false` run launches the binary through
+                                     it. -->
                                 <native.image.path>${project.build.directory}/qits-workspaces</native.image.path>
+                                <!-- Launch the packaged app on a FREE port rather than the default
+                                     8081. Two holders of that port, and both are real here: the
+                                     last @QuarkusTest instance surefire started can still be
+                                     letting go of it when failsafe begins, and on the deployment
+                                     host 8081 is where the platform's own npm registry answers.
+                                     The test properties set the same value for surefire and say
+                                     the same thing at greater length. -->
+                                <quarkus.http.test-port>0</quarkus.http.test-port>
                                 <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                             </systemPropertyVariables>
                         </configuration>
@@ -320,14 +362,23 @@
 
              It deliberately does NOT flip skipITs, which is where this repo differs from its
              siblings. There the native profile turns ITs on so a `-Dnative` build exercises the
-             binary it just produced; here the four *IT.java are the docker-backed `extended` suite
-             (real containers, the published qits/workspace image, the daemon binary) and have nothing to say
-             about the artifact — turning them on would make a native build shell docker, which is
-             precisely what the clone-alone rule forbids. And the artifact-level IT that would
-             belong here cannot be written yet: the binary refuses to start without a
-             RepositoryLookup, so a @QuarkusIntegrationTest would fail on the documented
-             behaviour rather than on a defect. Flip it with the class that replaces
-             wiring/UnconfiguredRepositoryLookup, not before. -->
+             binary it just produced; here five of the six *IT.java are the docker-backed `extended`
+             suite (real containers, the published qits/workspace image, the daemon binary) and have
+             nothing to say about the artifact — turning them on would make a native build shell
+             docker, which is precisely what the clone-alone rule forbids.
+
+             The sixth one IS about the artifact, and it is why this comment no longer ends where it
+             used to. TokenValidationBootstrapIT could not be written while the binary refused to
+             start without a RepositoryLookup — a @QuarkusIntegrationTest would have failed on the
+             documented behaviour rather than on a defect. wiring/HttpRepositoryLookup replaced that
+             scaffold, so the address is now something a test profile can simply supply, and it
+             does. It is opted in by NAME rather than by this flag:
+
+                 ./mvnw verify -DskipITs=false -Dit.test=TokenValidationBootstrapIT
+
+             and the same two arguments plus `-Dnative` run it against the binary. Naming it is what
+             keeps the docker-backed five out of a run that has no business shelling docker. -->
+
         <profile>
             <id>native</id>
             <activation>

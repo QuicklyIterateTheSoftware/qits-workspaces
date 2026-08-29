@@ -1161,3 +1161,42 @@ than per caller. A second role invented here would be a vocabulary qits-idp does
     not move five test literals. It used to be the bare `qits/workspace:latest`, which was a
     hand-built local tag on one machine — the whole disease the pin exists to end, and a spelling
     that must not come back anywhere as a default.
+
+## The sixth IT: the packaged one, and the userflow
+
+`api/TokenValidationBootstrapIT` is the artifact-level integration test the `service` pom's `native`
+profile said could not be written yet. It could not, while the deployable refused to start without a
+`RepositoryLookup` — a `@QuarkusIntegrationTest` would have failed on the documented behaviour
+rather than on a defect. `wiring/HttpRepositoryLookup` replaced that scaffold, so the address is now
+something a test profile supplies, and it does.
+
+It boots the **packaged** fast-jar with the **machine-auth gate on** —
+`qits.auth.machine.required=true`, which is what `quarkus.oidc.tenant-enabled` is spelled in terms of
+— against `eu.wohlben.qits.servicemock.idp.MockIdp`, a recording stand-in for qits-platform-idp that
+serves a real JWKS for a generated keypair and mints RS256 bearers signed by it. That combination is
+the gap `DaemonControlSocketMachineAuthTest` leaves: that test flips the same gate but hands Quarkus
+a static `quarkus.oidc.public-key`, so the shipped `auth-server-url` + `jwks-path=jwks` pair — a real
+fetch over a real listener, at startup, before any caller arrives — is exercised nowhere else.
+
+Two things about it are easy to undo:
+
+- **It is opted in by NAME, not by `skipITs`.** The root pom keeps `skipITs=true`, because failsafe
+  has one run per module and flipping it would turn the five docker-backed `Daemon*IT` back on with
+  it. Run it — and `.config/qits/ci-event-userflows.yml` runs it — as
+  `./mvnw verify -DskipITs=false -Dit.test=TokenValidationBootstrapIT`.
+- **Every override the profile sets is a RUNTIME key**, including the two that only look like
+  environment (`QITS_RESOURCE_DB_*`, `QITS_RESOURCE_EVENTSTREAM_*` — spelled as the deployer spells
+  them, so the shipped `${…}` expressions stay under test). A packaged process cannot be handed a
+  build-time key; it would silently take the default, which is this repo's own worst bug class.
+
+It is also this repo's first **userflow**: the two stories are `@UserStory` methods in category
+`authentication`, so `mvn verify` also writes `service/target/userstories/` — the proof as
+documentation, with the idp interactions drawn as a sequence diagram. They are **browserless** (an
+`Interactions` parameter and no `Flow`), so the framework's transitive Playwright never launches
+anything. The class orderer is installed the one way Quarkus permits — the
+`junit.quarkus.orderer.secondary-orderer` line in `service`'s test properties; a local
+`junit-platform.properties` hard-fails surefire.
+
+`.config/qits/ci-event-userflows.yml` publishes the reports per commit as the docs bundle
+`@userflows/qits-workspaces`, and is **non-gating by design**: it is a separate file from
+`ci-post-receive.yml` so a red story does not cost the branch its image.

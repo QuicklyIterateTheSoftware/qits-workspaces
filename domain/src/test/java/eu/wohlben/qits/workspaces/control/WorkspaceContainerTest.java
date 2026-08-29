@@ -30,6 +30,7 @@ class WorkspaceContainerTest {
             .cpus("2")
             .pidsLimit("2048")
             .memory("4g")
+            .memorySwap("8g")
             .network("qits-net")
             .volume("vol", "/mnt")
             .addHost("host.docker.internal:host-gateway")
@@ -42,8 +43,10 @@ class WorkspaceContainerTest {
     assertEquals(Map.of("qits.repository", "r"), container.labels());
     assertEquals(List.of("host.docker.internal:host-gateway"), container.addHosts());
     assertEquals("qits-net", container.network());
-    // The memory cap is the swap cap too; one value carries both.
+    // The memory cap and the memory+swap total beside it — docker's --memory-swap includes the
+    // cap, so this pair is 4G of RAM plus 4G of swap.
     assertEquals("4g", container.memory());
+    assertEquals("8g", container.memorySwap());
     assertEquals("2048", container.pidsLimit());
     assertEquals("2", container.cpus());
     assertEquals(List.of(new WorkspaceContainer.Mount("vol", "/mnt")), container.volumes());
@@ -59,6 +62,7 @@ class WorkspaceContainerTest {
     assertNull(container.user());
     assertNull(container.network());
     assertNull(container.memory());
+    assertNull(container.memorySwap());
     assertNull(container.pidsLimit());
     assertNull(container.cpus());
     assertEquals(List.of(), container.volumes());

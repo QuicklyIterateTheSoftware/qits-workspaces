@@ -194,8 +194,22 @@ class WorkspaceContainersTest {
     // NOT qits-ci's sandbox, and the difference is the whole point: a step container runs a
     // repository's script and drops everything it can, while this is a development environment a
     // person works in — it has to be able to su, chown its own checkout and install a toolchain.
-    // What bounds it instead is the resource caps beside them. The memory cap is the swap cap too,
-    // so the container cannot spill the difference into host swap.
+    // What bounds it instead is the resource caps beside them. The swap total is docker's
+    // --memory-swap and INCLUDES the memory cap, so 4g/8g is 4G of RAM plus 4G of swap — headroom
+    // no other platform container gets, granted here by this service and not by qits-containers.
+    assertEquals(new Security(false, false, "4g", "8g", null, null, 600), spec.security());
+  }
+
+  @Test
+  void aBlankSwapKeyFallsBackToTheHardCap() {
+    Spec spec =
+        adapter(TestWorkspaceContainerFactory.noSwap())
+            .ensureRequest(REPO, "work", 1L, "main", null)
+            .spec();
+
+    // "The key is blank" must mean "no swap". A null on the wire would leave the value to the
+    // runtime — unlimited swap — so the adapter sends the memory cap for both, the shape this
+    // service always sent before the swap key existed.
     assertEquals(new Security(false, false, "4g", "4g", null, null, 600), spec.security());
   }
 
