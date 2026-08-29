@@ -14,7 +14,7 @@ import java.util.Optional;
  *
  * <p>The values mirror what the service ships, and every one of them is asserted somewhere by the
  * adapter's test — an image with a port and a calver tag, the three shared volumes at their fixed
- * mounts, a hard memory cap and no pids/cpus cap, a deterministic qits host so the daemon's
+ * mounts, a memory cap with swap headroom and no pids/cpus cap, a deterministic qits host so the daemon's
  * dial-home URL is a literal rather than this machine's. {@code domain}'s own
  * {@code WorkspaceContainerFactoryTest} builds the same thing for the same reason; the two are
  * duplicated because the modules do not share a test classpath.
@@ -42,6 +42,13 @@ public final class TestWorkspaceContainerFactory {
   /** A factory with {@code qits.workspace.persist-workspace} off — the kill switch's shape. */
   public static WorkspaceContainerFactory ephemeralWorkspace() {
     return build(false);
+  }
+
+  /** A factory with {@code qits.workspace.memory-swap-limit} blanked — a deployment granting no swap. */
+  public static WorkspaceContainerFactory noSwap() {
+    WorkspaceContainerFactory f = build(true);
+    f.memorySwapLimit = Optional.empty();
+    return f;
   }
 
   /**
@@ -76,8 +83,12 @@ public final class TestWorkspaceContainerFactory {
     f.persistWorkspace = persistWorkspace;
     f.timezone = Optional.of("UTC");
     f.memoryLimit = Optional.of("4g");
+    f.memorySwapLimit = Optional.of("8g");
     f.pidsLimit = Optional.empty();
     f.cpus = Optional.empty();
+    // The @ConfigProperty defaultValue never runs here — a hand-built factory must restate it, or
+    // the spec carries null where every deployment carries 600.
+    f.oomScoreAdj = 600;
     f.gitIdentity = identity();
     f.qitsHostResolver = resolver();
     f.qitsPort = "8080";

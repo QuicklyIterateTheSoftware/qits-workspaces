@@ -147,19 +147,29 @@ public class WorkspaceContainerFactory {
   Optional<String> timezone;
 
   /**
-   * Hard memory cap for every workspace container ({@code --memory} + {@code --memory-swap} set to
-   * the same value, so a container can neither exceed the cap nor swap-thrash the host past it).
-   * Without it a container sees the whole host's RAM and every JVM inside sizes its default heap
-   * against that — a dev-server service (Maven launcher JVM + forked dev JVM + node dev server) can
-   * then OOM the entire host
+   * Memory cap for every workspace container ({@code --memory}). Without it a container sees the
+   * whole host's RAM and every JVM inside sizes its default heap against that — a dev-server
+   * service (Maven launcher JVM + forked dev JVM + node dev server) can then OOM the entire host
    * (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md). With the
    * cgroup limit in place the JVMs size against it automatically (container support is default-on),
    * so no per-tool {@code -Xmx} plumbing is needed. Blank/absent disables the cap; the shipped
-   * default is {@code 4g} (service/cli application.properties). Optional because SmallRye treats an
-   * empty property value as "no value".
+   * default is {@code 4g}. Optional because SmallRye treats an empty property value as "no value".
    */
   @ConfigProperty(name = "qits.workspace.memory-limit")
   Optional<String> memoryLimit;
+
+  /**
+   * Memory+swap total for every workspace container ({@code --memory-swap}). Docker's semantics:
+   * the value INCLUDES the memory cap, so the shipped {@code 4g}/{@code 8g} pair is 4G of RAM plus
+   * 4G of swap — headroom that lets a workspace under momentary pressure page instead of taking an
+   * OOM kill. Blank/absent grants no swap: the adapter then sends the memory cap for both values,
+   * which was this service's only shape before the key existed. Workspace containers are the ONLY
+   * platform containers with swap, and this key is why it stays that way — the grant is made here,
+   * by the one service that asks for workspace containers, not in qits-containers for every
+   * workload.
+   */
+  @ConfigProperty(name = "qits.workspace.memory-swap-limit")
+  Optional<String> memorySwapLimit;
 
   /**
    * Process/thread cap ({@code --pids-limit}, fork-bomb guard). Blank/absent (default) disables.
@@ -468,7 +478,7 @@ public class WorkspaceContainerFactory {
    * back, the {@code host.docker.internal} alias Linux needs, the shared {@code qits-net} network,
    * the configured git commit identity as {@code GIT_*} env ({@link GitIdentity}), the shared
    * credential + build-cache volumes (whenever configured), the configured resource limits (memory
-   * hard cap, pids, cpus — whenever configured), the image, and the {@code qits-workspace-daemon}
+   * cap, memory+swap total, pids, cpus — whenever configured), the image, and the {@code qits-workspace-daemon}
    * dial-home env, and the commissioned platform credential when the workspace holds one. The
    * container's process is {@code qits-workspace-daemon} via the image
    * ENTRYPOINT (no command is appended) — with no {@code sleep infinity}
@@ -625,6 +635,7 @@ public class WorkspaceContainerFactory {
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
+    memorySwapLimit.filter(v -> !v.isBlank()).ifPresent(container::memorySwap);
     pidsLimit.filter(v -> !v.isBlank()).ifPresent(container::pidsLimit);
     cpus.filter(v -> !v.isBlank()).ifPresent(container::cpus);
     container.oomScoreAdj(oomScoreAdj);

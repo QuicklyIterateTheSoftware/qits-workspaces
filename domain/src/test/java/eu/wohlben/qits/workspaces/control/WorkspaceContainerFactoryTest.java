@@ -59,9 +59,10 @@ class WorkspaceContainerFactoryTest {
     f.npmRegistryUrl = Optional.empty();
     f.npmProxyUrl = Optional.empty();
     f.timezone = Optional.empty();
-    // Mirrors the shipped default (service/cli application.properties): a hard memory cap on every
+    // Mirrors the shipped default: a 4g memory cap with an 8g memory+swap total on every
     // container, pids/cpus off.
     f.memoryLimit = Optional.of("4g");
+    f.memorySwapLimit = Optional.of("8g");
     f.pidsLimit = Optional.empty();
     f.cpus = Optional.empty();
     f.gitIdentity = identity("qits", "qits@local");
@@ -188,10 +189,12 @@ class WorkspaceContainerFactoryTest {
     assertEnv(c, "QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART", "true");
     // The shared network, so qits reaches the container's ports by DNS name with no host publish.
     assertEquals("qits-net", c.network());
-    // The hard memory cap (it is the swap cap as well, so the container can't swap past it) —
-    // without it a dev server's JVMs size against the whole host's RAM and can OOM the host
-    // (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md).
+    // The memory cap — without it a dev server's JVMs size against the whole host's RAM and can
+    // OOM the host (docs/issues/resolved/2026-07-21_workspace-container-unbounded-memory-host-oom.md)
+    // — and the memory+swap total beside it, docker's --memory-swap, which INCLUDES the cap: 4g/8g
+    // is 4G of RAM plus 4G of swap.
     assertEquals("4g", c.memory());
+    assertEquals("8g", c.memorySwap());
     // pids/cpus are off by default.
     assertNull(c.pidsLimit());
     assertNull(c.cpus());
@@ -316,6 +319,19 @@ class WorkspaceContainerFactoryTest {
 
     // The blank never reaches the container: absent, not "  ", so the spec carries no cap at all.
     assertNull(c.memory());
+  }
+
+  @Test
+  void aBlankSwapLimitGrantsNoSwap() {
+    WorkspaceContainerFactory f = factory();
+    f.memorySwapLimit = Optional.of("  ");
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    // The blank never reaches the container, and a null here is what tells the adapter to send the
+    // memory cap for both values — no swap, the shape this service always sent.
+    assertEquals("4g", c.memory());
+    assertNull(c.memorySwap());
   }
 
   @Test

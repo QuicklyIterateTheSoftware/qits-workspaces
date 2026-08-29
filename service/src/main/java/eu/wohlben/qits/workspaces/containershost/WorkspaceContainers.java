@@ -364,9 +364,10 @@ public class WorkspaceContainers implements ContainerRuntime {
                 false,
                 false,
                 described.memory(),
-                // The same value, so the cap is hard: the container cannot spill the difference
-                // into host swap.
-                described.memory(),
+                // The configured memory+swap total when the factory carries one (the shipped
+                // default: 4g/8g, so 4G of swap). Without one, the same value as the memory cap,
+                // so the cap stays hard and the container cannot spill into host swap.
+                memorySwap(described),
                 pids(described.pidsLimit()),
                 described.cpus(),
                 described.oomScoreAdj()),
@@ -399,6 +400,17 @@ public class WorkspaceContainers implements ContainerRuntime {
       }
     }
     return names;
+  }
+
+  /**
+   * The {@code --memory-swap} value a workspace container is started with. The factory's configured
+   * total when there is one; the memory cap itself when there is not, because a spec whose swap
+   * field is null would leave the value to the runtime — unlimited swap — and "the key is blank"
+   * must mean "no swap", the shape this service always sent.
+   */
+  private static String memorySwap(WorkspaceContainer described) {
+    String configured = described.memorySwap();
+    return configured == null || configured.isBlank() ? described.memory() : configured;
   }
 
   /** The pids cap as the wire wants it. Blank, absent or unreadable all mean "no cap". */
