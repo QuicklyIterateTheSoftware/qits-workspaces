@@ -7,7 +7,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-workspaces</artifactId>
-        <version>2026.829.140444</version>
+        <version>2026.830.11845</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -214,9 +214,9 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <!-- The user-story framework: TokenValidationBootstrapIT is written as @UserStory
-                 methods, so the packaged-boot proof doubles as documentation — steps, interactions
-                 and a sequence diagram emitted under target/userstories/. Both its stories are
+            <!-- The user-story framework: this module's story catalogue is written as @UserStory
+                 methods, so the packaged-boot proof doubles as documentation — steps, notes and an
+                 observed network diagram emitted under target/userstories/. Every story is
                  browserless (they take Interactions and no Flow), so the transitive Playwright
                  never launches anything and no Chromium is needed to build this module. -->
             <groupId>${project.groupId}</groupId>

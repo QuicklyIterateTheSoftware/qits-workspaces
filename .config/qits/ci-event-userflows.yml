@@ -1,5 +1,5 @@
 # The per-commit userflow run: `mvn verify` at the pushed commit — which regenerates
-# service/target/userstories/ through TokenValidationBootstrapIT — and the reports published as one
+# service/target/userstories/ through the whole story catalogue — and the reports published as one
 # docs bundle, site @userflows/qits-workspaces, version = the bare commit sha, branch riding as
 # artifacts metadata for discovery.
 #
@@ -20,14 +20,20 @@
 # submodule, and the IT asserts nothing about the SPA. The packaged fast-jar failsafe boots is
 # otherwise exactly what ships.
 #
-# THE IT IS OPTED IN BY NAME, and that is the one line here that differs from every sibling repo's
-# copy of this file. `skipITs` is true in the root pom and stays true: five of this repo's six
-# *IT.java are the docker-backed `extended` suite (a real container, the published qits/workspace
-# image, the native daemon), and a bare `-DskipITs=false` would run them too — they self-skip, but
-# a step that shells `docker image inspect` five times is precisely what the clone-alone rule
-# forbids, and there is no docker in this container to shell. `-Dit.test` names the one IT that is
-# about the artifact. Only `service` binds failsafe executions, so no other module is asked for a
-# test it does not have.
+# THE STORY CLASSES ARE OPTED IN BY NAME, and that is the one line here that differs from every
+# sibling repo's copy of this file. `skipITs` is true in the root pom and stays true: five of this
+# repo's *IT.java are the docker-backed `extended` suite (a real container, the published
+# qits/workspace image, the native daemon), and a bare `-DskipITs=false` would run them too — they
+# self-skip, but a step that shells `docker image inspect` five times is precisely what the
+# clone-alone rule forbids, and there is no docker in this container to shell. `-Dit.test` is a
+# COMMA LIST of the five classes that are about the artifact, and a story class added without being
+# added here simply never runs — silently, which is why AGENTS.md says to change both in one commit.
+# Only `service` binds failsafe executions, so no other module is asked for a test it does not have.
+#
+# The story catalogue needs `git` on PATH with `git http-backend` beside it: StoryGitHost shells the
+# CGI program git ships, to serve the fixture repositories over real smart HTTP — a packaged process
+# carries ConfiguredGitHostAddress and cannot be pointed at a bare on disk. maven-base has git; a
+# step image without it would fail every release story at the first ls-remote.
 #
 # Loop review: this pipeline PUTs a docs bundle and pushes no commit — no cycle. Publish-if-absent:
 # events redeliver and docs versions are immutable, so 409 is success (the qits-spa-ui-components
@@ -53,7 +59,7 @@ steps:
         -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
         -Dquarkus.quinoa=false \
         -DskipITs=false \
-        -Dit.test=TokenValidationBootstrapIT
+        -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,OperatorReadsIT,ReleaseDoorRefusalIT
 
       # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
       # put it in every served URL. The path is the module's, since `service` is the only module

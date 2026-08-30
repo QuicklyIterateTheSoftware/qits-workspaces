@@ -1162,38 +1162,128 @@ than per caller. A second role invented here would be a vocabulary qits-idp does
     hand-built local tag on one machine — the whole disease the pin exists to end, and a spelling
     that must not come back anywhere as a default.
 
-## The sixth IT: the packaged one, and the userflow
+## The story catalogue: the packaged run, and what it documents
 
-`api/TokenValidationBootstrapIT` is the artifact-level integration test the `service` pom's `native`
-profile said could not be written yet. It could not, while the deployable refused to start without a
-`RepositoryLookup` — a `@QuarkusIntegrationTest` would have failed on the documented behaviour
-rather than on a defect. `wiring/HttpRepositoryLookup` replaced that scaffold, so the address is now
-something a test profile supplies, and it does.
+`api/TokenValidationBootstrapIT` was the artifact-level integration test the `service` pom's
+`native` profile said could not be written yet. It could not, while the deployable refused to start
+without a `RepositoryLookup` — a `@QuarkusIntegrationTest` would have failed on the documented
+behaviour rather than on a defect. `wiring/HttpRepositoryLookup` replaced that scaffold, so the
+address is now something a test profile supplies. It is no longer one IT: it is the first class of a
+**story catalogue** under `service/src/test/java/…/workspaces/stories/`, and everything below is
+about the whole of it.
 
-It boots the **packaged** fast-jar with the **machine-auth gate on** —
-`qits.auth.machine.required=true`, which is what `quarkus.oidc.tenant-enabled` is spelled in terms of
-— against `eu.wohlben.qits.servicemock.idp.MockIdp`, a recording stand-in for qits-platform-idp that
-serves a real JWKS for a generated keypair and mints RS256 bearers signed by it. That combination is
-the gap `DaemonControlSocketMachineAuthTest` leaves: that test flips the same gate but hands Quarkus
-a static `quarkus.oidc.public-key`, so the shipped `auth-server-url` + `jwks-path=jwks` pair — a real
-fetch over a real listener, at startup, before any caller arrives — is exercised nowhere else.
+**Twelve stories, five classes, one launched process.** Every class names
+`stories.support.StoryProfile`, because a `@TestProfile` is what failsafe launches a process for and
+two profiles would be two qits-workspaces — two boots, two JWKS fetches, two database sets, two
+mirror trees, and a diagram whose startup traffic landed in whichever process happened to be
+running.
 
-Two things about it are easy to undo:
+| class | category | what it is about |
+| --- | --- | --- |
+| `api.TokenValidationBootstrapIT` | authentication | the boot: the JWKS fetch, the commission reconcile, and a bearer cut for another audience |
+| `stories.branches.ReleaseDoorIT` | release | the release door — a deployable repository, a library, and a branch already in the trunk |
+| `stories.creation.WorkspaceProvisionIT` | workspaces | a workspace provisioned end to end, daemon dial included |
+| `stories.operations.OperatorReadsIT` | operations | what a live read costs, and what a stored read does not |
+| `stories.refusals.ReleaseDoorRefusalIT` | refusals | four ways not to release something |
 
-- **It is opted in by NAME, not by `skipITs`.** The root pom keeps `skipITs=true`, because failsafe
-  has one run per module and flipping it would turn the five docker-backed `Daemon*IT` back on with
-  it. Run it — and `.config/qits/ci-event-userflows.yml` runs it — as
-  `./mvnw verify -DskipITs=false -Dit.test=TokenValidationBootstrapIT`.
-- **Every override the profile sets is a RUNTIME key**, including the two that only look like
-  environment (`QITS_RESOURCE_DB_*`, `QITS_RESOURCE_EVENTSTREAM_*` — spelled as the deployer spells
-  them, so the shipped `${…}` expressions stay under test). A packaged process cannot be handed a
-  build-time key; it would silently take the default, which is this repo's own worst bug class.
+**Every override the profile sets is a RUNTIME key**, including the two that only look like
+environment (`QITS_RESOURCE_DB_*`, `QITS_RESOURCE_EVENTSTREAM_*` — spelled as the deployer spells
+them, so the shipped `${…}` expressions stay under test). A packaged process cannot be handed a
+build-time key; it would silently take the default, which is this repo's own worst bug class.
 
-It is also this repo's first **userflow**: the two stories are `@UserStory` methods in category
-`authentication`, so `mvn verify` also writes `service/target/userstories/` — the proof as
-documentation, with the idp interactions drawn as a sequence diagram. They are **browserless** (an
-`Interactions` parameter and no `Flow`), so the framework's transitive Playwright never launches
-anything. The class orderer is installed the one way Quarkus permits — the
+**It is opted in by NAME, not by `skipITs`.** The root pom keeps `skipITs=true`, because failsafe
+has one run per module and flipping it would turn the five docker-backed `Daemon*IT` back on with
+it. Run it — and `.config/qits/ci-event-userflows.yml` runs it — as a comma list:
+
+    ./mvnw verify -DskipITs=false -Dquarkus.quinoa=false \
+      -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,OperatorReadsIT,ReleaseDoorRefusalIT
+
+Adding a story class means adding it there **and** in the ci file. `-Dit.test` alone still runs the
+surefire suites, which is the honest gate; a run that wants only the stories adds
+`-Dtest=NoSuchUnitTest -Dsurefire.failIfNoSpecifiedTests=false`.
+
+### The far sides, and why there are three of them
+
+Nothing about a packaged run can be faked with a CDI bean: `FakeGitHostAddress`,
+`FakeRepositoryLookup` and `FakeContainerRuntime` are on the *test* classpath and the launched jar
+has never heard of them. So every peer is a real listener on loopback, and every one of them
+**records**, because a story's evidence for what the service did is the far side's own account of
+being asked.
+
+- **`stories.support.StoryGitHost` — qits-githost, over real smart HTTP.** The JDK's `HttpServer`
+  shelling `git http-backend` over a project root of bare repositories, at the real
+  `/git/<projectId>/<repoName>` route. It has to be real: `ConfiguredGitHostAddress` is what a
+  packaged process carries, and `RepoMirror.platformArgv` **refuses to run any http(s) git argv**
+  without a machine bearer to hang on `-c http.extraHeader`. It also installs the `pre-receive` hook
+  that records push options, which is the only way to see a `--push-option` from outside the pushing
+  process — and therefore the only way "the trunk push goes quiet exactly when there is somewhere to
+  promote to" is an assertion about the argv that ships.
+- **`stories.support.StoryPeers` — qits-projects, qits-containers, qits-platform-idp's outbound
+  half, and qits-events**, one stub answering as four and told apart by path prefix. Stateless
+  except for the container table (a provision asks whether a container is there, puts one, and later
+  lists them) and the file-armed `refuse(prefix)` the registry-outage story uses.
+- **`MockIdp` — the idp's inbound half**, serving the JWKS the gate validates against. It draws as
+  the same node `StoryPeers`' `/idp/*` routes do, because it is the same component.
+
+Both stubs and the git host are started by the **test profile** and read by story methods, which a
+launched-artifact run may instantiate in different classloaders — so every recording is a **file**,
+and every cursor is taken over that file.
+
+### What the diagrams are, and the four rules that keep them stable
+
+The network section is **observed, never narrated**: `Interactions` records notes only.
+`NetworkTaps.restAssured` (the framework ships it now — this repo's hand-copied
+`StoryNetworkFilter` was deleted when the catalogue was written) taps what a story sends *into* this
+service; the three recordings above supply what it sent *out*; `StoryDaemon` instruments the control
+socket by hand, because the framework ships no socket tap and a frame is not a request.
+
+1. **Order is load-bearing and the package names carry it.** `UserflowClassOrderer` sorts by
+   fully-qualified class name, so `…workspaces.api` drains before `…workspaces.stories.*` and the
+   boot story owns the startup traffic; within `stories`, `branches` < `creation` < `operations` <
+   `refusals`. `@UserflowRunsAfter` states the ones that are real dependencies as well.
+2. **A cached fetch belongs to whichever story paid for it.** quarkus-oidc-client caches its mint
+   for an hour (`StoryPeers` answers `expires_in: 3600` on purpose), so `POST /idp/token` lands in
+   the first release story for the `githost`/`projects` clients and in the workspace story for the
+   `containers` one — and in no story after. Running one class alone inherits the arrow and fails
+   its own edge count, loudly, which is the right way for that assumption to break.
+3. **An id that reaches a label inside a segment has to be AUTHORED.** `Labels` rewrites whole
+   segments it can tell were generated, so a uuid row id scrubs to `{id}` in
+   `/projects/api/repositories/{id}` — but the workspace fixture's id also travels *inside* a
+   container name (`qits-ws-<label>-<repoId[0:8]>`), where eight hex characters are not a whole
+   segment and are not rewritten. That fixture's id is a literal for exactly that reason.
+4. **Asynchronous far-side traffic is awaited before the story returns.** The commission reconcile
+   runs from a `StartupEvent` observer on its own thread; the boot story polls `StoryPeers`'
+   recording for its listing rather than hoping. An edge that lands after the drain is an edge in
+   the next story's diagram.
+
+**`assertEdgeCount` is what every class ends with**, because a count is how an absence is asserted
+when the peer itself was legitimately reached — "the refused release never wrote a ref" is five
+edges with no `git-receive-pack` among them, and no presence check can say that.
+
+### What is deliberately not covered, and why
+
+- **The bootstrap chain and the dev-server autostart.** `qits.bootstrap.autorun-enabled` and
+  `qits.services.autostart-enabled` are both `false` in the profile: both observers are async, the
+  config read would draw an arrow in whichever diagram happened to be open, and the bootstrap await
+  holds the technical process open for its whole chain timeout — which is what the workspace story
+  polls to learn the provision is over. Both are covered by the `@QuarkusTest` suites and by the
+  docker-backed `Daemon*IT`, where a real daemon really runs them.
+- **The reconcile's sweep.** Its listing is covered (the boot story); the listing is empty, so no
+  credential is ever given back.
+- **The container-to-idp credential exchange.** The workspace story reads the commissioned pair out
+  of the workload spec — the only place it exists, and exactly where a container finds it — and then
+  mints its dial bearer directly, because the stub idp answers an opaque string no gate could
+  validate. That the pair travelled is proved; that it can be exchanged is qits-platform-idp's own
+  claim.
+- **The git host's protection hook and its authorization.** `StoryGitHost` exports what it serves
+  unconditionally. Who may push a protected ref is qits-githost's suite's question.
+- **A release losing a race.** The lease serialises this flow's own releases, and staging a writer
+  *outside* the flow needs a hook on the far side of a socket from the launched process. It is
+  `ReleaseControllerTest`'s, with `FakeGitHostAddress.beforeNextPush`.
+
+Every story is **browserless** (an `Interactions` parameter and no `Flow`), so the framework's
+transitive Playwright never launches anything and no Chromium is needed to build this module. The
+class orderer is installed the one way Quarkus permits — the
 `junit.quarkus.orderer.secondary-orderer` line in `service`'s test properties; a local
 `junit-platform.properties` hard-fails surefire.
 
