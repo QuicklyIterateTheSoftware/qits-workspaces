@@ -15,6 +15,16 @@
 # surface only: /workspaces/api, /workspaces/q and the four literal wire routes under it.
 routes: /workspaces
 
+# WHAT THIS REPOSITORY DEPLOYS AS, held still across the repository rename. The repository is
+# qits-workspaces-service now; the application is still qits-workspaces, so nothing that is running
+# moves: the swarm service and its wire alias, the container, the image qits/qits-workspaces the
+# build pushes, the provisioned database, the derived host label, the extras family and the
+# QITS_APPLICATION the container boots with all keep the names they have. Omitted, this name would
+# be DERIVED from the repository, and the rename would read as a decommission plus a new application
+# rather than a rename. Changing the value later is exactly that decommission, so it does not change
+# again.
+application: qits-workspaces
+
 # Where this application appears in the chrome's navigation tree. `<slot>.<Label>:<position>`, and
 # the slot is what places it. `<category>.details` is a child of a repository in scope, so Workspaces
 # shows up under a repository of any kind; `project.detail` is a child of the Project node, where it

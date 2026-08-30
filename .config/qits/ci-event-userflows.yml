@@ -16,7 +16,7 @@
 # before the IT. qits-eventstream's pipeline is the measured precedent for all of it.
 #
 # Quinoa is off (`-Dquarkus.quinoa=false` — the extension's root toggle; `.enabled` is not it): the
-# client is ci-post-receive.yml's business, this step never initialises the qits-spa-workspaces
+# client is ci-post-receive.yml's business, this step never initialises the qits-workspaces-frontend
 # submodule, and the IT asserts nothing about the SPA. The packaged fast-jar failsafe boots is
 # otherwise exactly what ships.
 #
@@ -40,7 +40,11 @@
 # release file's discipline).
 event: SCMPublishCommit
 when:
-  - repoId: { exact: qits-workspaces }
+  # repoName, not repoId: the git host's own coordinate can be an opaque UUID since the
+  # identity cutover, so a name match on repoId is not dependable. The push event echoes the
+  # public name the push was addressed with, which always is; a rename updates this line in
+  # the same campaign.
+  - repoName: { exact: qits-workspaces-service }
     suppressCi: { exact: "false" }
 checkout:
   branch: branch
