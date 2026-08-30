@@ -1,4 +1,4 @@
-# qits-workspaces — working notes
+# qits-workspaces-service — working notes
 
 Read `README.md` first: it defines the boundary (host side vs. workspace-daemon) and lists the
 ports. This file is the working conventions on top of it.
@@ -144,8 +144,8 @@ the entity. The reasoning that *is* worth knowing is in the file's header and in
 `WorkspaceCredentials` — why the secret is stored at all, and why the columns are cleared in the same
 breath as the revocation rather than after it.
 
-**The target is PostgreSQL 18.4** — the tag `images/qits-oci-postgresql` is built from, and the
-version the suites' embedded binaries are, so a migration is proved against the engine it ships on.
+**The target is PostgreSQL 18.4** — the tag `components/qits-database/qits-database-oci` is built
+from, and the version the suites' embedded binaries are, so a migration is proved against the engine it ships on.
 Two H2 habits are gone with it: a rule that applies to some rows is a **partial unique index** now
 (`create unique index … where …`, which is what `uq_workspace_active_branch` finally is, instead of
 the generated column H2 forced), and `clob`/`blob` are `text`/`bytea`. The second is also an entity
@@ -849,7 +849,8 @@ wire rename; the payload's fields did not change.
 
 `ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SCMReleaseAnnouncer` is
 the implementation, so the domain module stays free of the bus's seams and its transport (the
-`RunAnnouncer` precedent in qits-ci, copied down to the package name; "seams" rather than "the bus"
+`RunAnnouncer` precedent in qits-ci-service, copied down to the package name; "seams" rather than
+"the bus"
 since the causation persistence trio moved in — see the push-causation section above). It is announced **after the push and before
 the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
 statement conditional on the transaction would be silent about a release that really happened.
@@ -1032,11 +1033,11 @@ that one sentence, and each piece is a place the property could be lost:
   taken back out, which fails if any other field moved. A posture that quietly relaxed the sandbox
   as well would be a privilege nobody asked for riding along with the one somebody did.
 - **The socket is usable despite the host uid because qits-containers joins the socket's own
-  group** beside the bind (`--group-add`, read off the socket by the orchestrator — its README's
-  "The docker socket" section). A workspace-side group would be a privilege assembled here rather
+  group** beside the bind (`--group-add`, read off the socket by the orchestrator —
+  qits-containers-service's README, "The docker socket"). A workspace-side group would be a privilege assembled here rather
   than granted there, and this service does not get to name a group. The client that talks to it is
-  the workspace image's business: `images/qits-oci-workspace` carries the docker CLI, because a
-  socket with nothing to speak to it is a bind and not a capability.
+  the workspace image's business: `components/qits-workspaces/qits-workspace-oci` carries the docker
+  CLI, because a socket with nothing to speak to it is a bind and not a capability.
 - **The read model says so.** `WorkspaceDto.admin` rides the listing and the create response,
   because a client that cannot see which workspaces are privileged cannot say so, and "which ones
   hold the socket" is the question the whole posture exists to keep answerable.
@@ -1127,7 +1128,7 @@ than per caller. A second role invented here would be a vocabulary qits-idp does
   prune, `ls-remote` answering while the mirror is stale, a branch create and delete arriving as
   pushes, the worktree merge/commit/tag/atomic-push sequence, and a leftover worktree being pruned
   rather than inherited. No Quarkus, no database — 14 cases, about a second.
-- `domain/src/test/resources/version-fixtures/` holds **copies of real manifests** — qits-ci's
+- `domain/src/test/resources/version-fixtures/` holds **copies of real manifests** — qits-ci-service's
   five-module reactor verbatim, comments and all, plus an SPA's `package.json` with a trimmed lock
   and a pnpm library repo. That is a deliberate exception to "tests build their own": the bump
   engine's job is to leave everything it did not mean to touch byte-identical, and a fixture written
@@ -1276,7 +1277,7 @@ edges with no `git-receive-pack` among them, and no presence check can say that.
   validate. That the pair travelled is proved; that it can be exchanged is qits-platform-idp's own
   claim.
 - **The git host's protection hook and its authorization.** `StoryGitHost` exports what it serves
-  unconditionally. Who may push a protected ref is qits-githost's suite's question.
+  unconditionally. Who may push a protected ref is qits-githost-service's suite's question.
 - **A release losing a race.** The lease serialises this flow's own releases, and staging a writer
   *outside* the flow needs a hook on the far side of a socket from the launched process. It is
   `ReleaseControllerTest`'s, with `FakeGitHostAddress.beforeNextPush`.

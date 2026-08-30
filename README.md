@@ -1,4 +1,4 @@
-# qits-workspaces
+# qits-workspaces-service
 
 The **host side** of qits workspaces: the workspace entity and its lifecycle, container
 orchestration, host-side git through a mirror of each repository, the workspace-daemon registry, dev-server
@@ -23,7 +23,7 @@ the boundary. Everything that runs *inside* the container belongs to
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
 | `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SCMRelease`. Plain records; a consumer depends on this jar and gets no domain. |
-| `service/src/main/webui/` | The SPA — a **submodule**, [qits-spa-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-spa-workspaces). Quinoa builds it into the artifact and serves it at `/`. |
+| `service/src/main/webui/` | The SPA — a **submodule**, [qits-workspaces-frontend](https://github.com/QuicklyIterateTheSoftware/qits-workspaces-frontend). Quinoa builds it into the artifact and serves it at `/`. |
 
 So a checkout needs one command a plain clone does not give you:
 
@@ -116,13 +116,13 @@ For a local run, put it in a file instead of remembering a flag:
     ./service/target/qits-workspaces          # no flags: :8091, registry on :8090
 
 `.env` is gitignored; the `.env.example` beside it is tracked and is the template — the same
-convention qits-projects already uses. Quarkus reads `.env` from the process's **working
+convention qits-projects-service already uses. Quarkus reads `.env` from the process's **working
 directory** at config ordinal 295 — above the packaged `application.properties` (250), below real
 environment variables (300) and `-D` (400) — so it overrides the shipped config without a rebuild
 and without touching a tracked file, and it works for the native binary exactly as for the
 fast-jar. Run from the repo root and it is found. Keys are environment-variable names
 (`QITS_PROJECTS_URL`, `QUARKUS_HTTP_PORT`), which is the one cost over a properties file and also
-the payoff: the same spellings work unchanged as real env vars in a container. qits-projects
+the payoff: the same spellings work unchanged as real env vars in a container. qits-projects-service
 carries a matching example putting it on :8090, so the pair starts side by side with no arguments
 at all.
 
@@ -370,7 +370,7 @@ Not asserted anywhere any more, dropped when their setup could not come along: t
 `CommandRegistry` PTY attach path (`ServiceAttachTerminalTest`), the delivery half of the agent sink
 (now `WorkspaceChatInbox`'s contract), the repository-delete cascade onto `workspace_bootstrap_run`
 (it starts in another database), and the depth-2 submodule closure
-(`WorkspaceSubmoduleProvisionTest` — its fixtures belong to qits-projects).
+(`WorkspaceSubmoduleProvisionTest` — its fixtures belong to qits-projects-service).
 
 Not covered anywhere yet: **startup reconciliation** of workspaces against the live container set
 (containerless-but-live-branch → STOPPED, dangling-volume reaping). That logic lives in the
