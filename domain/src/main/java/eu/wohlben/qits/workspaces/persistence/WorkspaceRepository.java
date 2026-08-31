@@ -96,6 +96,23 @@ public class WorkspaceRepository implements PanacheRepository<Workspace> {
         .toList();
   }
 
+  /**
+   * The repositories that have a <b>root</b> workspace here — an ACTIVE row with no parent, which is
+   * what {@code createMainWorkspace} writes and nothing else does. Distinct, so it is one id per
+   * repository rather than one per row.
+   *
+   * <p>The candidate set for {@code EditorProxyTargets}: an editor's origin names a project, and the
+   * project's wrapper repository is recognised by its name among these. It is deliberately narrow —
+   * every branched workspace is excluded by the parent alone — and it is small by construction, one
+   * entry per repository somebody has ever opened a main workspace for.
+   */
+  public List<String> activeRootRepositoryIds() {
+    return find("status = ?1 and parent is null", WorkspaceStatus.ACTIVE).stream()
+        .map(w -> w.repositoryId)
+        .distinct()
+        .toList();
+  }
+
   // --- Any-status (history / discovery) ----------------------------------------------------------
 
   /** Every workspace (active + resolved) for a repository, newest first — for the history view. */

@@ -48,6 +48,8 @@ public final class WorkspaceContainer {
   private String image;
   private boolean hostDockerSocket;
 
+  private boolean editor;
+
   public WorkspaceContainer name(String name) {
     this.name = name;
     return this;
@@ -153,6 +155,26 @@ public final class WorkspaceContainer {
     return this;
   }
 
+  /**
+   * Whether this is the <b>editor</b> kind of workspace container — the project wrapper's main
+   * workspace, running the richer {@code qits/workspace-editor} image with the daemon's editor
+   * supervision switched on.
+   *
+   * <p>It is recorded on the description rather than re-derived by the adapter for one reason: the
+   * decision costs a posture lookup, the adapter needs the same answer to pick the container's
+   * lifetime policy, and two lookups of one fact are two chances to disagree. The image and the
+   * environment above it are already this flag's doing; the policy is the third thing that follows
+   * from it, and it follows from the same read.
+   *
+   * <p><b>Not part of the wire spec.</b> The orchestrator is told an image and an environment, and
+   * that is the whole of what the editor is to it. This flag exists so the one caller that turns a
+   * description into a request can also say how long the place lives.
+   */
+  public WorkspaceContainer editor(boolean value) {
+    this.editor = value;
+    return this;
+  }
+
   // --- what was decided, for the one adapter that turns it into a wire spec --------------------
   //
   // Same names as the setters, arity apart. There is deliberately no `command`: a workspace
@@ -225,5 +247,10 @@ public final class WorkspaceContainer {
   /** Whether this container is the admin kind — see {@link #hostDockerSocket(boolean)}. */
   public boolean hostDockerSocket() {
     return hostDockerSocket;
+  }
+
+  /** Whether this container is the editor kind — see {@link #editor(boolean)}. */
+  public boolean editor() {
+    return editor;
   }
 }

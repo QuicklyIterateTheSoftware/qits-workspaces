@@ -42,10 +42,26 @@ class WorkspaceContainerFactoryTest {
 
   private static final String IMAGE = IMAGE_REPO + ":" + IMAGE_VERSION;
 
+  /**
+   * The editor pin, read from config for the reason the workspace pin is: the version half is a
+   * fallback the deployer overrides from qits-configuration, so a literal here would go red on a
+   * bump that works as intended. {@link #composesTheShippedEditorReference} pins the exact default.
+   */
+  private static final String EDITOR_IMAGE_REPO =
+      ConfigProvider.getConfig().getValue("qits.editor.image-repo", String.class);
+
+  private static final String EDITOR_IMAGE_VERSION =
+      ConfigProvider.getConfig().getValue("qits.editor.image-version", String.class);
+
+  private static final String EDITOR_IMAGE = EDITOR_IMAGE_REPO + ":" + EDITOR_IMAGE_VERSION;
+
   private WorkspaceContainerFactory factory() {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.imageRepo = IMAGE_REPO;
     f.imageVersion = IMAGE_VERSION;
+    f.editorImageRepo = EDITOR_IMAGE_REPO;
+    f.editorImageVersion = EDITOR_IMAGE_VERSION;
+    f.editorPort = 13339;
     f.projectsUrl = "http://qits-projects:8080/";
     f.observabilityUrl = "http://qits-observability:8080/";
     f.network = "qits-net";
@@ -545,5 +561,114 @@ class WorkspaceContainerFactoryTest {
 
     assertEquals(
         "registry.dev.localhost:8080/qits/workspace:2026.999.000000", overridden.image());
+  }
+
+  // --- the editor posture -----------------------------------------------------------------------
+
+  /** A posture port answering "the project wrapper's main workspace" and nothing else. */
+  private static WorkspacePostures wrapperMain(boolean answer) {
+    return new WorkspacePostures() {
+      @Override
+      public boolean isAdmin(Long rowId) {
+        return false;
+      }
+
+      @Override
+      public boolean isWrapperMain(Long rowId) {
+        return answer;
+      }
+    };
+  }
+
+  @Test
+  void theWrapperMainWorkspaceRunsTheEditorImageAndIsToldSo() {
+    WorkspaceContainerFactory f = factory();
+    f.postures = StubInstance.of(wrapperMain(true));
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "main", 7L, "main", null);
+
+    assertEquals(EDITOR_IMAGE, c.image());
+    assertTrue(c.editor(), "the description carries the decision, so the adapter reads it once");
+    // Both vars or neither: `enabled` alone would leave the daemon and the host's proxy free to
+    // pick different ports, and a port alone would name a listener nothing starts.
+    assertEquals("true", c.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+    assertEquals("13339", c.env().get("QITS_WORKSPACE_DAEMON_EDITOR_PORT"));
+  }
+
+  @Test
+  void anOrdinaryWorkspaceIsUntouchedByTheEditor() {
+    // The claim that matters for every workspace that is not the wrapper's main one: the plain
+    // image, and NOTHING said about an editor. Silence is what the daemon's own default reads as
+    // "no editor", so an explicitly-false pair here would be a second way of saying the same thing.
+    WorkspaceContainerFactory f = factory();
+    f.postures = StubInstance.of(wrapperMain(false));
+
+    WorkspaceContainer c = f.forWorkspace("repo12345678abc", "work", 7L, "feature/x", "main");
+
+    assertEquals(IMAGE, c.image());
+    assertFalse(c.editor());
+    assertNull(c.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+    assertNull(c.env().get("QITS_WORKSPACE_DAEMON_EDITOR_PORT"));
+  }
+
+  @Test
+  void thePostureIsReproducibleAcrossEnsures() {
+    // THE SPEC-HASH RULE, from the outside. The orchestrator has no start verb: a stopped container
+    // is resumed by presenting its spec AGAIN under Recreate.ifChanged, so a spec that differs is a
+    // REPLACEMENT. Two calls with the same arguments must therefore describe the same container —
+    // the image, the editor environment and the flag alike — which is what makes the posture a
+    // lookup rather than a parameter somebody could forget to pass on the resume path.
+    WorkspaceContainerFactory f = factory();
+    f.postures = StubInstance.of(wrapperMain(true));
+
+    WorkspaceContainer first = f.forWorkspace("repo12345678abc", "main", 7L, "main", null);
+    WorkspaceContainer second = f.forWorkspace("repo12345678abc", "main", 7L, "main", null);
+
+    assertEquals(first.image(), second.image());
+    assertEquals(first.env(), second.env());
+    assertEquals(first.editor(), second.editor());
+  }
+
+  @Test
+  void aPostureLookupThatFailsLeavesTheWorkspacePlain() {
+    // Both absences again, and both fall to the ordinary workspace. Absent means no editor exists,
+    // which is what every workspace was before one did; a read that threw must not be the thing
+    // that decides a container runs a different image.
+    WorkspaceContainerFactory absent = factory();
+    WorkspaceContainer plain = absent.forWorkspace("repo12345678abc", "main", 7L, "main", null);
+    assertEquals(IMAGE, plain.image());
+    assertFalse(plain.editor());
+
+    WorkspaceContainerFactory broken = factory();
+    broken.postures =
+        StubInstance.of(
+            new WorkspacePostures() {
+              @Override
+              public boolean isAdmin(Long rowId) {
+                return false;
+              }
+
+              @Override
+              public boolean isWrapperMain(Long rowId) {
+                throw new IllegalStateException("the registry blinked");
+              }
+            });
+    WorkspaceContainer degraded = broken.forWorkspace("repo12345678abc", "main", 7L, "main", null);
+    assertEquals(IMAGE, degraded.image());
+    assertNull(degraded.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+  }
+
+  /**
+   * The editor's two keys compose the same way the workspace pin's do, and this pins the shipped
+   * default exactly. The version names no released tag yet — qits-workspace-editor-oci has never
+   * been released — so what is asserted is the placeholder the properties file documents, and the
+   * first real release moves both this literal and that comment together.
+   */
+  @Test
+  void composesTheShippedEditorReference() {
+    assertEquals(
+        "registry.dev.localhost:8080/qits/workspace-editor:2026.823.71954",
+        factory().editorImage(),
+        "repo and version joined as <repo>:<version>, fully qualified");
   }
 }

@@ -1,8 +1,10 @@
 package eu.wohlben.qits.workspaces.daemonhost;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.workspaces.containershost.EditorKeepalive;
 import eu.wohlben.qits.workspaces.control.AgentActivityState;
 import eu.wohlben.qits.workspaces.control.AgentSessionReporter;
+import eu.wohlben.qits.workspaces.control.EditorLifecycle;
 import eu.wohlben.qits.workspaces.control.ProvisionResult;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
 import eu.wohlben.qits.workspaces.control.WorkspaceAgentActivity;
@@ -12,6 +14,7 @@ import eu.wohlben.qits.workspaces.control.WorkspaceConfigView;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonInfo;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonProvisioner;
+import eu.wohlben.qits.workspaces.control.WorkspaceEditorState;
 import eu.wohlben.qits.workspaces.control.WorkspaceGitStatus;
 import eu.wohlben.qits.workspaces.control.WorkspaceGitSync;
 import eu.wohlben.qits.workspaces.control.WorkspaceServiceDriver;
@@ -30,6 +33,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
+import eu.wohlben.qits.workspacedaemon.protocol.EditorState;
 import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
@@ -43,6 +47,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
 import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
+import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
 import io.quarkus.scheduler.Scheduled;
@@ -98,6 +103,7 @@ public class WorkspaceDaemonRegistry
         WorkspaceServiceDriver,
         WorkspaceGitStatus,
         WorkspaceAgentActivity,
+        WorkspaceEditorState,
         WorkspaceDaemonInfo,
         WorkspaceGitSync {
 
@@ -124,6 +130,18 @@ public class WorkspaceDaemonRegistry
    * it when one goes away.
    */
   @Inject Instance<WorkspaceTunnels> tunnels;
+
+  /**
+   * The editor's keepalive. A coding agent working in a workspace is that workspace being used, and
+   * the editor's container is the one with an idle-stop lifetime — so an unattended agent session
+   * must hold it open exactly as a person's open tab does. Reporting here rather than from a timer
+   * is what makes that true of the agent's OWN activity instead of of the socket merely being open:
+   * a daemon that has connected and is doing nothing is idle, which is what the sweep is for.
+   *
+   * <p>It is debounced on its own side and it does nothing at all while the idle-stop switch is
+   * unset, so this call costs one map operation on the socket thread in the shipped configuration.
+   */
+  @Inject EditorKeepalive editorKeepalive;
 
   /**
    * Last working-tree cleanliness each live daemon reported ({@link GitStatus}). In-memory only —
@@ -155,6 +173,22 @@ public class WorkspaceDaemonRegistry
    * instead, so the bar survives a page reload without keeping yesterday's finished run on screen.
    */
   private final ConcurrentHashMap<String, ActivityEntry> agentActivity = new ConcurrentHashMap<>();
+
+  /**
+   * Last web-editor state each live daemon reported ({@link EditorState}), per workspace row id.
+   * The same lifetime and the same eviction as {@link #gitClean}: in-memory only, populated while
+   * the daemon is connected, dropped on {@link #unregister}, re-reported on reconnect. Surfaced
+   * through {@link WorkspaceEditorState#editorStateFor}, which {@code EditorService} and {@code
+   * EditorProxyRoute} both gate on.
+   *
+   * <p><b>An absent entry is "nothing reported", never "no editor".</b> The daemon sends the frame
+   * only where it supervises an editor at all, so absence covers a plain workspace, a container
+   * that is not up, and an editor whose first frame has not arrived — three cases a caller turns
+   * into the same "not ready", which is the answer each of them deserves. That is also why {@code
+   * ENDED} is <em>kept</em> rather than evicted, unlike the way agent activity used to treat its
+   * own terminal: ENDED is what lets a splash stop waiting and say so.
+   */
+  private final ConcurrentHashMap<Long, EditorLifecycle> editorStates = new ConcurrentHashMap<>();
 
   /**
    * One tracked agent command's activity, plus the workspace it belongs to (for the rollup) and
@@ -272,6 +306,10 @@ public class WorkspaceDaemonRegistry
     gitHead.remove(workspaceId);
     // Likewise drop every tracked agent activity for this workspace (re-reported on reconnect).
     agentActivity.values().removeIf(entry -> entry.workspaceId().equals(workspaceId));
+    // And the editor's state. A disconnect means NOTHING IS KNOWN — not that the editor ended: the
+    // daemon re-reports on every connect, and a retained RUNNING would send the proxy at a listener
+    // whose container may have gone away underneath it.
+    editorStates.remove(workspaceId);
     // Pending tunnel nonces are waiting on a daemon that is no longer there; live tunnels are NOT
     // torn down, deliberately — each stream is its own TCP connection, so an open terminal survives
     // a control-socket reconnect, which is the whole reason these calls do not ride that socket.
@@ -284,15 +322,21 @@ public class WorkspaceDaemonRegistry
   }
 
   /**
-   * Ask a daemon to dial back and serve one stream — the reverse tunnel's only outbound message.
+   * Ask a daemon to dial back and serve one stream to one of its loopback listeners — the reverse
+   * tunnel's only outbound message.
    *
    * <p>Sent <b>without awaiting</b>, unlike every other send here: this is called from a {@code
    * NetServer} connect handler, which runs on an event loop, and {@code sendTextAndAwait} would be
    * rejected by Mutiny's blocking guard there. A failure is logged and nothing else — the parked
    * socket's own TTL closes it, so a lost {@code OpenStream} degrades to a request that fails
    * rather than one that hangs.
+   *
+   * <p>The target is a <b>name</b> and never a port: the host does not learn — and must not state —
+   * an address inside the container, so it says <em>what</em> it wants and the daemon resolves that
+   * against its own allow-list. {@link WorkspaceTunnels} is what keys the caller on a capability
+   * version high enough to understand the name it is about to be sent.
    */
-  void requestStream(Long workspaceId, String nonce, String path) {
+  void requestStream(Long workspaceId, String nonce, String path, StreamTarget target) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       LOG.debugf("requestStream: no workspace-daemon live for %s", workspaceId);
@@ -300,7 +344,7 @@ public class WorkspaceDaemonRegistry
     }
     client
         .connection
-        .sendText(codec.encode(new OpenStream(nonce, path)))
+        .sendText(codec.encode(new OpenStream(nonce, path, target)))
         .subscribe()
         .with(
             ignored -> {},
@@ -385,6 +429,7 @@ public class WorkspaceDaemonRegistry
       case ServiceTransition event -> routeServiceState(workspaceId, client, event);
       case GitStatus status -> onGitStatus(workspaceId, client, status);
       case AgentActivity activity -> onAgentActivity(workspaceId, client, activity);
+      case EditorState state -> onEditorState(workspaceId, state);
       case WorkspaceChanged changed -> onWorkspaceChanged(workspaceId, client, changed);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
@@ -445,6 +490,34 @@ public class WorkspaceDaemonRegistry
     }
   }
 
+  /**
+   * Cache one web-editor state report. The daemon sends the current state once per control-socket
+   * connect and then one frame per transition, so this is the whole of the host's knowledge.
+   *
+   * <p><b>A state this host cannot name drops the entry rather than keeping the last one.</b>
+   * {@link EditorLifecycle#parse} answers null for anything outside the three values, and "nothing
+   * reported" is the honest reading of a frame this backend does not understand — the protocol
+   * module carries the state as a plain String precisely so a newer daemon can say something new
+   * without failing a frame. Keeping the previous value instead would let a stale {@code RUNNING}
+   * outlive a transition that said otherwise, which is the one direction that costs a reader a
+   * splash they should have seen.
+   */
+  private void onEditorState(Long workspaceId, EditorState reported) {
+    EditorLifecycle state = EditorLifecycle.parse(reported.state());
+    if (state == null) {
+      editorStates.remove(workspaceId);
+      return;
+    }
+    editorStates.put(workspaceId, state);
+  }
+
+  @Override
+  public Optional<EditorLifecycle> editorStateFor(Long workspaceRowId) {
+    return workspaceRowId == null
+        ? Optional.empty()
+        : Optional.ofNullable(editorStates.get(workspaceRowId));
+  }
+
   @Override
   public Optional<Boolean> isClean(Long workspaceId) {
     return Optional.ofNullable(gitClean.get(workspaceId));
@@ -496,6 +569,9 @@ public class WorkspaceDaemonRegistry
       return; // unknown state string — lineage above still ran; nothing to cache/flip
     }
     long now = System.currentTimeMillis();
+    // An agent that is working is the workspace being used. Debounced on the keepalive's side, and
+    // a no-op entirely while nothing is idle-stopped.
+    editorKeepalive.touched(workspaceId);
     AgentActivityState before = rollup(workspaceId, now);
     agentActivity.put(activity.commandId(), new ActivityEntry(workspaceId, state, now));
     if (before != rollup(workspaceId, now)) {

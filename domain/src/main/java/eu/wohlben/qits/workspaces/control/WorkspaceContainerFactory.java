@@ -57,6 +57,39 @@ public class WorkspaceContainerFactory {
   String imageVersion;
 
   /**
+   * The registry host and path of the <b>editor</b> image — {@code qits/workspace-editor}, the
+   * workspace image with openvscode-server laid on top. Everything {@link #imageRepo}'s comment says
+   * about fully qualifying the reference applies here unchanged; the reasoning for both halves lives
+   * in {@code META-INF/microprofile-config.properties}.
+   *
+   * <p>It is a <b>second pair of keys and not a suffix on the first</b>, because the two images are
+   * released by two repositories on two calvers: qits-workspace-daemon publishes {@code
+   * qits/workspace} and qits-workspace-editor-oci follows it one hop later with its own version. A
+   * derived name would tie them into one string and be wrong the moment either train ran alone.
+   */
+  @ConfigProperty(name = "qits.editor.image-repo")
+  String editorImageRepo;
+
+  /**
+   * The released calver the editor image is pinned to. Read from config, never a constant, for the
+   * reason {@link #imageVersion} gives: the deployer injects {@code QITS_EDITOR_IMAGE_VERSION} —
+   * sourced from qits-configuration, kept in step by the {@code qits/workspace-editor} image's own
+   * {@code SoftwareRelease} event — and SmallRye maps that env var onto this property, so the
+   * injected value wins over the shipped default.
+   */
+  @ConfigProperty(name = "qits.editor.image-version")
+  String editorImageVersion;
+
+  /**
+   * The loopback port the in-container editor listens on, forwarded to the daemon as {@code
+   * QITS_WORKSPACE_DAEMON_EDITOR_PORT}. Spelled once here because the host's editor proxy has to
+   * dial the same number the daemon was told to serve on; the daemon's own default is the same
+   * 13339, so the two agree even for a container launched before this key existed.
+   */
+  @ConfigProperty(name = "qits.editor.port", defaultValue = "13339")
+  int editorPort;
+
+  /**
    * The shared Docker network every workspace container joins (and qits is on), so qits reaches a
    * container's ports by its DNS name with no host-port publishing. Creating it is the bootstrap's
    * job — the orchestrator only probes for it, and this service no longer creates networks at all.
@@ -318,6 +351,31 @@ public class WorkspaceContainerFactory {
     }
   }
 
+  /**
+   * Whether this workspace is the project wrapper's main workspace — the one that runs the editor.
+   * <b>Every failure direction is false</b>, exactly as above, and here it means something different
+   * from a lost privilege: a false answer for a workspace that really is the wrapper's main one
+   * describes a plain-image container, and a spec that differs from what is running is a {@code
+   * Recreate.ifChanged} replacement. That is why the shipped posture memoizes its answer rather than
+   * asking the registry afresh at every ensure ({@code PersistedWorkspacePostures}) — the falling is
+   * the last resort, not the ordinary path.
+   */
+  private boolean editorWorkspace(Long rowId) {
+    if (rowId == null || !postures.isResolvable()) {
+      return false;
+    }
+    try {
+      return postures.get().isWrapperMain(rowId);
+    } catch (RuntimeException e) {
+      LOG.warnf(
+          e,
+          "could not read the posture of workspace %s; launching it as an ordinary workspace with no"
+              + " editor",
+          rowId);
+      return false;
+    }
+  }
+
   private Optional<WorkspaceCredential> workspaceCredential(Long rowId) {
     if (!credentials.isResolvable()) {
       return Optional.empty();
@@ -411,6 +469,15 @@ public class WorkspaceContainerFactory {
   }
 
   /**
+   * The fully qualified, version-pinned <b>editor</b> image reference: {@code <repo>:<version>},
+   * composed for the reason {@link #image()} is composed. It is what the project wrapper's main
+   * workspace runs and what every other workspace does not — see {@link #editorWorkspace}.
+   */
+  public String editorImage() {
+    return editorImageRepo + ":" + editorImageVersion;
+  }
+
+  /**
    * The shared credential volume name (blank when the mount is disabled). The orchestrator creates
    * it and the other two at its own boot; this service only names them, so that the adapter can tell
    * a platform volume from the workspace's own when it builds the spec.
@@ -488,6 +555,10 @@ public class WorkspaceContainerFactory {
    */
   public WorkspaceContainer forWorkspace(
       String repoId, String workspaceId, Long rowId, String branch, String parent) {
+    // Asked ONCE, at the top, and carried on the description: it decides the image, two environment
+    // variables and — through WorkspaceContainer.editor — the lifetime policy the adapter asks for.
+    // Three consequences of one fact, so one read of it.
+    boolean editor = editorWorkspace(rowId);
     WorkspaceContainer container =
         new WorkspaceContainer()
             .name(containerName(workspaceId, repoId))
@@ -632,6 +703,24 @@ public class WorkspaceContainerFactory {
               container.env("QITS_WORKSPACE_DAEMON_AUTH_TOKEN_URL", tokenUrl(idpUrl));
               container.env("QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE", machineAudience);
             });
+    // THE WEB EDITOR, and only for the project wrapper's main workspace. The daemon supervises
+    // openvscode-server when it is told to; every other workspace is told nothing and behaves
+    // exactly as it did before an editor existed — which is also the daemon's own shipped default,
+    // so the absence is not a second way of saying the same thing.
+    //
+    // Both vars or neither, the same rule the credential block above follows and for a related
+    // reason: `enabled` without a port would leave the daemon and the host's proxy free to pick
+    // different numbers, and a port without `enabled` would name a listener nothing starts. They are
+    // written together or not at all.
+    //
+    // IT RIDES THE SPEC, so it obeys the spec-hash rule: environment is part of the spec, a changed
+    // spec is a Recreate.ifChanged REPLACEMENT, and a resume presents the spec again. That is why
+    // both values are stable lookups — the posture off the row and its repository, the port off
+    // config — and never something a caller passed in. See WorkspacePostures.
+    if (editor) {
+      container.env("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED", "true");
+      container.env("QITS_WORKSPACE_DAEMON_EDITOR_PORT", Integer.toString(editorPort));
+    }
     // Resource limits (opt-out): without a memory cap, every JVM in the container sizes its heap
     // against the whole host's RAM and a dev server can OOM the host. Blank config disables a cap.
     memoryLimit.filter(v -> !v.isBlank()).ifPresent(container::memory);
@@ -744,7 +833,14 @@ public class WorkspaceContainerFactory {
     // daemon
     // holds the socket open and is otherwise idle in Part 1. `init` is a spec field now rather
     // than a run flag, and it is what keeps a long-lived daemon from collecting its children.
-    return container.image(image());
+    //
+    // THE IMAGE IS THE LAST THING DECIDED AND THE FIRST THING THE ORCHESTRATOR READS. The editor's
+    // is a child of this one — `qits/workspace-editor` is FROM `qits/workspace` plus one directory —
+    // so a wrapper-main workspace is an ordinary workspace container that happens to carry
+    // openvscode-server, and everything above it is identical. Which one a container runs is
+    // answered before it exists rather than by a flag inside it, which is why the editor is a second
+    // image at all.
+    return container.editor(editor).image(editor ? editorImage() : image());
   }
 
   private static String serviceBase(String configured) {

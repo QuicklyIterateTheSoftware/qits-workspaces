@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -121,6 +122,14 @@ public class WorkspaceContainers implements ContainerRuntime {
   @ConfigProperty(name = "qits.workspace.containers.launch-patience")
   Duration launchPatience;
 
+  /**
+   * How long the EDITOR's container may sit idle before qits-containers' own {@code IdleSweep} stops
+   * it. Blank — the shipped value — leaves every workspace on the EXPLICIT lifetime it has always
+   * had, so this key is a switch that is off rather than a default. See {@link #lifetime}.
+   */
+  @ConfigProperty(name = "qits.editor.idle-stop-after")
+  Optional<Duration> editorIdleStopAfter;
+
   // --- naming -----------------------------------------------------------------------------------
 
   @Override
@@ -193,7 +202,10 @@ public class WorkspaceContainers implements ContainerRuntime {
       Consumer<String> onLine) {
     String name = containerName(workspaceId, repoId);
     EnsureRequest request = ensureRequest(repoId, workspaceId, rowId, branch, parent);
-    say(onLine, "Asking qits-containers for " + name + " (" + containerFactory.image() + ")");
+    // The image the SPEC carries, not the factory's plain pin: a wrapper-main workspace runs the
+    // editor image, and a provision log that named the other one would be the one line a reader
+    // trusts to say which image a container is coming up on.
+    say(onLine, "Asking qits-containers for " + name + " (" + request.spec().image() + ")");
     Envelope envelope = ensure(name, request, onLine);
     say(onLine, "The container is up.");
     LOG.debugf("Started workspace container %s (%s)", name, envelope.state().observed());
@@ -384,7 +396,39 @@ public class WorkspaceContainers implements ContainerRuntime {
     // matches what is running must be
     // replaced rather than silently left on the old image with a 200 saying so. Every path that
     // reaches here has already established that nothing is running at this place.
-    return new EnsureRequest(spec, Policy.explicitLifetime(), Recreate.ifChanged);
+    return new EnsureRequest(spec, lifetime(described), Recreate.ifChanged);
+  }
+
+  /**
+   * How long this container is allowed to sit there.
+   *
+   * <p><b>EXPLICIT for every workspace, and IDLE_STOP for the editor's — when a deployment asks for
+   * it.</b> The two are not the same statement about a container. A workspace is somewhere a person
+   * works and a coding agent runs unattended, so nothing but a person may end it; the editor's
+   * workspace is the one that is opened, read and left, and a browser tab closed at the end of a day
+   * would otherwise hold a multi-gigabyte container for the week.
+   *
+   * <p><b>Stopping is not losing.</b> An idle-stopped place is <em>stopped</em>, not deleted: the
+   * container keeps its id and its writable layer, {@code /workspace} is a volume of its own, and
+   * the ensure ladder's second rung starts it back up where it stands. The daemon then finds a
+   * checkout already there and clones nothing. So the reopen path needs no code at all, which is
+   * what makes this switch cheap enough to have.
+   *
+   * <p><b>Unset is today's behaviour, and it ships unset.</b> {@code qits.editor.idle-stop-after}
+   * blank means every workspace keeps the EXPLICIT lifetime it has always had — a kill switch that
+   * is off, not a default that has to be argued with.
+   *
+   * <p>It rides the POLICY and not the spec, which is why turning it on does not replace anything:
+   * {@code Recreate.ifChanged} compares the spec, and the policy is not part of it.
+   */
+  private Policy lifetime(WorkspaceContainer described) {
+    if (!described.editor()) {
+      return Policy.explicitLifetime();
+    }
+    return editorIdleStopAfter
+        .filter(idle -> !idle.isZero() && !idle.isNegative())
+        .map(idle -> Policy.idleStop(idle.toSeconds()))
+        .orElseGet(Policy::explicitLifetime);
   }
 
   /** The platform's shared volumes, as this service names them. Blank means the mount is disabled. */
@@ -467,6 +511,18 @@ public class WorkspaceContainers implements ContainerRuntime {
         containers.delete(owner, WORKLOAD, ref(container), false, false, TEARDOWN_TIMEOUT);
     if (!answer.succeeded() && !gone(answer)) {
       LOG.debugf("Failed to remove container %s: %s", container, answer.detail());
+    }
+  }
+
+  @Override
+  public void touch(String container) {
+    ContainersAnswer<Void> answer =
+        containers.touch(owner, WORKLOAD, ref(container), READ_TIMEOUT);
+    if (!answer.succeeded() && !gone(answer)) {
+      // Best-effort by contract. A missed keepalive costs at worst a sweep, and a swept container is
+      // started back up in place by the next ensure with its /workspace volume intact — while
+      // throwing here would fail whatever the caller was really doing.
+      LOG.debugf("Failed to touch container %s: %s", container, answer.detail());
     }
   }
 

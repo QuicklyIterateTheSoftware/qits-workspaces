@@ -78,9 +78,16 @@ class WorkspaceContainersTest {
   }
 
   private WorkspaceContainers adapter(WorkspaceContainerFactory factory) {
+    return adapter(factory, Optional.empty());
+  }
+
+  private WorkspaceContainers adapter(
+      WorkspaceContainerFactory factory, Optional<Duration> idleStopAfter) {
     WorkspaceContainers containers = new WorkspaceContainers();
     containers.containerFactory = factory;
     containers.owner = OWNER;
+    // Blank is the shipped value: nothing is idle-stopped and every workspace keeps EXPLICIT.
+    containers.editorIdleStopAfter = idleStopAfter;
     // One second, so the retry pause clamps to it (the adapter never pauses past its own window) and
     // a test about holding through a 401 costs a second rather than five.
     containers.launchPatience = Duration.ofSeconds(1);
@@ -185,6 +192,119 @@ class WorkspaceContainersTest {
             admin.user(),
             admin.init());
     assertEquals(ordinary, adminWithoutTheSocket);
+  }
+
+  @Test
+  void theEditorPostureChangesTheImageAndTheDaemonsEditorEnvironment() {
+    Spec ordinary = adapter().ensureRequest(REPO, "main", 1L, "main", null).spec();
+    Spec editor =
+        adapter(TestWorkspaceContainerFactory.editor())
+            .ensureRequest(REPO, "main", 1L, "main", null)
+            .spec();
+
+    // The editor image is a SECOND pin on a second repository path, not a suffix on the first: the
+    // two images are released by two repositories on two calvers.
+    assertEquals(TestWorkspaceContainerFactory.IMAGE, ordinary.image());
+    assertEquals(TestWorkspaceContainerFactory.EDITOR_IMAGE, editor.image());
+
+    // Both vars or neither, the rule the commissioned credential block follows: `enabled` without a
+    // port leaves the daemon and the host free to pick different numbers, and a port without
+    // `enabled` names a listener nothing starts.
+    assertNull(ordinary.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+    assertNull(ordinary.env().get("QITS_WORKSPACE_DAEMON_EDITOR_PORT"));
+    assertEquals("true", editor.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+    assertEquals("13339", editor.env().get("QITS_WORKSPACE_DAEMON_EDITOR_PORT"));
+
+    // …and that is the WHOLE difference, asserted the way the admin posture's is: the editor spec
+    // with the image and the two variables put back to the plain workspace's. Same user, same
+    // limits, same mounts, same labels, same socket answer. The editor image is the workspace image
+    // plus one directory, so a container that differed anywhere else would be a second decision
+    // riding along with the one somebody made.
+    java.util.Map<String, String> env = new java.util.LinkedHashMap<>(editor.env());
+    env.remove("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED");
+    env.remove("QITS_WORKSPACE_DAEMON_EDITOR_PORT");
+    Spec editorAsAPlainWorkspace =
+        new Spec(
+            ordinary.image(),
+            editor.entrypoint(),
+            editor.args(),
+            env,
+            editor.extraLabels(),
+            editor.network(),
+            editor.aliases(),
+            editor.addHosts(),
+            editor.volumeMounts(),
+            editor.sharedMounts(),
+            editor.hostDockerSocket(),
+            editor.security(),
+            editor.pullPolicy(),
+            editor.explicitName(),
+            editor.user(),
+            editor.init());
+    assertEquals(ordinary, editorAsAPlainWorkspace);
+  }
+
+  @Test
+  void theEditorSpecIsTheSameOnEveryEnsure() {
+    // The spec-hash rule from the adapter's side: the orchestrator has no start verb, so a resume
+    // presents the SAME request again under Recreate.ifChanged. Two ensures with the same arguments
+    // must therefore be equal requests — image, environment and policy alike — or every resume of an
+    // editor workspace would replace the container it meant to start.
+    WorkspaceContainers adapter = adapter(TestWorkspaceContainerFactory.editor());
+
+    EnsureRequest first = adapter.ensureRequest(REPO, "main", 1L, "main", null);
+    EnsureRequest second = adapter.ensureRequest(REPO, "main", 1L, "main", null);
+
+    assertEquals(first, second);
+  }
+
+  // --- the editor's lifetime --------------------------------------------------------------------
+
+  @Test
+  void theSwitchIsOffAndEveryWorkspaceKeepsTheExplicitLifetime() {
+    // The shipped posture. An editor workspace with no deadline configured is EXPLICIT like every
+    // other workspace, which is exactly the behaviour that predates this key.
+    EnsureRequest editor =
+        adapter(TestWorkspaceContainerFactory.editor()).ensureRequest(REPO, "main", 1L, "main", null);
+
+    assertEquals(PolicyType.EXPLICIT, editor.policy().type());
+    assertNull(editor.policy().idleAfterSeconds());
+  }
+
+  @Test
+  void theDeadlineReachesTheEDITORSCONTAINERANDNOOTHER() {
+    // The whole of what the switch does. A workspace is somewhere a person works and an agent runs
+    // unattended, so nothing but a person may end one; the editor's workspace is the one that is
+    // opened, read and left.
+    Optional<Duration> idle = Optional.of(Duration.ofMinutes(30));
+
+    EnsureRequest editor =
+        adapter(TestWorkspaceContainerFactory.editor(), idle)
+            .ensureRequest(REPO, "main", 1L, "main", null);
+    assertEquals(PolicyType.IDLE_STOP, editor.policy().type());
+    assertEquals(Long.valueOf(1800L), editor.policy().idleAfterSeconds());
+
+    EnsureRequest plain =
+        adapter(TestWorkspaceContainerFactory.persistent(), idle)
+            .ensureRequest(REPO, "work", 1L, "feature/x", "main");
+    assertEquals(PolicyType.EXPLICIT, plain.policy().type());
+    assertNull(plain.policy().idleAfterSeconds());
+  }
+
+  @Test
+  void theDeadlineIsNotPartOfTheSPEC() {
+    // Recreate.ifChanged compares the SPEC, and a policy is not part of one — which is why turning
+    // the switch on does not replace a container that is already running. Asserted as the two specs
+    // being equal while the two policies are not.
+    EnsureRequest off =
+        adapter(TestWorkspaceContainerFactory.editor()).ensureRequest(REPO, "main", 1L, "main", null);
+    EnsureRequest on =
+        adapter(TestWorkspaceContainerFactory.editor(), Optional.of(Duration.ofMinutes(30)))
+            .ensureRequest(REPO, "main", 1L, "main", null);
+
+    assertEquals(off.spec(), on.spec());
+    assertEquals(PolicyType.EXPLICIT, off.policy().type());
+    assertEquals(PolicyType.IDLE_STOP, on.policy().type());
   }
 
   @Test

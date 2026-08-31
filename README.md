@@ -252,7 +252,7 @@ edge or on `qits-net`.
 
 | Prefix | What | Set by |
 |---|---|---|
-| `/workspaces/api/…` | the JSON API — `workspaces`, `branches`, `history`, `events`, `service-events`, `technical-processes`, `capture` | `qits.rest.path`, which `quarkus.rest.path` is derived from |
+| `/workspaces/api/…` | the JSON API — `workspaces`, `branches`, `history`, `events`, `service-events`, `technical-processes`, `capture`, `editor` | `qits.rest.path`, which `quarkus.rest.path` is derived from |
 | `/workspaces/q/…` | `openapi`, `swagger-ui` — what the framework serves, not application code | `quarkus.http.non-application-root-path` |
 | `/workspaces/daemon/{id}` | the daemon's dial-home control socket | `DaemonControlSocket`, literal |
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
@@ -260,7 +260,18 @@ edge or on `qits-net`.
 | `/workspaces/daemon/stream/{nonce}` | where a daemon's tunnel dial-back lands | `WorkspaceTunnels.STREAM_PATH_PREFIX`, literal |
 | `/` | the SPA, and every client-side route under it — its own paths and the scoped `/<project>/<category>/<repo>/…` | `quarkus.quinoa.ui-root-path` + `enable-spa-routing` |
 
-The last row is a **fallback over the whole port**, and the six above it are what it must not
+**One surface is in no row of that table, because it is a HOST and not a path.** Everything arriving
+with `X-Forwarded-Host: editor.<project>.<env>.<domain>` is the web editor's and is forwarded whole
+to that project's workspace container (`EditorProxyRoute`), over the daemon's reverse tunnel and by
+no other route — openvscode-server is bound to the container's loopback, so it has no address on
+`qits-net` to dial: openvscode-server serves from `/`, so an
+editor claims every path there is and no prefix could name it. It is kept off the SPA fallback by
+**route order** rather than by `ignored-path-prefixes` — 1000, ahead of the built client's static
+files (1060) and of the fallback (40000) — and once it recognises an editor origin it never falls
+through: its 404 and its splash are answers. It sits deliberately *behind* the rows above, which take
+Vert.x's own sequence from 0, so the machine surface keeps its paths on every host.
+
+The `/` row is a **fallback over the whole port**, and the six above it are what it must not
 swallow. Quinoa derives its skip list from `quarkus.rest.path` and
 `quarkus.http.non-application-root-path` only, so the four literal routes would be outside it. The
 key is set instead, to one **absolute** entry — `quarkus.quinoa.ignored-path-prefixes=/workspaces` —
