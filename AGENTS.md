@@ -310,7 +310,8 @@ edge or on `qits-net`. `README.md` has the table.
 
 The one thing to know before you add a route: **`quarkus.rest.path` moves the JAX-RS routes and
 nothing else.** A raw Vert.x route or a `@WebSocket` path registers straight onto the router with a
-literal and must carry `/workspaces` itself. Five do, each for its own reason:
+literal and must carry `/workspaces` itself. Five do, each for its own reason (`EditorProxyRoute` is
+the sixth raw route and carries no path at all — see below):
 
 - `DaemonControlSocket` — `/workspaces/daemon/{id}`, and a **cross-repo contract**:
   `WorkspaceContainerFactory` injects `ws://<host>:<port>/workspaces/daemon/<id>` as
@@ -380,6 +381,19 @@ websockets-next claims only the upgrade — each answered **200 `text/html`** wi
 `index.html`. A machine client parses a web page as data; the correct answer is a 404. Add a route
 under `/workspaces` and there is nothing to do here; add a **root-level** one and add its prefix in
 the same commit. `application.properties` carries the reasoning.
+
+**The editor is the one surface this key could never protect, and it is protected by ROUTE ORDER
+instead.** `EditorProxyRoute` is matched on the forwarded host and claims *every* path under it —
+`/`, `/static/…`, `/stable-<commit>/…` — because openvscode-server serves from `/`, so there is no
+prefix to list. What keeps it off `index.html` is that it runs first and then never falls through:
+registered at order **1000**, ahead of the built client's static files (**1060**,
+`GeneratedStaticResourcesProcessor`) and of Quinoa's SPA-routing fallback (**40000**,
+`QuinoaProcessor.runtimeInit`) — both read out of the 3.34.6 / 2.8.2 bytecode on 2026-08-31, not
+measured against a packaged jar, because a Quinoa build needs an npm registry this workspace cannot
+reach. Once the route recognises an editor origin every answer it gives is an answer: the 404 and the
+splash included, `rc.next()` is never called. It sits deliberately **behind** the application's own
+routes, which take Vert.x's auto-sequence from 0, so the machine surface keeps its paths on every
+host. A second root-level catch-all added here has to think about all three numbers.
 
 **A workspace is not a sub-resource of a repository.** This context holds a repository id as a
 string, in another database, with no FK — so collections filter by `?repositoryId=` and an item is
@@ -1029,6 +1043,93 @@ warm resolution is a map read plus one indexed query; a main workspace *can* be 
 again, so a cached row id would point the proxy at nothing. Negative answers are not remembered at
 all — a project registered a minute from now must resolve then.
 
+### The data path, and the four answers it can give
+
+`EditorProxyRoute` is `ContainerProxyRoute`'s sibling and takes its hardened parts wholesale — the
+hand-rolled `proxyUpgrade`/`openUpgrade`/`completeUpgrade`/`pipe`, `writeQueueFull`/`drainHandler` in
+both directions, a refused handshake forwarded with the origin's own status, `DbRetry` at the lookup.
+**Never route an upgrade through `vertx-http-proxy`**: it skips its interceptor chain (so the header
+strip below would be dead on exactly the requests that carry a session) and its pipe has no flow
+control at all. That measurement is in `ContainerProxyRoute.proxyUpgrade` and it did not stop being
+true one origin over.
+
+**The path is forwarded verbatim, and there was never anything to rewrite.** That is the whole
+payoff of the editor being a host: openvscode-server serves from `/`, so a prefix would have had to
+be stripped somewhere, and this platform strips nothing anywhere.
+
+**The identity headers are required and then removed, and each half is wrong without the other.**
+Required, because this route authenticates nothing and must not invent a boundary — the edge's
+session gate is the boundary, and `X-Qits-*` is what says a request came through it. The edge strips
+that namespace from every inbound request unconditionally, so its presence cannot be forged and its
+*absence* is evidence too: a **403**, not an anonymous pass. 403 rather than 401 because this hop has
+no challenge to issue; the login lives at the edge, which redirects a session-less browser long
+before a request arrives here. Removed, because the editor runs an untrusted checkout with a shell —
+a platform header it can read is one it can echo at something that trusts the namespace.
+`Authorization` goes with the namespace and **nothing replaces it**: unlike the daemon, the editor is
+not a peer this service authenticates to, so a bearer would be a credential moved inside the sandbox
+for nobody's benefit.
+
+**What is NOT stripped today is the platform session cookie**, and that is a known gap rather than a
+decision made in this repo's favour. `EdgeRouter`'s cookie strip is guarded by `session == null`, so
+a browser navigation to an editor vhost carries its cookie through (see the edge reading below). A
+blanket `Cookie` strip would break the cookies the editor sets for itself, and a name-based one needs
+the edge's cookie name, which is not this repository's to spell. Whoever writes the `qits.edge.apps`
+entry should settle it there — that is where both facts live.
+
+**Where the state comes from, and its three caching rules.** `WorkspaceDaemonRegistry` implements
+`WorkspaceEditorState` off the daemon's `EditorState` frame — sent once per control-socket connect
+and then once per transition — caching it per row id beside `gitClean`/`agentActivity`. A
+**disconnect drops the entry**, because nothing is known then and that is not the same as the editor
+having ended; **`ENDED` is kept**, because it is the one value that lets a splash stop waiting; and a
+**state this host cannot name drops the entry** rather than keeping the last one, since the wire
+carries a String precisely so a newer daemon can say something new, and a stale `RUNNING` outliving
+the transition that contradicted it is the one direction that costs a reader a splash they should
+have seen. Absence is "nothing reported" and never "no editor": a plain workspace, a container that
+is down and a first frame that has not arrived are one answer, and they deserve the same one.
+
+**Four answers, because a waiting editor is not a broken one.** `ServiceProxyRoute`'s splash pattern,
+gated on `WorkspaceEditorState`:
+
+- no container, or a stopped one → **200 and a self-refreshing page**. Opening the editor while it
+  starts is the same act as opening it once it has.
+- container up, editor `STARTING` **or nothing reported** → the same splash. A reader cannot act on
+  the difference, and "no frame yet" and "starting" are one state to them.
+- editor `ENDED` → a **502 of its own**, and deliberately not a splash: it is terminal, so a page
+  that kept refreshing would spin for the container's lifetime.
+- no such project → **404 with nothing dialled**.
+
+**The tunnel is asked before the orchestrator, and that ordering is the performance decision that
+matters.** A live control socket at the editor capability is stronger evidence that the container is
+up than a status call is — `ContainerProxyRoute.resolve` records the same reasoning — and an editor
+session is a stream of requests, so a round trip per request would cost more than the container. The
+container read runs only where there is no tunnel, which is exactly where it earns its keep: telling
+a stopped workspace's splash from a starting one's.
+
+**The tunnel carries a TARGET now, and one tunnel serves one target.** `OpenStream` names
+`StreamTarget.EDITOR`; the daemon resolves the name against its own allow-list, so the host still
+never states a port inside a container. `WorkspaceTunnels` keys its `NetServer`/`HttpClient` pair on
+`(workspace, target)` and never shares one across targets — the ephemeral-port hazard the class
+documents, pointed inward: a listener is chosen once, when a socket is accepted, so a shared port
+would make the pooled connection behind a keep-alive an editor stream or an API stream depending on
+which request opened it first. The **capability gate is per target** for the complementary reason: an
+older daemon decodes an absent target as `API`, so a name it has never heard of would be served by
+the wrong listener rather than refused, and an editor answering the daemon's 404s reads to a browser
+as broken rather than absent. `EDITOR_CAPABILITY_VERSION` (5) lives in `WorkspaceTunnels` and not in
+`DaemonProtocol` only because that module is a byte-identical source copy; move it the day the daemon
+repo declares one.
+
+**The keepalive fires in three places, and the third is the one that makes it true.** Per request,
+per opened stream, and **per frame from the browser** through the pipe. An open tab that reads a file
+for an hour sends nothing over HTTP and everything over that socket, so a keepalive that only fired
+per request would let the sweep stop a container somebody is looking at. It is affordable because
+`EditorKeepalive` debounces (and is a no-op entirely while the idle-stop switch is unset, which is
+how it ships) — the class was written for exactly this call site.
+
+**`Host` is not rewritten and the editor sees the origin's authority**, on both transports, so it
+cannot tell which one a request took. What says the public name is `X-Forwarded-Host`, forwarded
+untouched. Nothing in openvscode-server reads `Host` today; if that changes, the header to hand it is
+already on the request.
+
 ### The door
 
 `POST /workspaces/api/editor/ensure?repositoryId=<wrapper>` with an empty body, answering a **bare**
@@ -1070,8 +1171,9 @@ checkout and clones nothing.
 **It rides the POLICY, not the spec.** `Recreate.ifChanged` compares the spec, and a policy is not
 part of one, so turning the switch on does not replace a running container.
 
-`EditorKeepalive.touched(rowId)` is the entrypoint both sources call — the editor proxy route for a
-request or an open stream, and `WorkspaceDaemonRegistry.onAgentActivity` for an agent working
+`EditorKeepalive.touched(rowId)` is the entrypoint both sources call — the editor proxy route (per
+request, per opened stream, and **per frame from the browser**, which is the one that covers a tab
+left open on a file for an hour), and `WorkspaceDaemonRegistry.onAgentActivity` for an agent working
 unattended (an editor that closed on a running agent would kill work in progress). Three things about
 it are deliberate:
 
