@@ -47,6 +47,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
 import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
+import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceInfo;
 import io.quarkus.scheduler.Scheduled;
@@ -321,15 +322,21 @@ public class WorkspaceDaemonRegistry
   }
 
   /**
-   * Ask a daemon to dial back and serve one stream — the reverse tunnel's only outbound message.
+   * Ask a daemon to dial back and serve one stream to one of its loopback listeners — the reverse
+   * tunnel's only outbound message.
    *
    * <p>Sent <b>without awaiting</b>, unlike every other send here: this is called from a {@code
    * NetServer} connect handler, which runs on an event loop, and {@code sendTextAndAwait} would be
    * rejected by Mutiny's blocking guard there. A failure is logged and nothing else — the parked
    * socket's own TTL closes it, so a lost {@code OpenStream} degrades to a request that fails
    * rather than one that hangs.
+   *
+   * <p>The target is a <b>name</b> and never a port: the host does not learn — and must not state —
+   * an address inside the container, so it says <em>what</em> it wants and the daemon resolves that
+   * against its own allow-list. {@link WorkspaceTunnels} is what keys the caller on a capability
+   * version high enough to understand the name it is about to be sent.
    */
-  void requestStream(Long workspaceId, String nonce, String path) {
+  void requestStream(Long workspaceId, String nonce, String path, StreamTarget target) {
     DaemonConnection client = clients.get(workspaceId);
     if (client == null || !client.connection.isOpen()) {
       LOG.debugf("requestStream: no workspace-daemon live for %s", workspaceId);
@@ -337,7 +344,7 @@ public class WorkspaceDaemonRegistry
     }
     client
         .connection
-        .sendText(codec.encode(new OpenStream(nonce, path)))
+        .sendText(codec.encode(new OpenStream(nonce, path, target)))
         .subscribe()
         .with(
             ignored -> {},

@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspaces.daemonhost;
 
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonInfo;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
+import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -41,7 +42,7 @@ import org.jboss.logging.Logger;
  * WebSocket upgrade traverse it unchanged. {@code vertx-http-proxy} already turns an upgraded
  * exchange into a raw byte pipe, so the two compose instead of fighting.
  *
- * <h2>One HttpClient per workspace, and why it is not an optimisation to share</h2>
+ * <h2>One HttpClient per (workspace, target), and why it is not an optimisation to share</h2>
  *
  * <p>An ephemeral port is reused. Workspace A's tunnel closes, the OS later hands the same port to
  * workspace B's, and a pool keyed on {@code (host, port)} may still hold a live connection wired
@@ -50,6 +51,14 @@ import org.jboss.logging.Logger;
  * misconfigured. So each tunnel owns its client, created and closed with it, and every accepted
  * socket is closed explicitly at teardown ({@code NetServer.close()} closes the listening channel
  * only; accepted sockets survive it).
+ *
+ * <p><b>The same argument makes the TARGET part of the key.</b> A workspace's daemon has two
+ * loopback listeners now — its {@code WorkspaceApi} and the supervised web editor — and a listener
+ * is chosen once, when the socket is accepted, by the {@code OpenStream} this side sends. So one
+ * listening port must mean one target for as long as it is bound: sharing a {@code NetServer}
+ * between the two would make the pooled connection behind a keep-alive an editor stream or an API
+ * stream depending on which request opened it first, which is the ephemeral-port hazard above
+ * pointed inward. Two listeners, two servers, two clients, closed independently.
  */
 @ApplicationScoped
 public class WorkspaceTunnels {
@@ -98,14 +107,39 @@ public class WorkspaceTunnels {
   @ConfigProperty(name = "qits.workspace.daemon-tunnel.nonce-ttl-ms", defaultValue = "10000")
   long nonceTtlMs;
 
-  private final ConcurrentHashMap<Long, Tunnel> tunnels = new ConcurrentHashMap<>();
+  /**
+   * The first capability version whose daemon understands {@link StreamTarget#EDITOR} — and
+   * therefore the version below which an {@code OpenStream} naming it must never be sent.
+   *
+   * <p><b>It is a constant here rather than in {@code DaemonProtocol}</b>, unlike {@link
+   * DaemonProtocol#TUNNEL_CAPABILITY_VERSION} beside it, and that is a fact about this repository
+   * rather than a judgement: {@code workspace-daemon-protocol/} is a source copy that must stay
+   * byte-identical to qits-workspace-daemon's, so a constant only this side needs cannot be added
+   * to it without becoming drift. Move it there the day the daemon repo declares one, and delete
+   * this. What keeps the two honest meanwhile is {@code DaemonCodecTest}'s literal assertion on
+   * {@code CAPABILITY_VERSION}, which fails on whichever copy falls behind.
+   *
+   * <p>Gating at all is the {@code OPEN_STREAM} asymmetry: this message travels qits→daemon, so an
+   * older image simply never handles what it is sent. A daemon at 4 has no editor in it, and asking
+   * it for one would park a socket until its nonce expired — a request that hangs and then 502s,
+   * instead of the splash the state gate answers with.
+   */
+  static final int EDITOR_CAPABILITY_VERSION = 5;
+
+  private final ConcurrentHashMap<TunnelKey, Tunnel> tunnels = new ConcurrentHashMap<>();
 
   /** Minted-but-unclaimed nonces, across every workspace. Single-use by construction. */
   private final ConcurrentHashMap<String, Parked> pending = new ConcurrentHashMap<>();
 
-  /** One workspace's tunnel: its listener, its client, and the sockets it has accepted. */
+  /**
+   * What a tunnel is one of: a workspace and the listener inside its container. Both halves are
+   * needed — see the class note on why the target may not be shared across one listening port.
+   */
+  private record TunnelKey(Long workspaceId, StreamTarget target) {}
+
+  /** One (workspace, target) tunnel: its listener, its client, and the sockets it has accepted. */
   private static final class Tunnel {
-    private final Long workspaceId;
+    private final TunnelKey key;
     private final NetServer server;
     private final HttpClient client;
 
@@ -118,8 +152,8 @@ public class WorkspaceTunnels {
 
     private final Set<NetSocket> accepted = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    Tunnel(Long workspaceId, NetServer server, HttpClient client, Instant connectedAt) {
-      this.workspaceId = workspaceId;
+    Tunnel(TunnelKey key, NetServer server, HttpClient client, Instant connectedAt) {
+      this.key = key;
       this.server = server;
       this.client = client;
       this.connectedAt = connectedAt;
@@ -163,28 +197,54 @@ public class WorkspaceTunnels {
    * <p>Blocking (it awaits a bind on first use), so call it off the event loop.
    */
   public Optional<TunnelOrigin> originFor(Long workspaceRowId) {
+    return originFor(workspaceRowId, StreamTarget.API);
+  }
+
+  /**
+   * The same, for one named listener inside the container — {@link StreamTarget#API} or the
+   * supervised web editor.
+   *
+   * <p>The tunnel is per {@code (workspace, target)} and never shared between two targets; the class
+   * note says what sharing one would cost. The <b>capability gate is per target too</b>: a stream to
+   * the API needs {@link DaemonProtocol#TUNNEL_CAPABILITY_VERSION}, and one to the editor needs
+   * {@link #EDITOR_CAPABILITY_VERSION}, because an older daemon decodes an absent target as {@code
+   * API} and would serve the wrong listener rather than refusing. Asking a daemon that cannot answer
+   * costs a parked socket and a nonce expiry — a hang that turns into a 502 — where the caller's own
+   * state gate can answer at once.
+   */
+  public Optional<TunnelOrigin> originFor(Long workspaceRowId, StreamTarget target) {
     if (!enabled || workspaceRowId == null) {
       return Optional.empty();
     }
+    TunnelKey key = new TunnelKey(workspaceRowId, target == null ? StreamTarget.API : target);
     WorkspaceDaemonInfo.Info info = registry.lookup(workspaceRowId).orElse(null);
-    if (info == null || info.capabilityVersion() < DaemonProtocol.TUNNEL_CAPABILITY_VERSION) {
-      // No daemon, or one that still listens on qits-net and knows nothing about OpenStream. Either
-      // way this workspace is not reachable through a tunnel; the caller falls back to the direct
-      // container address, which is exactly where such a daemon is listening.
-      closeTunnel(workspaceRowId);
+    if (info == null || info.capabilityVersion() < capabilityFor(key.target())) {
+      // No daemon, or one too old for this target: for the API, one that still listens on qits-net
+      // and knows nothing about OpenStream — the caller falls back to the direct container address,
+      // which is exactly where such a daemon is listening. For the editor there is no fallback to
+      // have: that image carries no editor at all.
+      closeTunnel(key);
       return Optional.empty();
     }
-    Tunnel existing = tunnels.get(workspaceRowId);
+    Tunnel existing = tunnels.get(key);
     if (existing != null && existing.connectedAt.equals(info.connectedAt())) {
       return Optional.of(originOf(existing));
     }
-    closeTunnel(workspaceRowId);
+    closeTunnel(key);
     try {
-      return Optional.of(originOf(openTunnel(workspaceRowId, info.connectedAt())));
+      return Optional.of(originOf(openTunnel(key, info.connectedAt())));
     } catch (RuntimeException e) {
-      LOG.warnf(e, "could not open a daemon tunnel for workspace %s", workspaceRowId);
+      LOG.warnf(e, "could not open a %s daemon tunnel for workspace %s", key.target(), workspaceRowId);
       return Optional.empty();
     }
+  }
+
+  /** The lowest capability version whose daemon can serve a stream to {@code target}. */
+  private static int capabilityFor(StreamTarget target) {
+    return switch (target) {
+      case API -> DaemonProtocol.TUNNEL_CAPABILITY_VERSION;
+      case EDITOR -> EDITOR_CAPABILITY_VERSION;
+    };
   }
 
   private static TunnelOrigin originOf(Tunnel tunnel) {
@@ -197,18 +257,19 @@ public class WorkspaceTunnels {
    */
   public record TunnelOrigin(HttpClient client, int port) {}
 
-  private Tunnel openTunnel(Long workspaceId, Instant connectedAt) {
+  private Tunnel openTunnel(TunnelKey key, Instant connectedAt) {
     // 127.0.0.1 is a literal and not a config key on purpose: a configurable bind address here
     // would be an SSRF footgun with no caller asking for it.
     NetServer server = vertx.createNetServer();
-    server.connectHandler(socket -> onAccepted(workspaceId, socket));
+    server.connectHandler(socket -> onAccepted(key, socket));
     NetServer bound = await(server.listen(0, "127.0.0.1"));
     HttpClient client = vertx.createHttpClient(new HttpClientOptions().setKeepAlive(true));
-    Tunnel tunnel = new Tunnel(workspaceId, bound, client, connectedAt);
-    tunnels.put(workspaceId, tunnel);
+    Tunnel tunnel = new Tunnel(key, bound, client, connectedAt);
+    tunnels.put(key, tunnel);
     LOG.debugf(
-        "daemon tunnel for workspace %s listening on 127.0.0.1:%s",
-        workspaceId,
+        "daemon %s tunnel for workspace %s listening on 127.0.0.1:%s",
+        key.target(),
+        key.workspaceId(),
         Integer.valueOf(bound.actualPort()));
     return tunnel;
   }
@@ -223,8 +284,9 @@ public class WorkspaceTunnels {
    * <p>The nonce is registered <em>before</em> the message goes out. That ordering is the only one
    * that works: a dial-back can arrive before the send's own callback does.
    */
-  private void onAccepted(Long workspaceId, NetSocket socket) {
-    Tunnel tunnel = tunnels.get(workspaceId);
+  private void onAccepted(TunnelKey key, NetSocket socket) {
+    Long workspaceId = key.workspaceId();
+    Tunnel tunnel = tunnels.get(key);
     if (tunnel == null) {
       socket.close();
       return;
@@ -243,13 +305,17 @@ public class WorkspaceTunnels {
               Parked expired = pending.remove(nonce);
               if (expired != null) {
                 // The daemon never came. Closing is what turns this into a connection error at the
-                // proxy rather than a request that hangs until some other timeout notices.
-                LOG.debugf("daemon tunnel stream for workspace %s expired unclaimed", workspaceId);
+                // proxy rather than a request that hangs until some other timeout notices. It is
+                // also the one refusal the daemon still has left — an EDITOR stream into a
+                // container with no editor is dropped there and never dialled back.
+                LOG.debugf(
+                    "daemon %s tunnel stream for workspace %s expired unclaimed",
+                    key.target(), workspaceId);
                 expired.socket().close();
               }
             });
     pending.put(nonce, new Parked(workspaceId, socket, timerId, early));
-    registry.requestStream(workspaceId, nonce, STREAM_PATH_PREFIX + nonce);
+    registry.requestStream(workspaceId, nonce, STREAM_PATH_PREFIX + nonce, key.target());
   }
 
   /**
@@ -282,8 +348,8 @@ public class WorkspaceTunnels {
         });
   }
 
-  private void closeTunnel(Long workspaceId) {
-    Tunnel gone = tunnels.remove(workspaceId);
+  private void closeTunnel(TunnelKey key) {
+    Tunnel gone = tunnels.remove(key);
     if (gone != null) {
       gone.close();
     }
