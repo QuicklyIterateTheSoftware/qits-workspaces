@@ -33,13 +33,14 @@ application: qits-workspaces
 # per-repository applications (Api Docs 1, Docs 2, Code 3, CI 4, Artifacts 5, Configuration 6, Workspaces 7);
 # under `project.detail` this application owns 1 (Workspaces) and 2 (Editor), which was free.
 #
-# EDITOR IS A PROJECT ROW AND NEVER A REPOSITORY ONE, and the subpath is why it can be: `=editor` is
-# the SPA's own bare `editor` route, which takes no repository segment because there is nothing for
-# one to select. A project has ONE editor and it rides the aggregate workspace — the wrapper's, which
-# holds the whole checkout — so a repository in the address would be a second answer to a question
-# that has one. It sits directly under Workspaces because it is the same workspace, opened another
-# way.
-navigation-entries: services.details.Workspaces:7, daemons.details.Workspaces:7, libs.details.Workspaces:7, frontends.details.Workspaces:7, cli.details.Workspaces:7, images.details.Workspaces:7, project.detail.Workspaces:1, project.detail.Editor:2=editor
+# THE EDITOR ROW IS NOT HERE YET, AND ITS ABSENCE IS A REFUSAL TWO SERVICES MAKE, not an oversight:
+# `project.detail.Editor:2=editor` was written beside Workspaces:1 and the deployer REFUSED THE WHOLE
+# SPEC — `navigation-entries` admits ONE entry per slot per application (DeploymentSpecParser, and
+# qits-edge's EdgeRoutes enforces the same rule a hop later), so the file was unreadable and the
+# deployment FAILED while CI stayed green. The row returns the day both services key that rule on
+# (slot, label) instead of the slot alone; until then the editor is reached by the SPA's own
+# `/editor` route, which needs no navigation entry to exist.
+navigation-entries: services.details.Workspaces:7, daemons.details.Workspaces:7, libs.details.Workspaces:7, frontends.details.Workspaces:7, cli.details.Workspaces:7, images.details.Workspaces:7, project.detail.Workspaces:1
 
 # ONE KEY, AND IT ASKS FOR TWO DATABASES, because two jars in this deployable each own one.
 #
