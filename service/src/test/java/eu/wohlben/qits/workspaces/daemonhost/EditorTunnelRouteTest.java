@@ -3,6 +3,8 @@ package eu.wohlben.qits.workspaces.daemonhost;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.control.EditorHost;
@@ -22,7 +24,9 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.vertx.core.Future;
+import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.http.WebSocket;
@@ -34,10 +38,14 @@ import io.vertx.core.net.NetSocket;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,8 +57,11 @@ import org.junit.jupiter.api.Test;
  * real HTTP server standing in for openvscode-server on its container's loopback. A browser request
  * on {@code editor.<project>.…} then has to traverse all of it.
  *
- * <p>{@link DaemonStreamRouteTest}'s shape, one target over — and the two things this class adds are
- * the two the target exists for.
+ * <p>{@link DaemonStreamRouteTest}'s shape, one target over — and <b>this is where the editor's data
+ * path is proved</b>, because the tunnel is the only transport it has. The daemon binds
+ * openvscode-server to the container's LOOPBACK, so there is no address on {@code qits-net} that
+ * reaches an editor and no second arm to test: the verbatim path, the identity strip on both
+ * transports, the bounded pipe and the upgrade are all claims about this rig or about nothing.
  *
  * <p><b>The stream is asked for by NAME.</b> The {@code OpenStream} carries {@link
  * StreamTarget#EDITOR}, so the daemon resolves it against its own allow-list and the host never
@@ -60,6 +71,11 @@ import org.junit.jupiter.api.Test;
  * <p><b>A daemon that predates the editor is never asked.</b> An older image decodes an absent
  * target as {@code API}, so a name it has never heard of would be served by the wrong listener
  * rather than refused — which is why the gate is a capability version and not a hope.
+ *
+ * <p><b>The fake daemon's own pipe carries backpressure</b>, exactly as the real
+ * {@code DaemonStreamTunnel} does. Without it the flood case would prove nothing: an unbounded hop
+ * inside the fixture would happily swallow everything the editor produced and the assertion would
+ * fail on the fixture rather than on the route.
  */
 @QuarkusTest
 @TestProfile(EditorTunnelRouteTest.TestProfile.class)
@@ -98,6 +114,17 @@ public class EditorTunnelRouteTest {
   /** Every OpenStream the fake daemon was asked for. */
   private final CopyOnWriteArrayList<OpenStream> asked = new CopyOnWriteArrayList<>();
 
+  /** What the last request — of either transport — arrived at the editor carrying. */
+  private final AtomicReference<MultiMap> lastEditorHeaders = new AtomicReference<>();
+
+  /** The text frame that asks the fake editor to write N 64 KiB binary frames as fast as it can. */
+  private static final String FLOOD = "flood:";
+
+  private static final int FLOOD_FRAME_BYTES = 64 * 1024;
+
+  private final AtomicReference<CompletableFuture<Void>> floodWritten =
+      new AtomicReference<>(new CompletableFuture<>());
+
   @BeforeEach
   void setUp() throws Exception {
     vertx = Vertx.vertx();
@@ -105,12 +132,46 @@ public class EditorTunnelRouteTest {
     netClient = vertx.createNetClient();
     editor = vertx.createHttpServer();
     editor.requestHandler(
-        req -> req.response().end("editor:" + req.uri() + ":" + req.getHeader("X-Qits-User")));
+        req -> {
+          lastEditorHeaders.set(req.headers());
+          req.response().end("editor:" + req.uri() + ":" + req.getHeader("X-Qits-User"));
+        });
     editor.webSocketHandler(
-        (ServerWebSocket socket) ->
-            socket.textMessageHandler(text -> socket.writeTextMessage("ws-editor:" + text)));
+        (ServerWebSocket socket) -> {
+          lastEditorHeaders.set(socket.headers());
+          socket.textMessageHandler(
+              text -> {
+                if (text.startsWith(FLOOD)) {
+                  flood(socket, Integer.parseInt(text.substring(FLOOD.length())));
+                } else {
+                  socket.writeTextMessage("ws-editor:" + text);
+                }
+              });
+        });
     await(editor.listen(0, "127.0.0.1"));
     asked.clear();
+    lastEditorHeaders.set(null);
+    floodWritten.set(new CompletableFuture<>());
+  }
+
+  /** A well-behaved producer: stop on a full write queue, resume on drain. */
+  private void flood(ServerWebSocket ws, int remaining) {
+    Buffer frame = Buffer.buffer(new byte[FLOOD_FRAME_BYTES]);
+    int left = remaining;
+    while (left > 0 && !ws.writeQueueFull()) {
+      ws.writeBinaryMessage(frame);
+      left--;
+    }
+    if (left == 0) {
+      floodWritten.get().complete(null);
+      return;
+    }
+    int rest = left;
+    ws.drainHandler(
+        drained -> {
+          ws.drainHandler(null);
+          flood(ws, rest);
+        });
   }
 
   @AfterEach
@@ -193,11 +254,32 @@ public class EditorTunnelRouteTest {
                     .onFailure(t -> local.close()));
   }
 
+  /**
+   * The fake daemon's half of the tunnel, and it pauses and drains in both directions <b>on
+   * purpose</b> — the real {@code DaemonStreamTunnel} does, and the flood case is only a statement
+   * about this service's pipe if every other hop in the fixture is bounded too. A bare {@code
+   * a.handler(b::write)} here would absorb the whole flood inside the test's own Vert.x and report
+   * the route as leaking.
+   */
   private static void pipe(WebSocket remote, NetSocket local) {
     remote.pause();
     local.pause();
-    remote.handler(local::write);
-    local.handler(remote::writeBinaryMessage);
+    remote.handler(
+        buffer -> {
+          local.write(buffer);
+          if (local.writeQueueFull()) {
+            remote.pause();
+            local.drainHandler(drained -> remote.resume());
+          }
+        });
+    local.handler(
+        buffer -> {
+          remote.writeBinaryMessage(buffer);
+          if (remote.writeQueueFull()) {
+            local.pause();
+            remote.drainHandler(drained -> local.resume());
+          }
+        });
     remote.endHandler(v -> local.close());
     local.endHandler(v -> remote.close());
     remote.closeHandler(v -> local.close());
@@ -226,12 +308,22 @@ public class EditorTunnelRouteTest {
     given()
         .header("X-Forwarded-Host", host("tunnelled"))
         .header("X-Qits-User", "alice")
-        .get("/stable-abc/static/main.js")
+        .header("X-Qits-Roles", "qits:admin")
+        .header("Authorization", "Bearer smuggled-in-by-the-caller")
+        .get("/stable-abc/static/out/vs/workbench/workbench.js?v=2")
         .then()
         .statusCode(200)
-        // The path arrives unrewritten — the editor serves from `/`, which is the whole reason it
-        // is a host — and the platform's identity does not arrive at all.
-        .body(containsString("editor:/stable-abc/static/main.js:null"));
+        // The path arrives unrewritten, QUERY INCLUDED — the editor serves from `/`, which is the
+        // whole reason it is a host — and the platform's identity does not arrive at all.
+        .body(containsString("editor:/stable-abc/static/out/vs/workbench/workbench.js?v=2:null"));
+
+    // The editor runs an untrusted checkout with a shell: a platform identity header it can read is
+    // one it can echo at something that trusts the namespace, and a bearer would be a credential
+    // moved inside the sandbox for nobody's benefit. The WHOLE namespace goes, not the two headers
+    // this platform happens to assert today.
+    assertNoPlatformIdentity(lastEditorHeaders.get());
+    // What DOES travel is the public name, which is the only thing the editor could want.
+    assertEquals(host("tunnelled"), lastEditorHeaders.get().get("X-Forwarded-Host"));
 
     assertEquals(1, asked.size(), "exactly one stream was asked for");
     assertEquals(
@@ -279,11 +371,91 @@ public class EditorTunnelRouteTest {
                     .setPort(RestAssured.port)
                     .setURI("/stable-abc/vscode-remote-resource")
                     .addHeader("X-Forwarded-Host", host("tunnelsockets"))
-                    .addHeader("X-Qits-User", "alice")));
+                    .addHeader("X-Qits-User", "alice")
+                    .addHeader("X-Qits-Roles", "qits:admin")
+                    .addHeader("Authorization", "Bearer smuggled-in-by-the-caller")));
     browser.textMessageHandler(reply::complete);
     browser.writeTextMessage("hello");
 
     assertEquals("ws-editor:hello", reply.get(20, TimeUnit.SECONDS));
+
+    // The strip has to be spelled a SECOND time for an upgrade: vertx-http-proxy installs no
+    // interceptor chain on one, which is why this route carries the handshake by hand — and an
+    // upgrade is precisely the request that carries a browser session, so a strip that only covered
+    // the ordinary path would be dead on exactly the traffic it exists for.
+    assertNoPlatformIdentity(lastEditorHeaders.get());
+    assertEquals(host("tunnelsockets"), lastEditorHeaders.get().get("X-Forwarded-Host"));
+    browser.close();
+  }
+
+  /**
+   * The case that is about the pipe rather than about the feature.
+   *
+   * <p>{@code vertx-http-proxy} pipes an upgrade with bare {@code a.handler(b::write)} installs — no
+   * {@code writeQueueFull}, no {@code pause}, no {@code drainHandler} — so an editor streaming a
+   * build log into a terminal writes as fast as it likes and everything the browser has not read
+   * accumulates on <em>this</em> process's heap. Park the browser, ask for 64 MiB, and a bounded
+   * chain simply cannot get rid of it; resume, and every byte arrives in order.
+   *
+   * <p>64 MiB and not the direct arm's 32, because the flood has to be larger than every buffer
+   * between the producer and the parked reader ADDED UP, and a tunnelled request crosses four
+   * loopback connections rather than two — kernel socket buffers alone swallowed 16 MiB here with
+   * every hop's flow control working exactly as it should.
+   *
+   * <p>Through the TUNNEL, because that is the transport an editor has. Every hop between the flood
+   * and the parked reader is bounded — the fake editor's own producer, the fake daemon's pipe, {@code
+   * DaemonStreamRoute}'s, and the route's — so the flood stalling is a statement about all of them
+   * and its completing would be a statement about whichever one is not.
+   */
+  @Test
+  public void aParkedBrowserStopsTheEditorRatherThanFillingThisProcessesHeap() throws Exception {
+    Workspace main = editorWorkspace("tunnelbackpressure");
+    connectFakeDaemon(main.id, DaemonProtocol.CAPABILITY_VERSION);
+    reportEditor(main.id, EditorState.State.RUNNING);
+
+    int frames = 1024;
+    long expectedBytes = (long) frames * FLOOD_FRAME_BYTES;
+
+    WebSocket browser =
+        await(
+            wsClient.connect(
+                new WebSocketConnectOptions()
+                    .setHost("127.0.0.1")
+                    .setPort(RestAssured.port)
+                    .setURI("/flooded")
+                    .addHeader("X-Forwarded-Host", host("tunnelbackpressure"))
+                    .addHeader("X-Qits-User", "alice")));
+
+    CompletableFuture<Void> allReceived = new CompletableFuture<>();
+    AtomicLong received = new AtomicLong();
+    browser.binaryMessageHandler(
+        buffer -> {
+          if (received.addAndGet(buffer.length()) >= expectedBytes) {
+            allReceived.complete(null);
+          }
+        });
+
+    // Stop reading before asking for anything, so the very first frames have nowhere to go.
+    browser.pause();
+    browser.writeTextMessage(FLOOD + frames);
+
+    try {
+      floodWritten.get().get(3, TimeUnit.SECONDS);
+      throw new AssertionError(
+          "the editor handed over all "
+              + expectedBytes
+              + " bytes while the browser was not reading — something on the way is buffering them"
+              + " (the parked browser had taken "
+              + received.get()
+              + ")");
+    } catch (TimeoutException expected) {
+      // Good: the editor is parked on its drain handler because a hop downstream stopped reading.
+    }
+
+    browser.resume();
+    floodWritten.get().get(60, TimeUnit.SECONDS);
+    allReceived.get(60, TimeUnit.SECONDS);
+    assertEquals(expectedBytes, received.get(), "every byte, in order, once the reader comes back");
     browser.close();
   }
 
@@ -308,6 +480,17 @@ public class EditorTunnelRouteTest {
   }
 
   // --- helpers ------------------------------------------------------------------------------------
+
+  /** Nothing of the platform's own identity may reach a container running an untrusted checkout. */
+  private static void assertNoPlatformIdentity(MultiMap headers) {
+    assertNotNull(headers, "the editor was never reached");
+    for (String name : headers.names()) {
+      String lower = name.toLowerCase(Locale.ROOT);
+      assertFalse(
+          lower.startsWith("x-qits-") || lower.equals("authorization"),
+          "the editor must not see " + name);
+    }
+  }
 
   private void awaitCapability(Long workspaceId, int expected) throws Exception {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);

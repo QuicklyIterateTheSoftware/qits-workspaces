@@ -6,13 +6,11 @@ import eu.wohlben.qits.workspaces.control.ContainerRuntime;
 import eu.wohlben.qits.workspaces.control.EditorHost;
 import eu.wohlben.qits.workspaces.control.EditorLifecycle;
 import eu.wohlben.qits.workspaces.control.EditorProxyTargets;
-import eu.wohlben.qits.workspaces.control.ProxyOrigin;
 import eu.wohlben.qits.workspaces.control.WorkspaceEditorState;
 import eu.wohlben.qits.workspaces.daemonhost.WorkspaceTunnels;
 import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
-import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
@@ -59,7 +57,8 @@ import org.jboss.logging.Logger;
  * straight through to the surface it was always going to reach ({@code rc.next()}).
  *
  * <p><b>Nothing about the request selects an address.</b> The label selects a row through {@link
- * EditorProxyTargets}; the container name is derived from that row and the port is configuration —
+ * EditorProxyTargets}; the container name is derived from that row, and the listener inside it is
+ * asked for by <em>name</em> over the reverse tunnel, so no port is ever stated on this side —
  * {@link eu.wohlben.qits.workspaces.control.DaemonProxyTargets}' posture verbatim, and for its
  * reason: a component of a request that could name an origin would be an SSRF primitive aimed at
  * everything on the platform network. An unknown label is a 404 with nothing dialled.
@@ -81,13 +80,25 @@ import org.jboss.logging.Logger;
  * there is nothing to authenticate to here, and {@code Authorization} is dropped rather than
  * forwarded.
  *
- * <h2>Four answers, because a waiting editor is not a broken one</h2>
+ * <h2>The reverse tunnel is the only way in</h2>
+ *
+ * <p>There is no direct dial at the container's own address and there must not be one: the daemon
+ * binds openvscode-server to the container's <b>loopback</b>, so nothing on {@code qits-net} can
+ * reach it and a fallback pointed there is a connection refused dressed up as an origin. This route
+ * used to carry that arm; what it bought in a shipped topology was a dial and then a 502, and what
+ * it cost was that every hardening claim about the forwarding — the header strip, the verbatim
+ * path, the bounded pipe — was provable only on the arm production traffic never takes. So a
+ * RUNNING editor with no tunnel is its own answer, naming the daemon tunnel as the thing that is
+ * missing.
+ *
+ * <h2>Five answers, because a waiting editor is not a broken one</h2>
  *
  * <p>The splash pattern is {@link ServiceProxyRoute}'s, gated on {@link WorkspaceEditorState}: a
  * container that is not up and an editor that has not finished starting are both <em>200 and a page
- * that refreshes itself</em>, an editor that has ended is a distinct 502 that stops the waiting, and
- * an unknown project is a 404. A proxy that reported all four as one connection error would make
- * every editor problem look like the same problem.
+ * that refreshes itself</em>, an editor that has ended is a distinct 502 that stops the waiting, an
+ * editor with no tunnel to it is a second distinct 502, and an unknown project is a 404. A proxy
+ * that reported all of them as one connection error would make every editor problem look like the
+ * same problem.
  */
 @ApplicationScoped
 public class EditorProxyRoute {
@@ -134,8 +145,6 @@ public class EditorProxyRoute {
    */
   private static final String ROW_ID = "qits.editor.rowId";
 
-  @Inject Vertx vertx;
-
   @Inject EditorProxyTargets targets;
 
   @Inject WorkspaceTunnels tunnels;
@@ -153,14 +162,6 @@ public class EditorProxyRoute {
   @Inject Instance<WorkspaceEditorState> editorStates;
 
   /**
-   * The port openvscode-server binds inside the container. The same key {@code
-   * WorkspaceContainerFactory} injects as {@code QITS_WORKSPACE_DAEMON_EDITOR_PORT}, spelled once so
-   * the listener and the thing that reaches it cannot be configured apart.
-   */
-  @ConfigProperty(name = "qits.editor.port", defaultValue = "13339")
-  int editorPort;
-
-  /**
    * The header the edge asserts a session's user in. Read from {@code qits-auth-core}'s own key
    * rather than hard-coded, so this refusal and {@code ForwardAuthMechanism}'s acceptance can never
    * be looking at two different headers.
@@ -168,10 +169,7 @@ public class EditorProxyRoute {
   @ConfigProperty(name = "qits.auth.forward.user-header", defaultValue = "X-Qits-User")
   String userHeader;
 
-  private HttpClient proxyClient;
-
   void init(@Observes Router router) {
-    proxyClient = vertx.createHttpClient();
     router.route().order(ROUTE_ORDER).handler(this::handle);
   }
 
@@ -231,7 +229,7 @@ public class EditorProxyRoute {
     EditorProxyTargets.EditorTarget target =
         DbRetry.call("editor proxy lookup", () -> targets.resolveLabel(projectLabel)).orElse(null);
     if (target == null) {
-      return new Resolved(null, null, null, null, false);
+      return new Resolved(null, null, null, false);
     }
     Long rowId = target.workspaceRowId();
     // Somebody has this editor on screen. Debounced on the keepalive's own side and a no-op entirely
@@ -242,16 +240,13 @@ public class EditorProxyRoute {
     WorkspaceTunnels.TunnelOrigin tunnel =
         tunnels.originFor(rowId, StreamTarget.EDITOR).orElse(null);
     if (tunnel != null) {
-      return new Resolved(target, state, tunnel, null, true);
+      return new Resolved(target, state, tunnel, true);
     }
     // No tunnel: no daemon, or one too old to know what an editor is. Then — and only then — ask
     // whether the container is even up, because that is what tells a stopped workspace's splash from
-    // a starting one's.
+    // a starting one's. There is no second way in to fall back to; see the class note.
     String container = containers.containerName(target.workspaceId(), target.repositoryId());
-    if (!containers.isRunning(container)) {
-      return new Resolved(target, state, null, null, false);
-    }
-    return new Resolved(target, state, null, containers.resolveTarget(container, editorPort), true);
+    return new Resolved(target, state, null, containers.isRunning(container));
   }
 
   /** The daemon's report, or null — an unreadable one is "nothing reported", which is waiting. */
@@ -267,20 +262,18 @@ public class EditorProxyRoute {
   }
 
   /**
-   * What one request resolved to: the workspace, what its editor last said, and the two ways to
+   * What one request resolved to: the workspace, what its editor last said, and the one way to
    * reach it.
    *
    * @param target the workspace the origin names, or null for a project nobody registered
    * @param editorState the daemon's last report, or null when there is none
    * @param tunnel the reverse tunnel's entrance, when a capable daemon is connected
-   * @param direct the container's own address, when there is no tunnel to take
    * @param containerRunning whether the container is up at all — the splash's fork
    */
   private record Resolved(
       EditorProxyTargets.EditorTarget target,
       EditorLifecycle editorState,
       WorkspaceTunnels.TunnelOrigin tunnel,
-      ProxyOrigin direct,
       boolean containerRunning) {}
 
   /** Answer differently for each way an editor can be absent; see the class note. */
@@ -311,22 +304,21 @@ public class EditorProxyRoute {
       splash(rc, "The editor is starting");
       return;
     }
-    rc.put(ROW_ID, resolved.target().workspaceRowId());
-    if (resolved.tunnel() != null) {
-      // The client is the tunnel's and never the shared one — see WorkspaceTunnels for what sharing
-      // it across a reused ephemeral port would cost.
-      forward(rc, resolved.tunnel().client(), resolved.tunnel().port(), "127.0.0.1");
-      return;
-    }
-    ProxyOrigin origin = resolved.direct();
-    if (origin == null) {
+    if (resolved.tunnel() == null) {
+      // The container is up and its editor says it is serving, and there is still no way in: the
+      // daemon is not on its control socket, or it is an image that predates the editor stream. See
+      // the class note on why this is a refusal and not a dial.
       respond(
           rc,
           502,
-          "The workspace container is not reachable — try restarting it from the workspace page.");
+          "The editor is running but this workspace's daemon tunnel is not — reconnect it by"
+              + " recreating the container from the workspace page.");
       return;
     }
-    forward(rc, proxyClient, origin.port(), origin.host());
+    rc.put(ROW_ID, resolved.target().workspaceRowId());
+    // The client is the tunnel's and never a shared one — see WorkspaceTunnels for what sharing it
+    // across a reused ephemeral port would cost.
+    forward(rc, resolved.tunnel().client(), resolved.tunnel().port(), "127.0.0.1");
   }
 
   /**
