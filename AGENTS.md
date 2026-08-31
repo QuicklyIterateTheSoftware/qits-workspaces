@@ -955,6 +955,165 @@ real value will arrive through the train (or by hand at the first published calv
 workspace launch fails at the orchestrator's pull, which is the loud version of what used to be
 silent.
 
+## The web editor: one workspace, a second image, and an origin of its own
+
+The editor is **not a new thing with a lifecycle**. It is the project wrapper's main workspace — the
+per-project singleton `WorkspaceService.createMainWorkspace` already maintains — started from a
+richer image and told to supervise `openvscode-server`. There is no editor row, no editor container
+and no editor teardown, which is why the door's answer carries the *workspace* row id: the two ways
+out of a stuck editor are `/workspaces/{id}/stop-container` and `/recreate-container`, the routes
+that already existed.
+
+**Which workspace is DERIVED and there is no column.** `WorkspacePostures.isWrapperMain` is
+repository archetype `PROJECT` plus branch == that repository's main branch. A column would be a
+fourth copy of an answer three places already hold and would go stale the day a main branch is
+renamed. `RepositoryView` grew `archetype` for this and nothing else, and `ProjectsRepositories`
+binds the one qits-projects field this context had deliberately left unbound.
+
+**`isWrapperMain` is a `default` method**, and that is mechanical as well as semantic: every
+hand-built test factory writes `WorkspacePostures` as a lambda, so a second abstract method would
+break all of them at once. False is the right default — a port that does not answer is a plain
+workspace.
+
+**`PersistedWorkspacePostures` memoizes it, and that memo is load-bearing.** The answer picks the
+image AND two environment variables, so it is part of the spec — and a spec that differs from what is
+running is a `Recreate.ifChanged` **replacement**. A live `RepositoryLookup` call cannot promise the
+same answer twice: an unreachable qits-projects throws, the factory reads that as "not the wrapper",
+and the resume presents a plain-image spec and destroys the editor's container. The memo is sound
+because its three inputs do not move (a workspace's branch is written once at creation, an archetype
+is what a repository was registered as, a main branch is the ref it was cloned from), and it caches
+both answers — a plain workspace re-deciding on every ensure is the same exposure pointed the other
+way. Row ids are never reused, so an entry can only become dead weight.
+
+**Two image keys, not a suffix.** `qits.editor.image-repo`/`-version` are a second pin because two
+repositories publish the two images on two calvers: qits-workspace-daemon publishes `qits/workspace`
+and qits-workspace-editor-oci follows it one release later. A derived name (`${image-repo}-editor`)
+would tie the versions into one string and be wrong the moment either train ran alone. The version
+half is a fallback the deployer overrides with `QITS_EDITOR_IMAGE_VERSION`, exactly as the workspace
+pin does. **The shipped default names no released tag** — qits-workspace-editor-oci has never been
+released — so it states the `qits/workspace` calver the editor recipe currently sits on, and a
+wrapper-main workspace fails at the orchestrator's pull with `IMAGE_MISSING` until the first real
+release moves it. That is the same posture the workspace pin shipped with, and the loud version of
+the same absence.
+
+**The editor environment is both-or-neither**, the rule the commissioned credential block follows:
+`QITS_WORKSPACE_DAEMON_EDITOR_ENABLED` without `…_EDITOR_PORT` would leave the daemon and the host's
+proxy free to pick different numbers, and a port alone would name a listener nothing starts.
+`qits.editor.port` is where that number is spelled once, and it equals the daemon's own default so a
+container launched before the key existed answers where this expects it. Every other workspace is
+told **nothing** — silence is what the daemon reads as "no editor", so an explicitly-false pair would
+be a second way of saying the same thing.
+
+### The origin, and how a label reaches a workspace
+
+`openvscode-server` serves from `/` with its own service worker, websockets and webviews, and this
+platform rewrites no paths anywhere — so an editor is a whole host, `editor.<project>.<env>.<domain>`,
+aliased at the edge onto this service. The project label arrives in `X-Forwarded-Host`.
+
+`EditorHost` turns the **first entry** of that header into a label and stops; `EditorProxyTargets`
+turns a label into a workspace row and nothing else. **Nothing about the request ever selects a host
+or a port** — `DaemonProxyTargets`' posture verbatim, and for its reason. The label is validated
+against qits-projects' own project-slug grammar before anything is looked up, and an unknown label is
+empty, which the caller answers as a 404 with nothing dialled.
+
+**A label reaches a repository by DERIVING a name.** There is no route from a project slug to a
+project — the registry answers repositories by id and by `(projectId, name)`, and this context holds
+no project table — but qits-projects names a wrapper `<slug>-<slug>` (`ProjectService.wrapperName`)
+and the slug is `updatable = false`. So the label *recognises* the wrapper among the repositories
+this service already has **root** workspaces for (`activeRootRepositoryIds`: ACTIVE, parent null,
+distinct — one entry per repository somebody has opened a main workspace for).
+
+**The registry half is remembered and the row half never is**, and the split is the whole design: a
+project's wrapper repository cannot change, so recognising it once is recognising it for good and a
+warm resolution is a map read plus one indexed query; a main workspace *can* be discarded and made
+again, so a cached row id would point the proxy at nothing. Negative answers are not remembered at
+all — a project registered a minute from now must resolve then.
+
+### The door
+
+`POST /workspaces/api/editor/ensure?repositoryId=<wrapper>` with an empty body, answering a **bare**
+JSON object `{workspaceId, containerStatus, editorState, editorReady}` — 201 fresh, 200 existing, the
+`TerminalController.open` pairing. It is the whole readiness protocol: there is no status read beside
+it, so a caller polls this and nothing else and a reader who reloads mid-start rejoins the editor
+already coming up. The body is bare rather than enveloped because a two-second poll reads four
+scalars off it; the `WorkspaceDto` routes keep their envelope.
+
+**`editorReady` is the service's judgement, not the caller's**: the container is running *and* the
+daemon says the editor is serving. A client that waited on `editorState` alone would be deciding for
+itself when the editor answers requests.
+
+**No locks, and none are needed.** `createMainWorkspace` is idempotent on the branch,
+`uq_workspace_active_branch` makes that true under a race, and the orchestrator's ensure is a PUT per
+place. What the door adds is not a lock but two reasons **not to ask**: a technical process already
+running for the workspace *is* the start this call would make, and a container that is up with a
+daemon on its socket is up. Without them a two-second poll would spawn one provision per tick through
+a multi-gigabyte pull. A RUNNING row whose daemon is *not* live is asked about anyway — that is what
+a container which died out-of-band looks like, and the ensure ladder's first rung is to find out.
+
+A repository that is not a wrapper is a **400 naming the rule**, not a plain workspace start: an
+ordinary workspace runs the plain image, so no editor could ever report and the caller would poll a
+workspace that can never become ready.
+
+### The idle-stop switch, and the keepalive
+
+`qits.editor.idle-stop-after` (**blank as shipped**) gives the editor's container an `IDLE_STOP`
+lifetime instead of `EXPLICIT`, so qits-containers' existing `IdleSweep` stops it. It applies to that
+one workspace deliberately: a workspace is somewhere a person works and an agent runs unattended, so
+nothing but a person may end one, while the editor's workspace is the one that is opened, read and
+left.
+
+**Stopping is not losing, and the reopen path is code that already exists.** The sweep *stops* a
+place: the container keeps its id and its writable layer, `/workspace` is a volume of its own, and
+the ensure ladder's second rung starts it back up where it stands — the daemon then finds a populated
+checkout and clones nothing.
+
+**It rides the POLICY, not the spec.** `Recreate.ifChanged` compares the spec, and a policy is not
+part of one, so turning the switch on does not replace a running container.
+
+`EditorKeepalive.touched(rowId)` is the entrypoint both sources call — the editor proxy route for a
+request or an open stream, and `WorkspaceDaemonRegistry.onAgentActivity` for an agent working
+unattended (an editor that closed on a running agent would kill work in progress). Three things about
+it are deliberate:
+
+- **The debounce is not an optimisation.** A keystroke is a websocket frame, so one keepalive per
+  request would cost more than the container it keeps. `qits.editor.touch-interval` (30 s) bounds it,
+  and it **must stay well under the deadline** — the sweep measures time since the last touch, so an
+  interval near the deadline would let a busy editor be stopped between two touches.
+- **The claim is a `compute` and not a get-then-put.** Frames arrive on several threads; a
+  read-then-write would let two of them see the same stale timestamp and both touch.
+- **The claim is inline and the call is not.** Both callers are on threads that must not block — an
+  event loop and a socket thread — so the cheap atomic part runs there and the database read plus the
+  HTTP call go to one `editor-keepalive` thread. One thread is plenty: the debounce bounds the
+  arrival rate, not the executor.
+
+`ContainerRuntime.touch` is best-effort and never throws, for the reason `stop` and `rm` are: a
+missed keepalive costs at worst a sweep, and a swept container is started back up in place.
+
+### What the edge does with the editor's vhost (read 2026-08-31, not run)
+
+A `qits.edge.apps` entry receives **full browser-session treatment**, which is what the editor needs
+and what registry/mirror vhosts deliberately do not get. `EdgeRouter.handle:295` sends every service
+target through `serviceGate`, which looks up the session cookie whenever sessions are on and the
+request carries no `Authorization` (`:424-432`) and proxies with that session (`:446`).
+`EdgeRouter.proxy:598` calls `EdgeHeaders.applyIdentity`, which strips the reserved `X-Qits-*`
+namespace and writes `X-Qits-User`/`-User-Id`/`-Roles` (`EdgeHeaders:114-129`).
+
+**The cookie is not stripped for such a request**, and the reason is worth knowing because it is not a
+per-vhost rule at all: the strip at `EdgeRouter:599-604` is guarded by `session == null` alone.
+Registry and mirror lose their cookie only because they arrive with an `Authorization` header or under
+`anonymous-read-apps` and therefore reach `proxy(…, null)`. A browser navigation with no session is
+refused into the login redirect rather than a 401 (`refuseService:521-531`), and an upgrade takes the
+same gate and the same `proxy`, so a websocket carries the identity too (`:598` runs before the
+branch at `:605`).
+
+One thing to check when the alias is written: the edge matches `$app.$env.$domain` at positions 0 and
+1 (`HostEnvironments.route:199-217`), so `editor.<slug>.<env>.<domain>` falls through to the
+`$app.$domain` reading and lands on the `editor` app in the **default** environment. That is the
+intended shape — one upstream for every project, told apart by the forwarded host — but it means the
+environment label is not read out of the name, and `X-Forwarded-Host` is `set`-if-absent at the edge
+(`EdgeHeaders.applyForwarded:193-200`), so a client-supplied value wins. Both are why the resolver
+treats the header as caller-shaped input that selects a row and never an address.
+
 ## The credential a workspace container holds
 
 A workspace container gets an **idp client of its own** — commissioned at provision, injected as
