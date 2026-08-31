@@ -65,6 +65,9 @@ public final class StoryTarget {
   /** The narrative record of what flowed through a repository. */
   public static final String HISTORY_PATH = API_PATH + "/history";
 
+  /** The web editor's one door — {@code POST …/editor/ensure?repositoryId=<wrapper>}. */
+  public static final String EDITOR_ENSURE_PATH = API_PATH + "/editor/ensure";
+
   /**
    * The control socket every workspace container dials on boot, as the diagram carries it. The
    * literal path is {@code /workspaces/daemon/<rowId>} and the row id is a bare number, so a
@@ -101,6 +104,41 @@ public final class StoryTarget {
 
   /** A repository id nothing has ever been worked in. Authored, and never registered anywhere. */
   public static final String UNWORKED_REPO_ID = "story-unworked-repo";
+
+  // --- the project wrapper the web editor rides -------------------------------------------------
+
+  /**
+   * A project's <b>wrapper</b> repository — archetype {@code PROJECT}, the superproject whose main
+   * workspace <em>is</em> the project editor ({@code WorkspacePostures.isWrapperMain}). The editor
+   * story registers it as a wrapper so {@code POST /editor/ensure} resolves a real editor.
+   */
+  public static final String WRAPPER_REPO = "story-editor";
+
+  /**
+   * …and its row id, authored rather than generated for the same reason {@link #WORKSPACE_REPO_ID}
+   * is: it travels into the editor container's name ({@code qits-ws-main-<repoId[0:8]>}) as eight
+   * characters <i>inside</i> a segment, which {@code Labels} correctly refuses to rewrite — so a
+   * uuid there would move the {@code networkHash} every run. The rule: an id that reaches a label
+   * inside a segment has to be authored.
+   */
+  public static final String WRAPPER_REPO_ID = "story-wrapper-repo";
+
+  /** The first eight characters of the id above, which is what rides in the editor container name. */
+  public static final String WRAPPER_REPO_SHORT = "story-wr";
+
+  /**
+   * The workspace id the editor rides: the wrapper's main branch, slugged. {@code
+   * WorkspaceService.toWorkspaceSlug("main")} is {@code "main"}, so this is what the container name
+   * and every path segment carry.
+   */
+  public static final String MAIN_WORKSPACE_LABEL = "main";
+
+  /**
+   * The container name the editor's main workspace gets — {@code qits-ws-<label>-<repoId[0:8]>},
+   * authored end to end so it survives a label verbatim.
+   */
+  public static final String EDITOR_CONTAINER_NAME =
+      "qits-ws-" + MAIN_WORKSPACE_LABEL + "-" + WRAPPER_REPO_SHORT;
 
   // --- branches ---------------------------------------------------------------------------------
 

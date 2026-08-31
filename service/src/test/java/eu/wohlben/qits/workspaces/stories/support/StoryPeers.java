@@ -140,6 +140,9 @@ public final class StoryPeers {
   /** …and its secret, which travels into the container and must never reach a report. */
   public static final String COMMISSIONED_SECRET = "story-workspace-commissioned-secret";
 
+  /** The archetype qits-projects gives a project's wrapper — what makes a repo the editor's. */
+  public static final String WRAPPER_ARCHETYPE = "PROJECT";
+
   /** What a refused peer answers. */
   public static final int REFUSED_STATUS = 503;
 
@@ -422,10 +425,26 @@ public final class StoryPeers {
 
   // --- the repository registry a story writes -----------------------------------------------------
 
-  /** One row of the registry, as both project routes answer it. */
-  public record Repository(String id, String projectId, String name, String mainBranch) {
+  /**
+   * One row of the registry, as both project routes answer it.
+   *
+   * <p>{@code archetype} is the fifth field, and it is here for one reader: the web editor's door
+   * asks whether a repository is a project's wrapper ({@code PROJECT}), which is the whole of {@code
+   * WorkspacePostures.isWrapperMain}. It is nullable, and the four-argument constructor leaves it so
+   * — a repository whose archetype no story cares about is a plain, un-wrapper row exactly as every
+   * caller predating the editor spelled it.
+   */
+  public record Repository(
+      String id, String projectId, String name, String mainBranch, String archetype) {
+
+    /** The four-field form every caller predating the editor spells — no archetype. */
+    public Repository(String id, String projectId, String name, String mainBranch) {
+      this(id, projectId, name, mainBranch, null);
+    }
 
     String json() {
+      String archetypeField =
+          archetype == null ? "" : ",\"archetype\":\"" + archetype + "\"";
       return "{\"id\":\""
           + id
           + "\",\"name\":\""
@@ -434,7 +453,9 @@ public final class StoryPeers {
           + projectId
           + "\",\"mainBranch\":\""
           + mainBranch
-          + "\"}";
+          + "\""
+          + archetypeField
+          + "}";
     }
   }
 
@@ -445,7 +466,14 @@ public final class StoryPeers {
   public static synchronized void register(Repository row) {
     append(
         REGISTRY,
-        String.join("\t", row.id(), row.projectId(), row.name(), row.mainBranch()) + "\n");
+        String.join(
+                "\t",
+                row.id(),
+                row.projectId(),
+                row.name(),
+                row.mainBranch(),
+                row.archetype() == null ? "" : row.archetype())
+            + "\n");
   }
 
   private static Optional<Repository> registered(String repoId) {
@@ -464,6 +492,8 @@ public final class StoryPeers {
       String[] fields = line.split("\t");
       if (fields.length == 4) {
         rows.add(new Repository(fields[0], fields[1], fields[2], fields[3]));
+      } else if (fields.length == 5) {
+        rows.add(new Repository(fields[0], fields[1], fields[2], fields[3], fields[4]));
       }
     }
     return rows;
