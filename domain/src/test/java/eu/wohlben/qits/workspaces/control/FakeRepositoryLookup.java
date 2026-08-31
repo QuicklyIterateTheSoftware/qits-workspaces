@@ -46,12 +46,26 @@ public class FakeRepositoryLookup implements RepositoryLookup {
    */
   private volatile boolean nameResolutionOutage;
 
+  private final Map<String, String> archetypes = new ConcurrentHashMap<>();
+
+  /**
+   * Whether a by-id resolution behaves as an unreachable qits-projects does — it throws. The same
+   * switch {@link #nameResolutionOutage} is, one route over: the wrapper-main posture reads {@code
+   * find}, and "could not ask" has to be tellable from "not a wrapper" there too.
+   */
+  private volatile boolean findOutage;
+
   @Override
   public Optional<RepositoryView> find(String repoId) {
+    if (findOutage) {
+      throw new IllegalStateException("qits-projects unreachable (fake outage)");
+    }
     String mainBranch = mainBranches.get(repoId);
     return mainBranch == null
         ? Optional.empty()
-        : Optional.of(new RepositoryView(repoId, nameOf(repoId), PROJECT_ID, mainBranch));
+        : Optional.of(
+            new RepositoryView(
+                repoId, nameOf(repoId), PROJECT_ID, mainBranch, archetypes.get(repoId)));
   }
 
   @Override
@@ -63,7 +77,11 @@ public class FakeRepositoryLookup implements RepositoryLookup {
         .map(
             entry ->
                 new RepositoryView(
-                    entry.getKey(), nameOf(entry.getKey()), PROJECT_ID, entry.getValue()))
+                    entry.getKey(),
+                    nameOf(entry.getKey()),
+                    PROJECT_ID,
+                    entry.getValue(),
+                    archetypes.get(entry.getKey())))
         .toList();
   }
 
@@ -91,6 +109,28 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     this.nameResolutionOutage = broken;
   }
 
+  /** Make every by-id resolution fail the way an unreachable registry does. Reset it. */
+  public void findOutage(boolean broken) {
+    this.findOutage = broken;
+  }
+
+  /**
+   * Register {@code repoId} as its project's WRAPPER — archetype {@code PROJECT}, which is what
+   * makes a workspace on its main branch the editor's workspace. Ordinary {@link #register} leaves
+   * the archetype null, which is a registry that does not answer with one and reads as "not a
+   * wrapper" everywhere.
+   */
+  public void registerWrapper(String repoId, String mainBranch) {
+    mainBranches.put(repoId, mainBranch);
+    archetypes.put(repoId, RepositoryView.WRAPPER_ARCHETYPE);
+  }
+
+  /** Register {@code repoId} with an explicit archetype, whatever qits-projects would call it. */
+  public void registerAs(String repoId, String mainBranch, String archetype) {
+    mainBranches.put(repoId, mainBranch);
+    archetypes.put(repoId, archetype);
+  }
+
   /** Make {@code repoId} resolvable, with {@code master} as its main branch. */
   public void register(String repoId) {
     register(repoId, "master");
@@ -109,6 +149,8 @@ public class FakeRepositoryLookup implements RepositoryLookup {
   /** Drop everything — call from {@code @BeforeEach} when a test needs a clean registry. */
   public void clear() {
     mainBranches.clear();
+    archetypes.clear();
     nameResolutionOutage = false;
+    findOutage = false;
   }
 }

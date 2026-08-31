@@ -188,6 +188,70 @@ class WorkspaceContainersTest {
   }
 
   @Test
+  void theEditorPostureChangesTheImageAndTheDaemonsEditorEnvironment() {
+    Spec ordinary = adapter().ensureRequest(REPO, "main", 1L, "main", null).spec();
+    Spec editor =
+        adapter(TestWorkspaceContainerFactory.editor())
+            .ensureRequest(REPO, "main", 1L, "main", null)
+            .spec();
+
+    // The editor image is a SECOND pin on a second repository path, not a suffix on the first: the
+    // two images are released by two repositories on two calvers.
+    assertEquals(TestWorkspaceContainerFactory.IMAGE, ordinary.image());
+    assertEquals(TestWorkspaceContainerFactory.EDITOR_IMAGE, editor.image());
+
+    // Both vars or neither, the rule the commissioned credential block follows: `enabled` without a
+    // port leaves the daemon and the host free to pick different numbers, and a port without
+    // `enabled` names a listener nothing starts.
+    assertNull(ordinary.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+    assertNull(ordinary.env().get("QITS_WORKSPACE_DAEMON_EDITOR_PORT"));
+    assertEquals("true", editor.env().get("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED"));
+    assertEquals("13339", editor.env().get("QITS_WORKSPACE_DAEMON_EDITOR_PORT"));
+
+    // …and that is the WHOLE difference, asserted the way the admin posture's is: the editor spec
+    // with the image and the two variables put back to the plain workspace's. Same user, same
+    // limits, same mounts, same labels, same socket answer. The editor image is the workspace image
+    // plus one directory, so a container that differed anywhere else would be a second decision
+    // riding along with the one somebody made.
+    java.util.Map<String, String> env = new java.util.LinkedHashMap<>(editor.env());
+    env.remove("QITS_WORKSPACE_DAEMON_EDITOR_ENABLED");
+    env.remove("QITS_WORKSPACE_DAEMON_EDITOR_PORT");
+    Spec editorAsAPlainWorkspace =
+        new Spec(
+            ordinary.image(),
+            editor.entrypoint(),
+            editor.args(),
+            env,
+            editor.extraLabels(),
+            editor.network(),
+            editor.aliases(),
+            editor.addHosts(),
+            editor.volumeMounts(),
+            editor.sharedMounts(),
+            editor.hostDockerSocket(),
+            editor.security(),
+            editor.pullPolicy(),
+            editor.explicitName(),
+            editor.user(),
+            editor.init());
+    assertEquals(ordinary, editorAsAPlainWorkspace);
+  }
+
+  @Test
+  void theEditorSpecIsTheSameOnEveryEnsure() {
+    // The spec-hash rule from the adapter's side: the orchestrator has no start verb, so a resume
+    // presents the SAME request again under Recreate.ifChanged. Two ensures with the same arguments
+    // must therefore be equal requests — image, environment and policy alike — or every resume of an
+    // editor workspace would replace the container it meant to start.
+    WorkspaceContainers adapter = adapter(TestWorkspaceContainerFactory.editor());
+
+    EnsureRequest first = adapter.ensureRequest(REPO, "main", 1L, "main", null);
+    EnsureRequest second = adapter.ensureRequest(REPO, "main", 1L, "main", null);
+
+    assertEquals(first, second);
+  }
+
+  @Test
   void theSandboxKeepsTheCapabilitiesAStepContainerDeliberatelyLoses() {
     Spec spec = adapter().ensureRequest(REPO, "work", 1L, "main", null).spec();
 

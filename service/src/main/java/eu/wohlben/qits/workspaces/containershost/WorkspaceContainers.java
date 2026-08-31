@@ -193,7 +193,10 @@ public class WorkspaceContainers implements ContainerRuntime {
       Consumer<String> onLine) {
     String name = containerName(workspaceId, repoId);
     EnsureRequest request = ensureRequest(repoId, workspaceId, rowId, branch, parent);
-    say(onLine, "Asking qits-containers for " + name + " (" + containerFactory.image() + ")");
+    // The image the SPEC carries, not the factory's plain pin: a wrapper-main workspace runs the
+    // editor image, and a provision log that named the other one would be the one line a reader
+    // trusts to say which image a container is coming up on.
+    say(onLine, "Asking qits-containers for " + name + " (" + request.spec().image() + ")");
     Envelope envelope = ensure(name, request, onLine);
     say(onLine, "The container is up.");
     LOG.debugf("Started workspace container %s (%s)", name, envelope.state().observed());

@@ -32,6 +32,20 @@ public final class TestWorkspaceContainerFactory {
   /** The composed reference, {@code <repo>:<version>} — what a spec carries. */
   public static final String IMAGE = IMAGE_REPO + ":" + IMAGE_VERSION;
 
+  /**
+   * The editor image, on its own repo and its own calver — deliberately a different version from
+   * {@link #IMAGE_VERSION}, because the two images are released by two repositories on two trains
+   * and a fixture that shared a number could not tell a derived reference from a configured one.
+   */
+  public static final String EDITOR_IMAGE_REPO = "localhost:8081/qits/workspace-editor";
+
+  public static final String EDITOR_IMAGE_VERSION = "2026.202.2";
+
+  public static final String EDITOR_IMAGE = EDITOR_IMAGE_REPO + ":" + EDITOR_IMAGE_VERSION;
+
+  /** The loopback port the fixture's editor is told to serve on — the shipped default. */
+  public static final int EDITOR_PORT = 13339;
+
   private TestWorkspaceContainerFactory() {}
 
   /** A factory with the per-workspace {@code /workspace} volume on — the shipped default. */
@@ -66,6 +80,9 @@ public final class TestWorkspaceContainerFactory {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.imageRepo = IMAGE_REPO;
     f.imageVersion = IMAGE_VERSION;
+    f.editorImageRepo = EDITOR_IMAGE_REPO;
+    f.editorImageVersion = EDITOR_IMAGE_VERSION;
+    f.editorPort = EDITOR_PORT;
     f.projectsUrl = "http://qits-projects:8080";
     f.observabilityUrl = "http://qits-observability:8080";
     f.network = "qits-net";
@@ -126,6 +143,36 @@ public final class TestWorkspaceContainerFactory {
     WorkspaceContainerFactory f = build(true);
     f.postures = StubInstance.of(rowId -> true);
     return f;
+  }
+
+  /**
+   * A factory whose workspaces are the project wrapper's main one — the EDITOR posture, which picks
+   * the editor image and hands the daemon its editor environment. Its own builder for the reason
+   * {@link #admin()} has one: the adapter's test asserts the whole spec twice, and the difference
+   * between the two is the claim.
+   *
+   * <p>An explicit implementation rather than a lambda, because {@code isWrapperMain} is a {@code
+   * default} method — a lambda would set the admin answer and leave this one false.
+   */
+  public static WorkspaceContainerFactory editor() {
+    WorkspaceContainerFactory f = build(true);
+    f.postures = StubInstance.of(wrapperMain());
+    return f;
+  }
+
+  /** A posture port that answers "the wrapper's main workspace" and "not admin". */
+  static WorkspacePostures wrapperMain() {
+    return new WorkspacePostures() {
+      @Override
+      public boolean isAdmin(Long rowId) {
+        return false;
+      }
+
+      @Override
+      public boolean isWrapperMain(Long rowId) {
+        return true;
+      }
+    };
   }
 
   private static GitIdentity identity() {
