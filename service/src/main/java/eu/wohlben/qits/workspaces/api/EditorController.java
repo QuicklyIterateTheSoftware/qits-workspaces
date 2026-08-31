@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspaces.api;
 
 import eu.wohlben.qits.workspaces.control.EditorLifecycle;
 import eu.wohlben.qits.workspaces.control.EditorService;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -43,6 +44,11 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 @RolesAllowed("qits:admin")
+// The door answers through a bare JAX-RS Response (fresh() decides 201 vs 200), so nothing tells
+// the native-image build the record is serialized — CaptureResource's measured failure, one door
+// over: the JVM suite green, the binary 500ing every ensure with "No serializer found".
+// NativeImageContractTest holds this line in place.
+@RegisterForReflection(targets = EditorController.EditorSessionResponse.class)
 public class EditorController {
 
   @Inject EditorService editors;
