@@ -237,6 +237,30 @@ public class FakeContainerRuntime implements ContainerRuntime {
     }
   }
 
+  /**
+   * Every keepalive this fake was asked for, newest last. The count is the assertion the debounce is
+   * about — "one touch per interval, not one per request" is a statement about how many arrived.
+   */
+  private final java.util.List<String> touches =
+      java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+  @Override
+  public void touch(String container) {
+    touches.add(container);
+  }
+
+  /** How many keepalives reached this container. */
+  public int touchCount(String container) {
+    synchronized (touches) {
+      return (int) touches.stream().filter(container::equals).count();
+    }
+  }
+
+  /** Forget the recorded keepalives — a test that counts them starts from zero. */
+  public void clearTouches() {
+    touches.clear();
+  }
+
   @Override
   public void rm(String container) {
     stopped.remove(container);

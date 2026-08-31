@@ -164,6 +164,21 @@ public interface ContainerRuntime {
   void rm(String container);
 
   /**
+   * Says the container is still being used — the keepalive an idle-stop policy is measured against.
+   *
+   * <p><b>It changes nothing about the container</b> and means nothing at all to a container whose
+   * lifetime is EXPLICIT, which is every workspace but the editor's. So it is safe to call for any
+   * workspace and the caller does not have to know which kind it has; what it costs when it is
+   * pointless is one request.
+   *
+   * <p>Best-effort and never throws, for the reason {@link #stop} and {@link #rm} are: a keepalive
+   * that failed is a container that may be swept, which is recoverable — the next ensure starts it
+   * back up in place with its volume intact — while a keepalive that threw would fail whatever the
+   * caller was actually doing. A dropped one is the designed behaviour.
+   */
+  void touch(String container);
+
+  /**
    * Restarts the container. <b>No production caller</b>, and refused by the implementation — the
    * sledgehammer for a stuck process group lost its meaning when the process group stopped being
    * this host's to signal.

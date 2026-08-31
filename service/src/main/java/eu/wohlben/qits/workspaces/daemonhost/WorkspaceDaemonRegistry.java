@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspaces.daemonhost;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.wohlben.qits.workspaces.containershost.EditorKeepalive;
 import eu.wohlben.qits.workspaces.control.AgentActivityState;
 import eu.wohlben.qits.workspaces.control.AgentSessionReporter;
 import eu.wohlben.qits.workspaces.control.ProvisionResult;
@@ -124,6 +125,18 @@ public class WorkspaceDaemonRegistry
    * it when one goes away.
    */
   @Inject Instance<WorkspaceTunnels> tunnels;
+
+  /**
+   * The editor's keepalive. A coding agent working in a workspace is that workspace being used, and
+   * the editor's container is the one with an idle-stop lifetime — so an unattended agent session
+   * must hold it open exactly as a person's open tab does. Reporting here rather than from a timer
+   * is what makes that true of the agent's OWN activity instead of of the socket merely being open:
+   * a daemon that has connected and is doing nothing is idle, which is what the sweep is for.
+   *
+   * <p>It is debounced on its own side and it does nothing at all while the idle-stop switch is
+   * unset, so this call costs one map operation on the socket thread in the shipped configuration.
+   */
+  @Inject EditorKeepalive editorKeepalive;
 
   /**
    * Last working-tree cleanliness each live daemon reported ({@link GitStatus}). In-memory only —
@@ -496,6 +509,9 @@ public class WorkspaceDaemonRegistry
       return; // unknown state string — lineage above still ran; nothing to cache/flip
     }
     long now = System.currentTimeMillis();
+    // An agent that is working is the workspace being used. Debounced on the keepalive's side, and
+    // a no-op entirely while nothing is idle-stopped.
+    editorKeepalive.touched(workspaceId);
     AgentActivityState before = rollup(workspaceId, now);
     agentActivity.put(activity.commandId(), new ActivityEntry(workspaceId, state, now));
     if (before != rollup(workspaceId, now)) {

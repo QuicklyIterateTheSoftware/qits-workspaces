@@ -78,9 +78,16 @@ class WorkspaceContainersTest {
   }
 
   private WorkspaceContainers adapter(WorkspaceContainerFactory factory) {
+    return adapter(factory, Optional.empty());
+  }
+
+  private WorkspaceContainers adapter(
+      WorkspaceContainerFactory factory, Optional<Duration> idleStopAfter) {
     WorkspaceContainers containers = new WorkspaceContainers();
     containers.containerFactory = factory;
     containers.owner = OWNER;
+    // Blank is the shipped value: nothing is idle-stopped and every workspace keeps EXPLICIT.
+    containers.editorIdleStopAfter = idleStopAfter;
     // One second, so the retry pause clamps to it (the adapter never pauses past its own window) and
     // a test about holding through a 401 costs a second rather than five.
     containers.launchPatience = Duration.ofSeconds(1);
@@ -249,6 +256,55 @@ class WorkspaceContainersTest {
     EnsureRequest second = adapter.ensureRequest(REPO, "main", 1L, "main", null);
 
     assertEquals(first, second);
+  }
+
+  // --- the editor's lifetime --------------------------------------------------------------------
+
+  @Test
+  void theSwitchIsOffAndEveryWorkspaceKeepsTheExplicitLifetime() {
+    // The shipped posture. An editor workspace with no deadline configured is EXPLICIT like every
+    // other workspace, which is exactly the behaviour that predates this key.
+    EnsureRequest editor =
+        adapter(TestWorkspaceContainerFactory.editor()).ensureRequest(REPO, "main", 1L, "main", null);
+
+    assertEquals(PolicyType.EXPLICIT, editor.policy().type());
+    assertNull(editor.policy().idleAfterSeconds());
+  }
+
+  @Test
+  void theDeadlineReachesTheEDITORSCONTAINERANDNOOTHER() {
+    // The whole of what the switch does. A workspace is somewhere a person works and an agent runs
+    // unattended, so nothing but a person may end one; the editor's workspace is the one that is
+    // opened, read and left.
+    Optional<Duration> idle = Optional.of(Duration.ofMinutes(30));
+
+    EnsureRequest editor =
+        adapter(TestWorkspaceContainerFactory.editor(), idle)
+            .ensureRequest(REPO, "main", 1L, "main", null);
+    assertEquals(PolicyType.IDLE_STOP, editor.policy().type());
+    assertEquals(Long.valueOf(1800L), editor.policy().idleAfterSeconds());
+
+    EnsureRequest plain =
+        adapter(TestWorkspaceContainerFactory.persistent(), idle)
+            .ensureRequest(REPO, "work", 1L, "feature/x", "main");
+    assertEquals(PolicyType.EXPLICIT, plain.policy().type());
+    assertNull(plain.policy().idleAfterSeconds());
+  }
+
+  @Test
+  void theDeadlineIsNotPartOfTheSPEC() {
+    // Recreate.ifChanged compares the SPEC, and a policy is not part of one — which is why turning
+    // the switch on does not replace a container that is already running. Asserted as the two specs
+    // being equal while the two policies are not.
+    EnsureRequest off =
+        adapter(TestWorkspaceContainerFactory.editor()).ensureRequest(REPO, "main", 1L, "main", null);
+    EnsureRequest on =
+        adapter(TestWorkspaceContainerFactory.editor(), Optional.of(Duration.ofMinutes(30)))
+            .ensureRequest(REPO, "main", 1L, "main", null);
+
+    assertEquals(off.spec(), on.spec());
+    assertEquals(PolicyType.EXPLICIT, off.policy().type());
+    assertEquals(PolicyType.IDLE_STOP, on.policy().type());
   }
 
   @Test

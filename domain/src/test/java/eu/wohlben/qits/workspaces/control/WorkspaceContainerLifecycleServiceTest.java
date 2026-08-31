@@ -407,6 +407,37 @@ public class WorkspaceContainerLifecycleServiceTest {
   }
 
   @Test
+  public void anIdleStoppedEditorWorkspaceResumesInPlaceWithItsCheckout() throws Exception {
+    // THE REOPEN PATH, and the whole reason it needs no code. qits-containers' IdleSweep STOPS an
+    // idle-stopped place — it does not delete it — so what the editor comes back to is the ladder's
+    // second rung, which every workspace has always had: the container is present but not running,
+    // and ensureContainer starts it back up where it stands rather than re-cloning. The daemon then
+    // finds a populated /workspace and clones nothing.
+    //
+    // The workspace here is the WRAPPER'S MAIN one, because that is the only workspace an idle-stop
+    // policy is ever asked for — see WorkspaceContainers.lifetime.
+    String repoId = TestOrigin.create(dataDir);
+    repositories.registerWrapper(repoId, "master", "editorproject-editorproject");
+    workspaceService.createMainWorkspace(repoId, "master");
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "master"));
+    String container = containers.containerName("master", repoId);
+    String head = commitInContainer(container, "editor-unpushed.txt");
+
+    // What the sweep does: a stop, in place. The container and its volume are both still there.
+    ((FakeContainerRuntime) containers).markExited(container);
+    assertFalse(containers.isRunning(container));
+    assertTrue(containers.exists(container), "an idle stop leaves the container present");
+    assertTrue(workspaceVolumeExists("master"), "and its /workspace volume");
+
+    // Reopening the editor is one ensure — the same call the door makes.
+    workspaceService.ensureContainer(workspaceIds.of(repoId, "master"));
+    assertTrue(containers.isRunning(container), "the stopped editor is started back up");
+    assertEquals(WorkspaceRuntimeStatus.RUNNING, workspaceDto(repoId, "master").runtimeStatus());
+    assertEquals(
+        head, containerHead(container), "with the checkout it had, unpushed commit and all");
+  }
+
+  @Test
   public void ensureContainerFiresStartedOnFreshProvision() throws Exception {
     String repoId = clonedRepo();
     workspaceService.createWorkspace(repoId, "feat", "master", "feat", null);
