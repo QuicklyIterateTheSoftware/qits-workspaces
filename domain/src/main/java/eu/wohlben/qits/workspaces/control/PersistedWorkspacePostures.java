@@ -37,6 +37,13 @@ import org.jboss.logging.Logger;
  * become dead weight, and a {@code (Long, Boolean)} per workspace ever created is not a size worth
  * a policy.
  *
+ * <p><b>Only a fully-answered view may be written down.</b> An unreachable registry is not the only
+ * way to not learn the answer: {@code archetype} and {@code mainBranch} are both nullable on the
+ * wire, so a 200 can arrive carrying neither — and reading a missing field as "not a wrapper" would
+ * be exactly the exposure above, with the difference that it gets <em>remembered</em>, for the life
+ * of the process, off one half-answered read. So a view missing either field takes the same third
+ * answer a thrown lookup does: false for this call, and nothing written down.
+ *
  * <p>What the memo does <em>not</em> do is invent an answer it never had: a cold process whose first
  * read fails still answers false, and the container is replaced onto the plain image. What survives
  * that is the checkout — {@code qits.workspace.persist-workspace} puts {@code /workspace} on a
@@ -95,8 +102,9 @@ public class PersistedWorkspacePostures implements WorkspacePostures {
 
   /**
    * The predicate itself: the repository is a project's wrapper and this workspace claims its main
-   * branch. {@code null} means the registry could not be asked, which is deliberately a third
-   * answer — the caller says false for the moment without writing that down.
+   * branch. {@code null} means the registry did not answer the question — it threw, or it answered
+   * without an archetype or a main branch — which is deliberately a third answer: the caller says
+   * false for the moment without writing that down.
    */
   private Boolean decide(Workspace workspace) {
     if (workspace.branch == null || workspace.branch.isBlank()) {
@@ -118,6 +126,19 @@ public class PersistedWorkspacePostures implements WorkspacePostures {
       return false;
     }
     RepositoryLookup.RepositoryView view = repo.get();
+    if (view.archetype() == null || view.mainBranch() == null || view.mainBranch().isBlank()) {
+      // A 200 that did not answer the question. Both fields are nullable on the wire, and reading a
+      // missing one as "not a wrapper" would be the unreachable case's exposure with a status code
+      // in front of it — except that this one WOULD be remembered, so a single half-answered read
+      // would describe the plain image at every ensure for the life of the process. Third answer.
+      LOG.warnf(
+          "repository %s answered without an archetype or a main branch while deciding whether"
+              + " workspace %s is the wrapper's main workspace; treating it as an ordinary"
+              + " workspace for this launch",
+          workspace.repositoryId,
+          workspace.id);
+      return null;
+    }
     return view.isWrapper() && workspace.branch.equals(view.mainBranch());
   }
 }

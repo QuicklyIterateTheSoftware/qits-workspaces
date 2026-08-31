@@ -89,6 +89,37 @@ public class PersistedWorkspacePosturesTest {
   }
 
   @Test
+  void aViewWithNoArchetypeIsNotWRITTENDOWNAsAnOrdinaryWorkspace() throws Exception {
+    // The 200 that answers nothing. `archetype` is nullable on the wire, so a registry that does not
+    // carry one is a live, successful read whose `isWrapper()` is false — and remembering THAT is
+    // the unreachable case's exposure with a status code in front of it, except permanent: one
+    // half-answered read would describe the plain image at every ensure for the life of the process.
+    String repoId = TestOrigin.create(dataDir);
+    repositories.register(repoId, "master"); // registered, and with no archetype
+    Workspace main = workspaceService.createMainWorkspace(repoId, "master");
+
+    assertFalse(postures.isWrapperMain(main.id), "not a wrapper for this call");
+
+    // The same workspace, once the registry answers in full. It must be able to flip.
+    repositories.registerWrapper(repoId, "master");
+    assertTrue(postures.isWrapperMain(main.id), "the unanswered read must not have been memoized");
+  }
+
+  @Test
+  void aViewWithNoMainBranchIsNotWrittenDownEither() throws Exception {
+    // The other nullable half of the predicate, and the same rule: a repository whose main branch
+    // the registry did not state cannot say anything about a workspace claiming it.
+    String repoId = TestOrigin.create(dataDir);
+    repositories.registerAs(repoId, " ", RepositoryLookup.RepositoryView.WRAPPER_ARCHETYPE);
+    Workspace main = workspaceService.createMainWorkspace(repoId, "master");
+
+    assertFalse(postures.isWrapperMain(main.id));
+
+    repositories.setMainBranch(repoId, "master");
+    assertTrue(postures.isWrapperMain(main.id), "the unanswered read must not have been memoized");
+  }
+
+  @Test
   void anUnknownWorkspaceIsNotTheEditorsWorkspace() {
     assertFalse(postures.isWrapperMain(-1L));
     assertFalse(postures.isWrapperMain(null));
