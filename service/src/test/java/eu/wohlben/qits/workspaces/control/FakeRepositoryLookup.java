@@ -49,6 +49,18 @@ public class FakeRepositoryLookup implements RepositoryLookup {
   private final Map<String, String> archetypes = new ConcurrentHashMap<>();
 
   /**
+   * Explicit names, overriding {@link #nameOf}. The derived name is enough wherever a test only
+   * needs "the name is not the id"; a test about a name's SHAPE — a wrapper is {@code
+   * <slug>-<slug>} — has to be able to say what it is.
+   */
+  private final Map<String, String> names = new ConcurrentHashMap<>();
+
+  /** The registered name of {@code repoId}: whatever a test set, else the derived one. */
+  private String registeredName(String repoId) {
+    return names.getOrDefault(repoId, nameOf(repoId));
+  }
+
+  /**
    * Whether a by-id resolution behaves as an unreachable qits-projects does — it throws. The same
    * switch {@link #nameResolutionOutage} is, one route over: the wrapper-main posture reads {@code
    * find}, and "could not ask" has to be tellable from "not a wrapper" there too.
@@ -65,7 +77,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
         ? Optional.empty()
         : Optional.of(
             new RepositoryView(
-                repoId, nameOf(repoId), PROJECT_ID, mainBranch, archetypes.get(repoId)));
+                repoId, registeredName(repoId), PROJECT_ID, mainBranch, archetypes.get(repoId)));
   }
 
   @Override
@@ -78,7 +90,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
             entry ->
                 new RepositoryView(
                     entry.getKey(),
-                    nameOf(entry.getKey()),
+                    registeredName(entry.getKey()),
                     PROJECT_ID,
                     entry.getValue(),
                     archetypes.get(entry.getKey())))
@@ -99,7 +111,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
       return Optional.empty();
     }
     return mainBranches.keySet().stream()
-        .filter(repoId -> nameOf(repoId).equals(name))
+        .filter(repoId -> registeredName(repoId).equals(name))
         .findFirst()
         .flatMap(this::find);
   }
@@ -123,6 +135,15 @@ public class FakeRepositoryLookup implements RepositoryLookup {
   public void registerWrapper(String repoId, String mainBranch) {
     mainBranches.put(repoId, mainBranch);
     archetypes.put(repoId, RepositoryView.WRAPPER_ARCHETYPE);
+  }
+
+  /**
+   * Register {@code repoId} as its project's wrapper under an explicit registered name — {@code
+   * <slug>-<slug>}, which is what an editor origin's project label derives and recognises it by.
+   */
+  public void registerWrapper(String repoId, String mainBranch, String registeredName) {
+    registerWrapper(repoId, mainBranch);
+    names.put(repoId, registeredName);
   }
 
   /** Register {@code repoId} with an explicit archetype, whatever qits-projects would call it. */
@@ -150,6 +171,7 @@ public class FakeRepositoryLookup implements RepositoryLookup {
   public void clear() {
     mainBranches.clear();
     archetypes.clear();
+    names.clear();
     nameResolutionOutage = false;
     findOutage = false;
   }
