@@ -63,7 +63,7 @@ steps:
         -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
         -Dquarkus.quinoa=false \
         -DskipITs=false \
-        -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,OperatorReadsIT,ReleaseDoorRefusalIT
+        -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,EditorEnsureIT,OperatorReadsIT,ReleaseDoorRefusalIT
 
       # `-C … .` so the story directories are the bundle's roots — nesting one directory deep would
       # put it in every served URL. The path is the module's, since `service` is the only module

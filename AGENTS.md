@@ -1476,7 +1476,7 @@ address is now something a test profile supplies. It is no longer one IT: it is 
 **story catalogue** under `service/src/test/java/…/workspaces/stories/`, and everything below is
 about the whole of it.
 
-**Twelve stories, five classes, one launched process.** Every class names
+**Thirteen stories, six classes, one launched process.** Every class names
 `stories.support.StoryProfile`, because a `@TestProfile` is what failsafe launches a process for and
 two profiles would be two qits-workspaces — two boots, two JWKS fetches, two database sets, two
 mirror trees, and a diagram whose startup traffic landed in whichever process happened to be
@@ -1487,6 +1487,7 @@ running.
 | `api.TokenValidationBootstrapIT` | authentication | the boot: the JWKS fetch, the commission reconcile, and a bearer cut for another audience |
 | `stories.branches.ReleaseDoorIT` | release | the release door — a deployable repository, a library, and a branch already in the trunk |
 | `stories.creation.WorkspaceProvisionIT` | workspaces | a workspace provisioned end to end, daemon dial included |
+| `stories.editor.EditorEnsureIT` | editor | the editor door — the wrapper's main workspace begun, with a branch check but no push |
 | `stories.operations.OperatorReadsIT` | operations | what a live read costs, and what a stored read does not |
 | `stories.refusals.ReleaseDoorRefusalIT` | refusals | four ways not to release something |
 
@@ -1500,7 +1501,7 @@ has one run per module and flipping it would turn the five docker-backed `Daemon
 it. Run it — and `.config/qits/ci-event-userflows.yml` runs it — as a comma list:
 
     ./mvnw verify -DskipITs=false -Dquarkus.quinoa=false \
-      -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,OperatorReadsIT,ReleaseDoorRefusalIT
+      -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,EditorEnsureIT,OperatorReadsIT,ReleaseDoorRefusalIT
 
 Adding a story class means adding it there **and** in the ci file. `-Dit.test` alone still runs the
 surefire suites, which is the honest gate; a run that wants only the stories adds
@@ -1543,8 +1544,10 @@ socket by hand, because the framework ships no socket tap and a frame is not a r
 
 1. **Order is load-bearing and the package names carry it.** `UserflowClassOrderer` sorts by
    fully-qualified class name, so `…workspaces.api` drains before `…workspaces.stories.*` and the
-   boot story owns the startup traffic; within `stories`, `branches` < `creation` < `operations` <
-   `refusals`. `@UserflowRunsAfter` states the ones that are real dependencies as well.
+   boot story owns the startup traffic; within `stories`, `branches` < `creation` < `editor` <
+   `operations` < `refusals`. `@UserflowRunsAfter` states the ones that are real dependencies as
+   well — `editor` runs after `creation` because the containers-client token the editor's container
+   PUT reuses is first minted there.
 2. **A cached fetch belongs to whichever story paid for it.** quarkus-oidc-client caches its mint
    for an hour (`StoryPeers` answers `expires_in: 3600` on purpose), so `POST /idp/token` lands in
    the first release story for the `githost`/`projects` clients and in the workspace story for the
