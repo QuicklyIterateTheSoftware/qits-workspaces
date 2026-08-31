@@ -7,7 +7,10 @@ import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -40,8 +43,26 @@ import org.jboss.logging.Logger;
  * recognising it once is recognising it for good, and a warm resolution is a map read plus one
  * indexed query. The workspace row is re-read every time, because that half <em>does</em> move: a
  * main workspace can be discarded and created again, and a cached row id would send the proxy at a
- * workspace that no longer exists. Negative answers are not remembered at all — a project registered
- * a minute from now must resolve then.
+ * workspace that no longer exists.
+ *
+ * <p><b>A miss is remembered too, and it is a different kind of thing from a remembered hit.</b> The
+ * scan behind a miss is one {@code find} per root repository — N registry round trips, on every
+ * request, for any label shaped like a slug: a browser sitting on an editor origin whose main
+ * workspace does not exist yet reloads twice a second, and a platform with thirty root repositories
+ * pays sixty qits-projects calls a second to keep saying 404. A hit may be kept forever because the
+ * fact behind it is immutable; a miss may not, because a project registered a minute from now must
+ * resolve then.
+ *
+ * <p>So a miss is kept <b>against the candidate set it was computed over</b>, and that is what makes
+ * it exact rather than merely short: the set is one indexed local query, everything the scan reads
+ * about a repository in it is immutable, so the answer can only have changed if the set has. A main
+ * workspace created a second ago therefore resolves at once instead of waiting out a window — which
+ * matters, because that miss is a 404 page and not the splash that reloads itself. {@code
+ * qits.editor.label-miss-ttl-ms} sits underneath as a backstop, for a label nobody ever registers on
+ * a platform whose root workspaces do not move.
+ *
+ * <p>A scan in which the registry <em>threw</em> is not remembered at all: "could not ask" is not
+ * "not there", the same distinction the loop's own log line draws.
  */
 @ApplicationScoped
 public class EditorProxyTargets {
@@ -54,6 +75,29 @@ public class EditorProxyTargets {
 
   /** Project label → the wrapper repository's id. Immutable facts; see the class note. */
   private final Map<String, String> wrappers = new ConcurrentHashMap<>();
+
+  /**
+   * Project label → the "no such wrapper" answer, and what it was computed over. See the class note
+   * for why the two halves of this cache are not the same kind of thing.
+   */
+  private final Map<String, Miss> misses = new ConcurrentHashMap<>();
+
+  /**
+   * The backstop under a miss, once the candidate set that invalidates it has been checked. Five
+   * seconds is longer than the SPA's two-second poll, so a label nobody will ever register costs
+   * one scan per window rather than one per tick.
+   */
+  @ConfigProperty(name = "qits.editor.label-miss-ttl-ms", defaultValue = "5000")
+  long missTtlMs;
+
+  /**
+   * When the miss map is swept. A label reaches this class only after {@link EditorHost} has
+   * validated it against qits-projects' slug grammar, but that still admits more labels than a
+   * platform has projects, and an entry costs its string until something drops it. Sweeping on
+   * insert past this size keeps the map proportional to what is actually being asked for without a
+   * scheduler for a few dozen strings.
+   */
+  private static final int MISS_SWEEP_THRESHOLD = 256;
 
   /**
    * The workspace an editor origin addresses.
@@ -99,16 +143,24 @@ public class EditorProxyTargets {
   }
 
   /**
-   * The project's wrapper repository, recognised by the name its slug derives — remembered once
-   * found, never remembered when not.
+   * The project's wrapper repository, recognised by the name its slug derives — remembered for good
+   * once found, and remembered against one candidate set for {@link #missTtlMs} when not.
    */
   private Optional<String> wrapperRepository(String projectLabel) {
     String remembered = wrappers.get(projectLabel);
     if (remembered != null) {
       return Optional.of(remembered);
     }
+    // One indexed local query, and it is what makes the miss below safe to keep: the answer can only
+    // change when this set does.
+    Set<String> candidates = Set.copyOf(workspaces.activeRootRepositoryIds());
+    Miss miss = misses.get(projectLabel);
+    if (miss != null && System.nanoTime() - miss.expiresAt() < 0 && miss.candidates().equals(candidates)) {
+      return Optional.empty();
+    }
     String wrapperName = EditorHost.wrapperRepositoryName(projectLabel);
-    for (String repositoryId : workspaces.activeRootRepositoryIds()) {
+    boolean fullyScanned = true;
+    for (String repositoryId : candidates) {
       Optional<RepositoryLookup.RepositoryView> view;
       try {
         view = repositories.find(repositoryId);
@@ -116,7 +168,9 @@ public class EditorProxyTargets {
         // "Could not ask" is not "not there", and the difference matters here the way it does
         // everywhere this port is read — but there is no caller to tell, because the answer this
         // method gives is a 404 either way. Say so in the log and keep looking: another candidate
-        // may resolve, and a blip must not be remembered as an absence.
+        // may resolve, and a blip must not be remembered as an absence — which is what this flag
+        // buys, one line down.
+        fullyScanned = false;
         LOG.debugf(
             "could not read repository %s while resolving the editor origin for project %s: %s",
             repositoryId, projectLabel, unreachable.getMessage());
@@ -130,10 +184,33 @@ public class EditorProxyTargets {
           && repository.name() != null
           && wrapperName.equalsIgnoreCase(repository.name())) {
         wrappers.put(projectLabel, repositoryId);
+        misses.remove(projectLabel);
         return Optional.of(repositoryId);
       }
     }
+    if (fullyScanned) {
+      rememberMiss(projectLabel, candidates);
+    }
     return Optional.empty();
+  }
+
+  /**
+   * A completed scan that found nothing: the candidate set it was computed over, and a deadline.
+   *
+   * @param candidates the root repositories the scan asked about — the miss stands only while this
+   *     is still what a scan would ask about, which is what makes a main workspace created a moment
+   *     later resolve at once instead of waiting out a window
+   * @param expiresAt a {@link System#nanoTime()} reading, the backstop under the set comparison
+   */
+  private record Miss(Set<String> candidates, long expiresAt) {}
+
+  /** Write down a completed scan that found nothing, sweeping what has expired if the map has grown. */
+  private void rememberMiss(String projectLabel, Set<String> candidates) {
+    long now = System.nanoTime();
+    if (misses.size() >= MISS_SWEEP_THRESHOLD) {
+      misses.values().removeIf(miss -> now - miss.expiresAt() >= 0);
+    }
+    misses.put(projectLabel, new Miss(candidates, now + TimeUnit.MILLISECONDS.toNanos(missTtlMs)));
   }
 
   /**

@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The test-side {@link RepositoryLookup}: an in-memory registry of repository id → main branch.
@@ -67,8 +68,21 @@ public class FakeRepositoryLookup implements RepositoryLookup {
    */
   private volatile boolean findOutage;
 
+  /**
+   * Every by-id resolution this fake has been asked for. A round-trip counter, because that is what
+   * {@code find} is on a real platform — one HTTP call to qits-projects — and a caller that scans
+   * candidate repositories per request is a defect no assertion about its ANSWER can see.
+   */
+  private final AtomicInteger findCalls = new AtomicInteger();
+
+  /** How many times {@link #find} has been called since the last {@link #clear()}. */
+  public int findCalls() {
+    return findCalls.get();
+  }
+
   @Override
   public Optional<RepositoryView> find(String repoId) {
+    findCalls.incrementAndGet();
     if (findOutage) {
       throw new IllegalStateException("qits-projects unreachable (fake outage)");
     }
@@ -174,5 +188,6 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     names.clear();
     nameResolutionOutage = false;
     findOutage = false;
+    findCalls.set(0);
   }
 }
