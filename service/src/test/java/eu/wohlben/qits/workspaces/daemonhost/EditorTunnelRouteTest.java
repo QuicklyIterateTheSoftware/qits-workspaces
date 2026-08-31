@@ -68,9 +68,11 @@ import org.junit.jupiter.api.Test;
  * states a port inside the container. That the frame says {@code EDITOR} is asserted directly,
  * because it is the only thing that keeps an editor request off the daemon's own API.
  *
- * <p><b>A daemon that predates the editor is never asked.</b> An older image decodes an absent
- * target as {@code API}, so a name it has never heard of would be served by the wrong listener
- * rather than refused — which is why the gate is a capability version and not a hope.
+ * <p><b>A daemon that predates the editor is never asked</b> — neither when the origin is resolved
+ * nor when a socket the resolution admitted is accepted a moment later. An older image decodes an
+ * absent target as {@code API}, so a name it has never heard of would be served by the wrong
+ * listener rather than refused; which is why the gate is a capability version and not a hope, and
+ * why it is read twice.
  *
  * <p><b>The fake daemon's own pipe carries backpressure</b>, exactly as the real
  * {@code DaemonStreamTunnel} does. Without it the flood case would prove nothing: an unbounded hop
@@ -479,6 +481,40 @@ public class EditorTunnelRouteTest {
     assertTrue(asked.isEmpty(), "a daemon that cannot serve an editor must not be asked for one");
   }
 
+  /**
+   * The gate is read twice, and this is the window between the two readings.
+   *
+   * <p>{@code originFor} checks the capability and hands back a listening port; {@code onAccepted}
+   * mints the nonce and sends the {@code OpenStream}, one accepted connection later. A daemon that
+   * reconnected on an older image in between would be sent a target its codec drops — and an absent
+   * target decodes as {@code API}, so the stream would land on the daemon's own API port instead of
+   * being refused. Bounded (that port wants a bearer this side does not send) and still wrong: the
+   * browser would read someone else's 401s as its editor.
+   *
+   * <p>Dialled at the tunnel's own port rather than through the route, because the route would
+   * re-resolve and never reach the window. A refused socket is the same connection error the nonce's
+   * expiry gives, one round trip sooner.
+   */
+  @Test
+  public void aDaemonThatDROPSToAnOlderImageIsNotAskedByASocketTheOldGateAdmitted()
+      throws Exception {
+    Workspace main = editorWorkspace("capabilityrace");
+    connectFakeDaemon(main.id, DaemonProtocol.CAPABILITY_VERSION);
+    int tunnelPort = tunnels.originFor(main.id, StreamTarget.EDITOR).orElseThrow().port();
+
+    controlSocket.close();
+    awaitNoDaemon(main.id);
+    connectFakeDaemon(main.id, WorkspaceTunnels.EDITOR_CAPABILITY_VERSION - 1);
+
+    NetSocket stale = await(netClient.connect(tunnelPort, "127.0.0.1"));
+    CompletableFuture<Void> closed = new CompletableFuture<>();
+    stale.closeHandler(v -> closed.complete(null));
+    stale.write("GET / HTTP/1.1\r\nHost: editor\r\n\r\n");
+
+    closed.get(20, TimeUnit.SECONDS);
+    assertTrue(asked.isEmpty(), "the downgraded daemon must not be asked for an editor stream");
+  }
+
   // --- helpers ------------------------------------------------------------------------------------
 
   /** Nothing of the platform's own identity may reach a container running an untrusted checkout. */
@@ -490,6 +526,17 @@ public class EditorTunnelRouteTest {
           lower.startsWith("x-qits-") || lower.equals("authorization"),
           "the editor must not see " + name);
     }
+  }
+
+  private void awaitNoDaemon(Long workspaceId) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+    while (System.nanoTime() < deadline) {
+      if (registry.lookup(workspaceId).isEmpty()) {
+        return;
+      }
+      Thread.sleep(25);
+    }
+    throw new AssertionError("the daemon's control socket never went away");
   }
 
   private void awaitCapability(Long workspaceId, int expected) throws Exception {

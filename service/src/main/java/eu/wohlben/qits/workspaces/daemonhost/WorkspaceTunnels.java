@@ -283,11 +283,27 @@ public class WorkspaceTunnels {
    *
    * <p>The nonce is registered <em>before</em> the message goes out. That ordering is the only one
    * that works: a dial-back can arrive before the send's own callback does.
+   *
+   * <p><b>The capability is re-read here, and not only in {@link #originFor}.</b> That gate runs
+   * once per resolution and this handler runs once per accepted connection, so a daemon that
+   * reconnected on an older image in between would be asked for a target it cannot decode — and an
+   * absent target decodes as {@code API}, which means the stream lands on the daemon's own API port
+   * rather than being refused. Bounded (that port wants a bearer this side does not send), but
+   * wrong, and wrong in the direction where a browser reads someone else's 401s as its editor. The
+   * refusal is a closed socket, which is the same connection error the nonce's own expiry gives.
    */
   private void onAccepted(TunnelKey key, NetSocket socket) {
     Long workspaceId = key.workspaceId();
     Tunnel tunnel = tunnels.get(key);
     if (tunnel == null) {
+      socket.close();
+      return;
+    }
+    WorkspaceDaemonInfo.Info info = registry.lookup(workspaceId).orElse(null);
+    if (info == null || info.capabilityVersion() < capabilityFor(key.target())) {
+      LOG.debugf(
+          "refusing a %s stream for workspace %s: its daemon no longer serves that target",
+          key.target(), workspaceId);
       socket.close();
       return;
     }
