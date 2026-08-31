@@ -262,7 +262,9 @@ edge or on `qits-net`.
 
 **One surface is in no row of that table, because it is a HOST and not a path.** Everything arriving
 with `X-Forwarded-Host: editor.<project>.<env>.<domain>` is the web editor's and is forwarded whole
-to that project's workspace container (`EditorProxyRoute`): openvscode-server serves from `/`, so an
+to that project's workspace container (`EditorProxyRoute`), over the daemon's reverse tunnel and by
+no other route — openvscode-server is bound to the container's loopback, so it has no address on
+`qits-net` to dial: openvscode-server serves from `/`, so an
 editor claims every path there is and no prefix could name it. It is kept off the SPA fallback by
 **route order** rather than by `ignored-path-prefixes` — 1000, ahead of the built client's static
 files (1060) and of the fallback (40000) — and once it recognises an editor origin it never falls

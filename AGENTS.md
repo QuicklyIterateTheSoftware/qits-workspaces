@@ -999,6 +999,15 @@ is what a repository was registered as, a main branch is the ref it was cloned f
 both answers — a plain workspace re-deciding on every ensure is the same exposure pointed the other
 way. Row ids are never reused, so an entry can only become dead weight.
 
+**Only a FULLY-ANSWERED view may be written down**, and an unreachable registry is not the only way
+to not learn the answer. `RepositoryView.archetype` and `.mainBranch` are both nullable, so a 200 can
+arrive carrying neither — and `isWrapper()` on such a view is false. Memoizing *that* is the outage's
+exposure with a status code in front of it, except permanent: one half-answered read and every ensure
+for the life of the process describes the plain image, which under `Recreate.ifChanged` replaces the
+editor's container with a plain one. So a view missing either field takes the same third answer a
+thrown lookup does — false for this call, nothing remembered. An archetype the registry *did* state
+and this host does not recognise is a real answer and is memoized as "not a wrapper".
+
 **Two image keys, not a suffix.** `qits.editor.image-repo`/`-version` are a second pin because two
 repositories publish the two images on two calvers: qits-workspace-daemon publishes `qits/workspace`
 and qits-workspace-editor-oci follows it one release later. A derived name (`${image-repo}-editor`)
@@ -1011,10 +1020,12 @@ release moves it. That is the same posture the workspace pin shipped with, and t
 the same absence.
 
 **The editor environment is both-or-neither**, the rule the commissioned credential block follows:
-`QITS_WORKSPACE_DAEMON_EDITOR_ENABLED` without `…_EDITOR_PORT` would leave the daemon and the host's
-proxy free to pick different numbers, and a port alone would name a listener nothing starts.
-`qits.editor.port` is where that number is spelled once, and it equals the daemon's own default so a
-container launched before the key existed answers where this expects it. Every other workspace is
+`QITS_WORKSPACE_DAEMON_EDITOR_ENABLED` without `…_EDITOR_PORT` would name a supervisor with no port
+to bind, and a port alone would name a listener nothing starts. `qits.editor.port` is where that
+number is spelled once, and it equals the daemon's own default so a container launched before the key
+existed answers where this expects it. **Nothing on the host side DIALS it** — the port is loopback
+inside the container and the proxy asks the tunnel for the listener by name — so the only reader here
+is `WorkspaceContainerFactory`, which writes it into the environment and nothing else. Every other workspace is
 told **nothing** — silence is what the daemon reads as "no editor", so an explicitly-false pair would
 be a second way of saying the same thing.
 
@@ -1040,10 +1051,20 @@ distinct — one entry per repository somebody has opened a main workspace for).
 **The registry half is remembered and the row half never is**, and the split is the whole design: a
 project's wrapper repository cannot change, so recognising it once is recognising it for good and a
 warm resolution is a map read plus one indexed query; a main workspace *can* be discarded and made
-again, so a cached row id would point the proxy at nothing. Negative answers are not remembered at
-all — a project registered a minute from now must resolve then.
+again, so a cached row id would point the proxy at nothing.
 
-### The data path, and the four answers it can give
+**A miss is remembered too, and against the CANDIDATE SET rather than a clock.** The scan behind one
+is a `find` per root repository — N qits-projects round trips per request, and a browser sitting on
+an editor origin whose main workspace does not exist yet reloads twice a second, so uncached that is
+N calls twice a second per tab to keep saying 404. But a plain TTL would be wrong in the direction
+that matters: the miss's answer is a **404 page and not the reloading splash**, so a project whose
+main workspace was created a second ago must resolve *now*. It does, because everything the scan
+reads about a repository is immutable and the candidate set is one indexed local query: the answer
+can only have changed when the set has. `qits.editor.label-miss-ttl-ms` (5 s) sits underneath as a
+backstop for the label nobody ever registers. A scan the registry **threw** in is not remembered at
+all — "could not ask" is not "not there".
+
+### The data path, and the five answers it can give
 
 `EditorProxyRoute` is `ContainerProxyRoute`'s sibling and takes its hardened parts wholesale — the
 hand-rolled `proxyUpgrade`/`openUpgrade`/`completeUpgrade`/`pipe`, `writeQueueFull`/`drainHandler` in
@@ -1087,7 +1108,7 @@ the transition that contradicted it is the one direction that costs a reader a s
 have seen. Absence is "nothing reported" and never "no editor": a plain workspace, a container that
 is down and a first frame that has not arrived are one answer, and they deserve the same one.
 
-**Four answers, because a waiting editor is not a broken one.** `ServiceProxyRoute`'s splash pattern,
+**Five answers, because a waiting editor is not a broken one.** `ServiceProxyRoute`'s splash pattern,
 gated on `WorkspaceEditorState`:
 
 - no container, or a stopped one → **200 and a self-refreshing page**. Opening the editor while it
@@ -1096,14 +1117,26 @@ gated on `WorkspaceEditorState`:
   the difference, and "no frame yet" and "starting" are one state to them.
 - editor `ENDED` → a **502 of its own**, and deliberately not a splash: it is terminal, so a page
   that kept refreshing would spin for the container's lifetime.
+- editor `RUNNING` and **no tunnel** → a second, distinct **502**, naming the daemon tunnel. Also not
+  a splash: nothing this side does will make a tunnel appear.
 - no such project → **404 with nothing dialled**.
+
+**THE REVERSE TUNNEL IS THE ONLY WAY IN, and there is no direct dial to fall back to.** The daemon
+binds openvscode-server to the container's **loopback**, so no address on `qits-net` reaches an
+editor and `resolveTarget(container, editorPort)` names a port in another network namespace. This
+route carried that fallback for one commit; in the shipped topology every request it took was a dial
+and then a 502 — concretely, with `qits.workspace.daemon-tunnel.enabled=false` *every* editor request
+was one — and the real cost was in the suite, where the header strip, the verbatim path, the bounded
+pipe and the upgrade were all proved on the arm production never takes. So "RUNNING editor, no
+tunnel" is the answer above, and `EditorTunnelRouteTest` is where the forwarding is proved. Nothing
+in this route states a port any more; the listener is asked for by name.
 
 **The tunnel is asked before the orchestrator, and that ordering is the performance decision that
 matters.** A live control socket at the editor capability is stronger evidence that the container is
 up than a status call is — `ContainerProxyRoute.resolve` records the same reasoning — and an editor
 session is a stream of requests, so a round trip per request would cost more than the container. The
-container read runs only where there is no tunnel, which is exactly where it earns its keep: telling
-a stopped workspace's splash from a starting one's.
+container read runs only where there is no tunnel, and it still earns its keep there: it is what
+tells a stopped workspace's splash from the 502 above.
 
 **The tunnel carries a TARGET now, and one tunnel serves one target.** `OpenStream` names
 `StreamTarget.EDITOR`; the daemon resolves the name against its own allow-list, so the host still
@@ -1117,6 +1150,15 @@ the wrong listener rather than refused, and an editor answering the daemon's 404
 as broken rather than absent. `EDITOR_CAPABILITY_VERSION` (5) lives in `WorkspaceTunnels` and not in
 `DaemonProtocol` only because that module is a byte-identical source copy; move it the day the daemon
 repo declares one.
+
+**That gate is read TWICE, and the second reading is the one a race needs.** `originFor` checks the
+capability once per resolution and hands back a listening port; `onAccepted` mints the nonce and
+sends the `OpenStream` one accepted connection later. A daemon that reconnected on an older image
+between the two would be sent a target its codec drops — and an absent target decodes as `API`, so
+the stream would land on the daemon's own API port instead of being refused. Bounded (that port wants
+a bearer this side does not send) and still wrong: a browser reads someone else's 401s as its editor.
+So `onAccepted` re-reads the registry and closes the socket when the target no longer suffices, which
+is the same connection error the nonce's own expiry would give a few seconds later.
 
 **The keepalive fires in three places, and the third is the one that makes it true.** Per request,
 per opened stream, and **per frame from the browser** through the pipe. An open tab that reads a file
