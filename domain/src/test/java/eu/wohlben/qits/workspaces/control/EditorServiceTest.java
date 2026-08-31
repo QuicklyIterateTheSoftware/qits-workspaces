@@ -69,9 +69,10 @@ public class EditorServiceTest {
 
   @Test
   void readinessNeedsTheEDITORAndNotOnlyTheContainer() throws Exception {
-    // The container being up is half of it. Nothing implements WorkspaceEditorState yet — the
-    // daemon's frame and the registry's handling of it land with the proxy route — so the state is
-    // null and the readiness is false, which is the honest answer and the one a waiting page needs.
+    // The container being up is half of it. WorkspaceEditorState is implemented in `service` (the
+    // daemon registry, off the control socket's EditorState frame) and this module has no such
+    // bean, so the port is unsatisfied here — the state is null and the readiness is false, which
+    // is the honest answer and the one a waiting page needs.
     // A door that read readiness off the container alone would send a reader to an origin serving
     // nothing.
     String repoId = wrapperRepository();

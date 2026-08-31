@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.wohlben.qits.workspaces.containershost.EditorKeepalive;
 import eu.wohlben.qits.workspaces.control.AgentActivityState;
 import eu.wohlben.qits.workspaces.control.AgentSessionReporter;
+import eu.wohlben.qits.workspaces.control.EditorLifecycle;
 import eu.wohlben.qits.workspaces.control.ProvisionResult;
 import eu.wohlben.qits.workspaces.control.QitsConfig;
 import eu.wohlben.qits.workspaces.control.WorkspaceAgentActivity;
@@ -13,6 +14,7 @@ import eu.wohlben.qits.workspaces.control.WorkspaceConfigView;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonInfo;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonLiveness;
 import eu.wohlben.qits.workspaces.control.WorkspaceDaemonProvisioner;
+import eu.wohlben.qits.workspaces.control.WorkspaceEditorState;
 import eu.wohlben.qits.workspaces.control.WorkspaceGitStatus;
 import eu.wohlben.qits.workspaces.control.WorkspaceGitSync;
 import eu.wohlben.qits.workspaces.control.WorkspaceServiceDriver;
@@ -31,6 +33,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
+import eu.wohlben.qits.workspacedaemon.protocol.EditorState;
 import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
@@ -99,6 +102,7 @@ public class WorkspaceDaemonRegistry
         WorkspaceServiceDriver,
         WorkspaceGitStatus,
         WorkspaceAgentActivity,
+        WorkspaceEditorState,
         WorkspaceDaemonInfo,
         WorkspaceGitSync {
 
@@ -168,6 +172,22 @@ public class WorkspaceDaemonRegistry
    * instead, so the bar survives a page reload without keeping yesterday's finished run on screen.
    */
   private final ConcurrentHashMap<String, ActivityEntry> agentActivity = new ConcurrentHashMap<>();
+
+  /**
+   * Last web-editor state each live daemon reported ({@link EditorState}), per workspace row id.
+   * The same lifetime and the same eviction as {@link #gitClean}: in-memory only, populated while
+   * the daemon is connected, dropped on {@link #unregister}, re-reported on reconnect. Surfaced
+   * through {@link WorkspaceEditorState#editorStateFor}, which {@code EditorService} and {@code
+   * EditorProxyRoute} both gate on.
+   *
+   * <p><b>An absent entry is "nothing reported", never "no editor".</b> The daemon sends the frame
+   * only where it supervises an editor at all, so absence covers a plain workspace, a container
+   * that is not up, and an editor whose first frame has not arrived — three cases a caller turns
+   * into the same "not ready", which is the answer each of them deserves. That is also why {@code
+   * ENDED} is <em>kept</em> rather than evicted, unlike the way agent activity used to treat its
+   * own terminal: ENDED is what lets a splash stop waiting and say so.
+   */
+  private final ConcurrentHashMap<Long, EditorLifecycle> editorStates = new ConcurrentHashMap<>();
 
   /**
    * One tracked agent command's activity, plus the workspace it belongs to (for the rollup) and
@@ -285,6 +305,10 @@ public class WorkspaceDaemonRegistry
     gitHead.remove(workspaceId);
     // Likewise drop every tracked agent activity for this workspace (re-reported on reconnect).
     agentActivity.values().removeIf(entry -> entry.workspaceId().equals(workspaceId));
+    // And the editor's state. A disconnect means NOTHING IS KNOWN — not that the editor ended: the
+    // daemon re-reports on every connect, and a retained RUNNING would send the proxy at a listener
+    // whose container may have gone away underneath it.
+    editorStates.remove(workspaceId);
     // Pending tunnel nonces are waiting on a daemon that is no longer there; live tunnels are NOT
     // torn down, deliberately — each stream is its own TCP connection, so an open terminal survives
     // a control-socket reconnect, which is the whole reason these calls do not ride that socket.
@@ -398,6 +422,7 @@ public class WorkspaceDaemonRegistry
       case ServiceTransition event -> routeServiceState(workspaceId, client, event);
       case GitStatus status -> onGitStatus(workspaceId, client, status);
       case AgentActivity activity -> onAgentActivity(workspaceId, client, activity);
+      case EditorState state -> onEditorState(workspaceId, state);
       case WorkspaceChanged changed -> onWorkspaceChanged(workspaceId, client, changed);
       // qits -> workspace-daemon requests are never received here; ignore defensively.
       case Ack ignored -> {}
@@ -456,6 +481,34 @@ public class WorkspaceDaemonRegistry
     if (previous == null || previous != status.clean()) {
       changePublisher.fire(repoId, null, WorkspaceChangeHint.Topic.GIT_STATUS);
     }
+  }
+
+  /**
+   * Cache one web-editor state report. The daemon sends the current state once per control-socket
+   * connect and then one frame per transition, so this is the whole of the host's knowledge.
+   *
+   * <p><b>A state this host cannot name drops the entry rather than keeping the last one.</b>
+   * {@link EditorLifecycle#parse} answers null for anything outside the three values, and "nothing
+   * reported" is the honest reading of a frame this backend does not understand — the protocol
+   * module carries the state as a plain String precisely so a newer daemon can say something new
+   * without failing a frame. Keeping the previous value instead would let a stale {@code RUNNING}
+   * outlive a transition that said otherwise, which is the one direction that costs a reader a
+   * splash they should have seen.
+   */
+  private void onEditorState(Long workspaceId, EditorState reported) {
+    EditorLifecycle state = EditorLifecycle.parse(reported.state());
+    if (state == null) {
+      editorStates.remove(workspaceId);
+      return;
+    }
+    editorStates.put(workspaceId, state);
+  }
+
+  @Override
+  public Optional<EditorLifecycle> editorStateFor(Long workspaceRowId) {
+    return workspaceRowId == null
+        ? Optional.empty()
+        : Optional.ofNullable(editorStates.get(workspaceRowId));
   }
 
   @Override

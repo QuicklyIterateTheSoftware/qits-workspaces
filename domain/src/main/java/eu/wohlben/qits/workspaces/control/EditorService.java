@@ -65,10 +65,10 @@ public class EditorService {
   @Inject Instance<WorkspaceDaemonLiveness> liveness;
 
   /**
-   * The in-container editor's own state. <b>Unsatisfied today</b> — the daemon's {@code EditorState}
-   * frame and the registry's handling of it land with the editor proxy route — so this door answers
-   * {@code editorState: null} / {@code editorReady: false} until it is filled in. See {@link
-   * WorkspaceEditorState} for what filling it in is.
+   * The in-container editor's own state, as {@code WorkspaceDaemonRegistry} caches it off the
+   * daemon's {@code EditorState} frame. An {@code Instance<>} like every other port here: a build
+   * with no control plane answers empty, which this door reads as {@code editorState: null} /
+   * {@code editorReady: false} — a caller waits, which is what an unreported editor deserves.
    */
   @Inject Instance<WorkspaceEditorState> editorStates;
 

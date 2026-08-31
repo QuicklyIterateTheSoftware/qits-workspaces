@@ -9,22 +9,20 @@ import java.util.Optional;
  * reads it as an {@code Instance<>} that is simply empty in apps without the backend. Sibling of
  * {@link WorkspaceAgentActivity} and {@link WorkspaceGitStatus}, down to the shape of the answer.
  *
- * <h2>This is a seam, and today it is only that</h2>
+ * <h2>Who fills it in</h2>
  *
- * <p><b>Nothing implements it yet.</b> The daemon sends its state as an {@code EditorState} frame on
- * the control socket (capability version 5), and both halves of that — the vendored protocol module
- * and the registry's handling of the frame — land with the editor proxy route, not here. Until they
- * do, this port is unsatisfied, {@link EditorService} answers {@code editorState: null} and {@code
- * editorReady: false}, and the editor page waits. That is the correct behaviour for a platform whose
- * daemons cannot report yet, and it is why the door could be built and shipped first.
+ * <p>{@code WorkspaceDaemonRegistry}, out of the {@code EditorState} frame the daemon sends on its
+ * control socket (capability version 5): the reported value is cached per workspace row id in a
+ * {@code ConcurrentHashMap} beside {@code gitClean}/{@code agentActivity}, dropped on {@code
+ * unregister} (a disconnect means nothing is known, not that the editor ended), and re-filled from
+ * the frame the daemon sends on every connect. The caching rules are the ones the agent-activity
+ * rollup already documents — a live report always wins, and an absence is {@link Optional#empty()}
+ * rather than a state.
  *
- * <p><b>What filling it in looks like</b>, so there is one obvious place and not a search: {@code
- * WorkspaceDaemonRegistry} adds this interface to its {@code implements} list, caches the reported
- * value per workspace row id in a {@code ConcurrentHashMap} beside {@code gitClean}/{@code
- * agentActivity}, clears the entry on {@code unregister} (a disconnect means nothing is known, not
- * that the editor ended), and re-fills it from the frame the daemon sends on every connect. The
- * caching rules are the ones the agent-activity rollup already documents — a live report always
- * wins, and an absence is {@link Optional#empty()} rather than a state.
+ * <p>It stays an {@code Instance<>} at both readers ({@link EditorService} and the editor proxy
+ * route) rather than a hard dependency, because {@code domain} must not know that the implementation
+ * is a websocket registry — and because a build with no control plane at all is a supported shape,
+ * where every answer here is empty and every caller reads that as "not ready".
  *
  * <p><b>Empty is "nothing reported", never "no editor".</b> The daemon sends this frame only where
  * it supervises an editor at all, so absence covers three cases at once — a plain workspace, a
