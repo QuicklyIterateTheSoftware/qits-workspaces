@@ -184,6 +184,12 @@ public class BranchController {
           "No such repository, no repository by that name in that project, or the origin has no such"
               + " branch.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
+  // qits:system beside the class's qits:admin, the same pair the execute arm below carries and for
+  // the same reason: a MACHINE asks here too. qits-platform-maintenance requests the release of the
+  // bump branches it pushes, and its client deliberately holds no qits:admin — that is a person's
+  // role, and the bootstrap's grant comment defends it. Admitting the system role at the door keeps
+  // that doctrine intact instead of promoting a service to personhood for one POST.
+  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
   public ReleaseRequested releaseBranch(
       @QueryParam("repositoryId") String repoId,
       @QueryParam("projectId") String projectId,
