@@ -177,6 +177,42 @@ public class BranchController {
             request.expectedSha()));
   }
 
+  /**
+   * The <b>execution arm</b> of the release-quality-gates flow: land the branch now, exactly as
+   * {@code /branches/release} always has — merge, calver stamp, tag, atomic push, promotion — and
+   * honouring the same {@code expectedSha} pin. It exists so the public door can become
+   * request-creating without the requests having nowhere to execute: qits-projects calls this once
+   * a request's gates have passed, pinned to the sha they evaluated.
+   *
+   * <p><b>Two roles, spelled in full</b> because a method-level list replaces the class's: {@code
+   * qits:system} is the machine arm's own caller (qits-projects executing a gated request), and
+   * {@code qits:admin} keeps an operator's direct hand on the lever — the escape hatch when the
+   * gate itself is what is broken. Same request record, same response record, same 409 family as
+   * the door it is the execution half of.
+   */
+  @POST
+  @Path("/execute-release")
+  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
+  @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Nothing was released and the default branch is unchanged. `reason` says which refusal —"
+              + " HEAD_MOVED when the branch outran the pinned sha.",
+      content = @Content(schema = @Schema(implementation = ApiError.class)))
+  public WorkspaceController.ReleaseRequest.Response executeRelease(
+      @QueryParam("repositoryId") String repoId,
+      @QueryParam("projectId") String projectId,
+      @QueryParam("repositoryName") String repositoryName,
+      @Valid ReleaseBranchRequest request) {
+    return WorkspaceController.ReleaseRequest.Response.of(
+        workspaceService.releaseBranch(
+            addressedRepository(repoId, projectId, repositoryName),
+            request.branch(),
+            request.summary(),
+            request.expectedSha()));
+  }
+
   /** What both addressing forms have to say, spelled once so the two 400s cannot disagree. */
   private static final String ADDRESSING_RULE =
       "Address the repository exactly one way: repositoryId=<id>, or"

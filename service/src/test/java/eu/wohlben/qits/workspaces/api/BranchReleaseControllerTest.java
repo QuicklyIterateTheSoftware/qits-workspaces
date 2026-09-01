@@ -316,23 +316,30 @@ public class BranchReleaseControllerTest {
   }
 
   /**
-   * A branch a workspace claims releases through the workspace flow, which cannot honour a pin
-   * yet — so a pinned call is refused rather than silently unpinned. The door split is where the
-   * workspace arm learns the pin.
+   * The claimed arm honours the pin: a stale pin refuses without touching the workspace, and a
+   * fresh one releases through the workspace flow — row resolved, branch gone — exactly as an
+   * unpinned call does.
    */
   @Test
-  public void aPinnedReleaseOfAWorkspaceClaimedBranchIsRefusedRatherThanUnpinned() throws Exception {
+  public void aPinnedReleaseOfAWorkspaceClaimedBranchHonoursThePin() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "claimed", "claimed-b");
-    String sha = inOrigin(repoId, "git", "rev-parse", "claimed-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "claimed-b", "work.md", "shipped\n", "the work");
+    String stale = inOrigin(repoId, "git", "rev-parse", "claimed-b~1");
 
-    releasePinned(repoId, "claimed-b", "pinned workspace release", sha)
+    releasePinned(repoId, "claimed-b", "pinned workspace release", stale)
         .then()
         .statusCode(Response.Status.CONFLICT.getStatusCode())
-        .body("reason", equalTo("HEAD_MOVED"))
-        .body("message", containsString("workspace"));
-
+        .body("reason", equalTo("HEAD_MOVED"));
     assertEquals(List.of(), announcer.announced());
+    assertTrue(activeLabels(repoId).contains("claimed"), "a refused pin resolves no workspace");
+
+    String head = inOrigin(repoId, "git", "rev-parse", "claimed-b");
+    releasePinned(repoId, "claimed-b", "pinned workspace release", head)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+    assertEquals(1, announcer.announced().size());
+    assertFalse(activeLabels(repoId).contains("claimed"), "a fresh pin resolves the workspace");
   }
 
   /** A branch the origin does not have is a 404: the name is the identity, and there is no row. */

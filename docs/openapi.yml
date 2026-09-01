@@ -710,6 +710,54 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+  /workspaces/api/branches/execute-release:
+    post:
+      parameters:
+      - name: projectId
+        in: query
+        schema:
+          type: string
+      - name: repositoryId
+        in: query
+        schema:
+          type: string
+      - name: repositoryName
+        in: query
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseBranchRequest"
+        required: true
+      responses:
+        "200":
+          description: Released; the version and the merge commit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+        "409":
+          description: Nothing was released and the default branch is unchanged. `reason`
+            says which refusal — HEAD_MOVED when the branch outran the pinned sha.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
+        "400":
+          description: Bad Request
+      summary: Execute Release
+      tags:
+      - Branch Controller
+      security:
+      - SecurityScheme:
+        - qits:admin
+        - qits:system
   /workspaces/api/branches/merge:
     post:
       parameters:
