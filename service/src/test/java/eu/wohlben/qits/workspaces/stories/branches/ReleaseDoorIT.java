@@ -40,8 +40,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.TestMethodOrder;
 
 /**
- * <b>The release door</b> — {@code POST /workspaces/api/branches/release}, the one door into a
- * repository's default branch, driven end to end against a git host that answers over HTTP.
+ * <b>The release execution arm</b> — {@code POST /workspaces/api/branches/execute-release}, the one
+ * door into a repository's default branch, driven end to end against a git host that answers over
+ * HTTP. It is what the public {@code /branches/release} door's release requests execute through
+ * once their quality gates pass (and the operator's direct lever); the landing it performs is
+ * byte-for-byte the release the public door performed before the door split.
  *
  * <p>This is the catalogue's centre, because it is the only place the whole design is visible at
  * once. Every ref this service moves is moved by a <b>push</b>, over the ordinary git host, so
@@ -159,7 +162,7 @@ public class ReleaseDoorIT {
             .body(StoryTarget.releaseBody(StoryTarget.WORK_BRANCH, "the story branch"))
             .when()
             .post(
-                StoryTarget.BRANCH_RELEASE_PATH
+                StoryTarget.BRANCH_EXECUTE_RELEASE_PATH
                     + StoryTarget.releaseQuery(StoryTarget.PROJECT, StoryTarget.SERVICE_REPO))
             .then()
             .statusCode(200)
@@ -300,7 +303,7 @@ public class ReleaseDoorIT {
             .body(StoryTarget.releaseBody(StoryTarget.WORK_BRANCH, "the library branch"))
             .when()
             .post(
-                StoryTarget.BRANCH_RELEASE_PATH
+                StoryTarget.BRANCH_EXECUTE_RELEASE_PATH
                     + StoryTarget.releaseQuery(StoryTarget.PROJECT, StoryTarget.LIBRARY_REPO))
             .then()
             .statusCode(200)
@@ -381,7 +384,7 @@ public class ReleaseDoorIT {
         .body(StoryTarget.releaseBody(StoryTarget.LANDED_BRANCH, "already in"))
         .when()
         .post(
-            StoryTarget.BRANCH_RELEASE_PATH
+            StoryTarget.BRANCH_EXECUTE_RELEASE_PATH
                 + StoryTarget.releaseQuery(StoryTarget.PROJECT, StoryTarget.SETTLED_REPO))
         .then()
         .statusCode(409)
@@ -425,7 +428,7 @@ public class ReleaseDoorIT {
             "scm-release-published")) {
       ReportAssertions.assertStepId(CATEGORY_SLUG, RELEASED_SLUG, step);
     }
-    from(RELEASED_SLUG, StoryIdentities.PIPELINE, "POST " + StoryTarget.BRANCH_RELEASE_PATH + " -> 200");
+    from(RELEASED_SLUG, StoryIdentities.PIPELINE, "POST " + StoryTarget.BRANCH_EXECUTE_RELEASE_PATH + " -> 200");
     registryReads(RELEASED_SLUG, StoryTarget.SERVICE_REPO);
     gitHostReads(RELEASED_SLUG, StoryTarget.SERVICE_REPO);
     to(
@@ -449,7 +452,7 @@ public class ReleaseDoorIT {
         List.of("library-released", "nothing-was-promoted", "trunk-build-is-the-signal")) {
       ReportAssertions.assertStepId(CATEGORY_SLUG, LIBRARY_SLUG, step);
     }
-    from(LIBRARY_SLUG, StoryIdentities.OPERATOR, "POST " + StoryTarget.BRANCH_RELEASE_PATH + " -> 200");
+    from(LIBRARY_SLUG, StoryIdentities.OPERATOR, "POST " + StoryTarget.BRANCH_EXECUTE_RELEASE_PATH + " -> 200");
     registryReads(LIBRARY_SLUG, StoryTarget.LIBRARY_REPO);
     gitHostReads(LIBRARY_SLUG, StoryTarget.LIBRARY_REPO);
     to(
@@ -470,7 +473,7 @@ public class ReleaseDoorIT {
     for (String step : List.of("already-integrated", "nothing-moved")) {
       ReportAssertions.assertStepId(CATEGORY_SLUG, SETTLED_SLUG, step);
     }
-    from(SETTLED_SLUG, StoryIdentities.PIPELINE, "POST " + StoryTarget.BRANCH_RELEASE_PATH + " -> 409");
+    from(SETTLED_SLUG, StoryIdentities.PIPELINE, "POST " + StoryTarget.BRANCH_EXECUTE_RELEASE_PATH + " -> 409");
     registryReads(SETTLED_SLUG, StoryTarget.SETTLED_REPO);
     gitHostReads(SETTLED_SLUG, StoryTarget.SETTLED_REPO);
     // FIVE, and the two that are NOT here are the story: no POST …/git-receive-pack, so no ref moved

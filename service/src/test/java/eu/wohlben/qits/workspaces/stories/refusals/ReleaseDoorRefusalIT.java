@@ -90,7 +90,7 @@ public class ReleaseDoorRefusalIT {
 
   /** The door every story here is refused at, and the query it is addressed by. */
   private static final String DOOR =
-      StoryTarget.BRANCH_RELEASE_PATH
+      StoryTarget.BRANCH_EXECUTE_RELEASE_PATH
           + StoryTarget.releaseQuery(StoryTarget.PROJECT, StoryTarget.SERVICE_REPO);
 
   /** Every credential a story here minted, so the reports can be searched for all of them. */
@@ -366,7 +366,7 @@ public class ReleaseDoorRefusalIT {
         NetworkEdge.HTTP,
         actor,
         StoryTarget.SERVICE,
-        "POST " + StoryTarget.BRANCH_RELEASE_PATH + " -> " + status);
+        "POST " + StoryTarget.BRANCH_EXECUTE_RELEASE_PATH + " -> " + status);
   }
 
   /** One arrow in and none out — the shape of a refusal that cost the platform nothing. */

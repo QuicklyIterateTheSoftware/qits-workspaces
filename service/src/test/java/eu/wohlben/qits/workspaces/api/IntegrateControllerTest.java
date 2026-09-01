@@ -229,12 +229,14 @@ public class IntegrateControllerTest {
         .then()
         .statusCode(Response.Status.OK.getStatusCode());
 
+    // The release mechanics run through the door split's execution arm now; the public door only
+    // creates a request. The epic's branch is what the claimed arm resolves.
     String version =
         given()
             .contentType(ContentType.JSON)
-            .body(new WorkspaceController.ReleaseRequest("ship the epic"))
+            .body(new BranchController.ReleaseBranchRequest("epic-b", "ship the epic", null))
             .when()
-            .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "epic") + "/release")
+            .post("/workspaces/api/branches/execute-release?repositoryId=" + repoId)
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
             .extract()

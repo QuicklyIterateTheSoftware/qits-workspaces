@@ -1948,6 +1948,32 @@ public class WorkspaceService {
   }
 
   /**
+   * The branch's head on the git host — the sha a release request arms with. A wire read, never
+   * the mirror: what is gated must be what the repository of record holds this instant.
+   */
+  public String branchHeadSha(String repoId, String branch) {
+    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
+      throw new BadRequestException("Invalid branch: " + branch);
+    }
+    return mirrors
+        .of(repoId)
+        .remoteBranchSha(branch)
+        .orElseThrow(
+            () ->
+                new NotFoundException(
+                    "Branch '" + branch + "' not found in repository " + repoId));
+  }
+
+  /** What a workspace-keyed release request needs off the row: the repository and the branch. */
+  public record ReleaseCoordinates(String repoId, String branch) {}
+
+  /** The active workspace's coordinates, for the request-creating door. 404 when not active. */
+  public ReleaseCoordinates releaseCoordinates(Long id) {
+    Workspace workspace = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
+    return new ReleaseCoordinates(workspace.repositoryId, workspace.branch);
+  }
+
+  /**
    * {@link #releaseBranch(String, String, String)} pinned to a commit: the release lands only if
    * the branch's head still is {@code expectedSha} — {@link
    * IntegrateConflictException.Reason#HEAD_MOVED} otherwise. The release-quality-gates flow is the

@@ -46,6 +46,9 @@ public class WorkspaceController {
 
   @Inject WorkspaceService workspaceService;
 
+  /** The shared request-creating half of both release doors lives with the branch door. */
+  @Inject BranchController branchController;
+
   @Inject WorkspaceMapper workspaceMapper;
 
   /**
@@ -373,7 +376,12 @@ public class WorkspaceController {
    */
   @POST
   @Path("/{id}/release")
-  @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
+  @APIResponse(
+      responseCode = "200",
+      description =
+          "The release request for this workspace's branch, created or converged — poll it until"
+              + " RELEASED. The workspace resolves when the gated release executes, not at this"
+              + " call.")
   @APIResponse(
       responseCode = "400",
       description = "No summary, an oversized one, or a workspace with no branch to release.",
@@ -382,14 +390,13 @@ public class WorkspaceController {
       responseCode = "404",
       description = "No such workspace.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
-  @APIResponse(
-      responseCode = "409",
-      description =
-          "Nothing was released and the default branch is unchanged. `reason` says which refusal.",
-      content = @Content(schema = @Schema(implementation = ApiError.class)))
-  public ReleaseRequest.Response release(
+  public BranchController.ReleaseRequested release(
       @PathParam("id") Long id, @Valid ReleaseRequest request) {
-    return ReleaseRequest.Response.of(workspaceService.releaseWorkspace(id, request.summary()));
+    // The door split: what used to merge here at once is a release request now, gated on the
+    // build ledger and executed through /branches/execute-release when green — whose claimed arm
+    // is what resolves this workspace, exactly as the synchronous door did.
+    WorkspaceService.ReleaseCoordinates where = workspaceService.releaseCoordinates(id);
+    return branchController.requestRelease(where.repoId(), where.branch(), request.summary(), null);
   }
 
   /** @param summary the commit's subject after the {@code integrate(<branch>)} scope. */

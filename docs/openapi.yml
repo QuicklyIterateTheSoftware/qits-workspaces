@@ -98,6 +98,20 @@ components:
           pattern: \S
         result:
           type: string
+    CreateBody:
+      type: object
+      properties:
+        branch:
+          type: string
+        commitSha:
+          type: string
+        summary:
+          type: string
+    CreateResponse:
+      type: object
+      properties:
+        request:
+          $ref: "#/components/schemas/RequestView"
     CreateWorkspaceRequest:
       type: object
       required:
@@ -216,7 +230,44 @@ components:
           type: string
           maxLength: 100
           pattern: \S
+    ReleaseRequested:
+      type: object
+      properties:
+        requestId:
+          type: string
+        state:
+          type: string
+        branch:
+          type: string
+        commitSha:
+          type: string
+        detail:
+          type: string
+    RequestView:
+      type: object
+      properties:
+        id:
+          type: string
+        state:
+          type: string
+        branch:
+          type: string
+        commitSha:
+          type: string
+        detail:
+          type: string
     Response:
+      type: object
+      properties:
+        commitHash:
+          type: string
+        hasConflicts:
+          type: boolean
+        output:
+          type: string
+        cleanedUp:
+          type: boolean
+    Response1:
       type: object
       properties:
         version:
@@ -229,17 +280,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Promotion"
-    Response1:
-      type: object
-      properties:
-        commitHash:
-          type: string
-        hasConflicts:
-          type: boolean
-        output:
-          type: string
-        cleanedUp:
-          type: boolean
     Response10:
       type: object
       properties:
@@ -737,7 +777,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response"
+                $ref: "#/components/schemas/Response1"
         "409":
           description: Nothing was released and the default branch is unchanged. `reason`
             says which refusal — HEAD_MOVED when the branch outran the pinned sha.
@@ -777,7 +817,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response1"
+                $ref: "#/components/schemas/Response"
         "400":
           description: "A blank, dash-leading or self-referential branch name."
           content:
@@ -831,11 +871,13 @@ paths:
         required: true
       responses:
         "200":
-          description: Released; the version and the merge commit.
+          description: "The release request, created or converged — poll it until\
+            \ RELEASED, REJECTED or FAILED. Nothing has merged yet; the gates decide\
+            \ when it does."
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response"
+                $ref: "#/components/schemas/ReleaseRequested"
         "400":
           description: "A blank, dash-leading or oversized field — or the default\
             \ branch itself, which a release lands on and cannot be released into\
@@ -847,13 +889,6 @@ paths:
         "404":
           description: "No such repository, no repository by that name in that project,\
             \ or the origin has no such branch."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "409":
-          description: Nothing was released and the default branch is unchanged. `reason`
-            says which refusal.
           content:
             application/json:
               schema:
@@ -1014,6 +1049,35 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
+  /workspaces/api/projects/api/repositories/{repoId}/release-requests:
+    post:
+      parameters:
+      - name: repoId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Qits-Roles
+        in: header
+        schema:
+          type: string
+      - name: X-Qits-User
+        in: header
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBody"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateResponse"
   /workspaces/api/service-events:
     get:
       parameters:
@@ -1754,11 +1818,13 @@ paths:
         required: true
       responses:
         "200":
-          description: Released; the version and the merge commit.
+          description: "The release request for this workspace's branch, created or\
+            \ converged — poll it until RELEASED. The workspace resolves when the\
+            \ gated release executes, not at this call."
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response"
+                $ref: "#/components/schemas/ReleaseRequested"
         "400":
           description: "No summary, an oversized one, or a workspace with no branch\
             \ to release."
@@ -1768,13 +1834,6 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "404":
           description: No such workspace.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "409":
-          description: Nothing was released and the default branch is unchanged. `reason`
-            says which refusal.
           content:
             application/json:
               schema:
