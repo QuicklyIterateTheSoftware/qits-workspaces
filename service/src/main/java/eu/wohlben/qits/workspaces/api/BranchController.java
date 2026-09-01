@@ -55,6 +55,8 @@ public class BranchController {
   /** The request-creating half's far side; the door forwards the ask with the caller's name on it. */
   @Inject @RestClient ProjectsReleaseRequests releaseRequests;
 
+  @Inject eu.wohlben.qits.workspaces.wiring.IdpProjectsBearer projectsBearer;
+
   @Inject SecurityIdentity identity;
 
   /**
@@ -214,12 +216,16 @@ public class BranchController {
         expectedSha != null ? expectedSha : workspaceService.branchHeadSha(repository, branch);
     String caller =
         identity == null || identity.isAnonymous() ? "qits-workspaces" : identity.getPrincipal().getName();
+    // Bearer where one exists, the forwarded pair where none can be minted; the person travels in
+    // the body either way — the wiring interface's javadoc carries the reasoning.
+    String authorization = projectsBearer.authorization().orElse(null);
     return ReleaseRequested.of(
         releaseRequests.create(
             repository,
-            caller,
-            "qits:system",
-            new ProjectsReleaseRequests.CreateBody(branch, sha, summary)));
+            authorization,
+            authorization == null ? caller : null,
+            authorization == null ? "qits:system" : null,
+            new ProjectsReleaseRequests.CreateBody(branch, sha, summary, caller)));
   }
 
   /**

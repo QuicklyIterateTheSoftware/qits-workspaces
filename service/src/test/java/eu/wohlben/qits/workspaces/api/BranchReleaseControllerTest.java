@@ -99,8 +99,11 @@ public class BranchReleaseControllerTest {
     FakeProjectsReleaseRequests.Asked asked = releaseRequests.asked().get(0);
     assertEquals(repoId, asked.repoId());
     assertEquals(head, asked.body().commitSha(), "the request arms with the wire head, not a cache");
+    // No bearer can be minted in the suite (the projects client ships disabled), so the hop takes
+    // the forwarded-pair arm — and the requester travels in the body on both arms.
     assertEquals("qits:system", asked.roles());
     assertNotNull(asked.user(), "the requester is the caller, forwarded by name");
+    assertEquals(asked.user(), asked.body().requester(), "attribution rides the body too");
 
     assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"), "nothing merged");
     assertTrue(originBranches(repoId).contains(MAINTENANCE), "nothing deleted");
