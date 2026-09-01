@@ -79,12 +79,13 @@ public class ReleasePromotionDisabledTest {
     TestOrigin.commitOnBranch(dataDir, repoId, "solo-b", "shipped.md", "shipped\n", "the work");
     TestOrigin.recordPushOptions(dataDir, repoId);
 
+    // The mechanics run through the door split's execution arm; the public door creates requests.
     String commitSha =
         given()
             .contentType(ContentType.JSON)
-            .body(new WorkspaceController.ReleaseRequest("no deploy branch here"))
+            .body(new BranchController.ReleaseBranchRequest("solo-b", "no deploy branch here", null))
             .when()
-            .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "solo") + "/release")
+            .post("/workspaces/api/branches/execute-release?repositoryId=" + repoId)
             .then()
             .statusCode(Response.Status.OK.getStatusCode())
             .body("version", not(emptyOrNullString()))
