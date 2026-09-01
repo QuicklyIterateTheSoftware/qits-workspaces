@@ -18,7 +18,8 @@ import org.eclipse.microprofile.rest.client.inject.RestClient;
 @RestClient
 public class FakeProjectsReleaseRequests implements ProjectsReleaseRequests {
 
-  public record Asked(String repoId, String user, String roles, CreateBody body) {}
+  public record Asked(
+      String repoId, String authorization, String user, String roles, CreateBody body) {}
 
   private final List<Asked> asked = Collections.synchronizedList(new ArrayList<>());
 
@@ -31,8 +32,9 @@ public class FakeProjectsReleaseRequests implements ProjectsReleaseRequests {
   }
 
   @Override
-  public CreateResponse create(String repoId, String user, String roles, CreateBody body) {
-    asked.add(new Asked(repoId, user, roles, body));
+  public CreateResponse create(
+      String repoId, String authorization, String user, String roles, CreateBody body) {
+    asked.add(new Asked(repoId, authorization, user, roles, body));
     return new CreateResponse(
         new RequestView(
             "request-" + asked.size(), "PENDING", body.branch(), body.commitSha(), null));

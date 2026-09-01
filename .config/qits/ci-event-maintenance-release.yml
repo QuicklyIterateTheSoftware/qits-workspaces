@@ -97,7 +97,11 @@ steps:
           let body = {};
           try { body = JSON.parse(text); } catch {}
           if (res.ok) {
-            console.log(`released ${body.version} as ${body.commitSha} from ${body.branch}`);
+            if (body.requestId) {
+              console.log(`release requested: ${body.requestId} (${body.state}) for ${body.branch}@${body.commitSha} - the gates release it when green`);
+            } else {
+              console.log(`released ${body.version} as ${body.commitSha} from ${body.branch}`);
+            }
             return;
           }
           if (res.status === 409 && body.reason === "ALREADY_INTEGRATED") {
