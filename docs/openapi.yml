@@ -190,6 +190,7 @@ components:
       - PUSH_REJECTED
       - VERSION_ALREADY_RELEASED
       - RELEASE_REQUIRED
+      - HEAD_MOVED
     ReleaseBranchRequest:
       type: object
       required:
@@ -203,6 +204,9 @@ components:
           type: string
           maxLength: 100
           pattern: \S
+        expectedSha:
+          type: string
+          pattern: "[0-9a-f]{7,64}"
     ReleaseRequest:
       type: object
       required:
@@ -1765,4 +1769,4 @@ paths:
         - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.830.144859
+  version: 2026.901.71807

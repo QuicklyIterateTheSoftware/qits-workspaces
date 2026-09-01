@@ -102,9 +102,15 @@ public class BranchController {
    * @param branch the branch to release, which needs no workspace of its own
    * @param summary the commit's subject after the {@code release(<version>)} scope, capped exactly
    *     as the workspace-keyed door caps it
+   * @param expectedSha the source head the caller means to land, or null (the field absent) to
+   *     land whatever the branch holds — today's behavior byte for byte. The release-quality-gates
+   *     execution pins the sha its gates evaluated; a head that moved answers 409 {@code
+   *     HEAD_MOVED} and nothing lands.
    */
   public static record ReleaseBranchRequest(
-      @NotBlank String branch, @NotBlank @Size(max = 100) String summary) {
+      @NotBlank String branch,
+      @NotBlank @Size(max = 100) String summary,
+      @jakarta.validation.constraints.Pattern(regexp = "[0-9a-f]{7,64}") String expectedSha) {
     // The response is WorkspaceController.ReleaseRequest.Response, reused rather than copied: the
     // two doors answer with one record, so they cannot drift into answering differently.
   }
@@ -167,7 +173,8 @@ public class BranchController {
         workspaceService.releaseBranch(
             addressedRepository(repoId, projectId, repositoryName),
             request.branch(),
-            request.summary()));
+            request.summary(),
+            request.expectedSha()));
   }
 
   /** What both addressing forms have to say, spelled once so the two 400s cannot disagree. */

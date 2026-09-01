@@ -66,7 +66,18 @@ public class IntegrateConflictException extends ConflictException {
      * is why it is worth a value of its own: a client can offer the right button instead of
      * word-matching prose for the endpoint name.
      */
-    RELEASE_REQUIRED
+    RELEASE_REQUIRED,
+    /**
+     * The caller pinned the release to a commit ({@code expectedSha}) and the source branch's head
+     * is not that commit any more. Nothing was attempted; no ref moved.
+     *
+     * <p>The release-quality-gates flow is the caller this exists for: its gates evaluated one sha,
+     * and merging whatever the branch holds <em>now</em> would ship work nothing gated. The honest
+     * answer is a refusal naming both shas — the caller re-gates the new head and asks again.
+     * Retryable in that sense: not by repeating the same call, but by requesting the release of
+     * what the branch has become.
+     */
+    HEAD_MOVED
   }
 
   private final Reason reason;
