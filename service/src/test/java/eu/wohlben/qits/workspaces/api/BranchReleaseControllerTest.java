@@ -102,11 +102,21 @@ public class BranchReleaseControllerTest {
       String query, String branch, String summary) {
     return given()
         .contentType(ContentType.JSON)
-        .body(new BranchController.ReleaseBranchRequest(branch, summary))
+        .body(new BranchController.ReleaseBranchRequest(branch, summary, null))
         .when()
         // RestAssured refuses a URI ending in "?", so the no-address case is the bare path — which
         // is the same request a caller who named nothing makes anyway.
         .post("/workspaces/api/branches/release" + (query.isEmpty() ? "" : "?" + query));
+  }
+
+  /** The pinned form the release-quality-gates execution sends: land exactly this head or refuse. */
+  private io.restassured.response.Response releasePinned(
+      String repoId, String branch, String summary, String expectedSha) {
+    return given()
+        .contentType(ContentType.JSON)
+        .body(new BranchController.ReleaseBranchRequest(branch, summary, expectedSha))
+        .when()
+        .post("/workspaces/api/branches/release?repositoryId=" + repoId);
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
@@ -270,6 +280,58 @@ public class BranchReleaseControllerTest {
     assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
     assertTrue(
         originBranches(repoId).contains(MAINTENANCE), "a refused release deletes nothing either");
+    assertEquals(List.of(), announcer.announced());
+  }
+
+  /**
+   * The pin the release-quality-gates execution sends: its gates evaluated one sha, and a branch
+   * whose head moved past it must refuse — {@code HEAD_MOVED}, nothing landed, nothing deleted —
+   * while a pin that still names the head releases exactly as an unpinned call does.
+   */
+  @Test
+  public void aReleasePinnedToAStaleShaIsRefusedAndAFreshPinLands() throws Exception {
+    String repoId = seedRepository();
+    seedMaintenanceBranch(repoId);
+    String gated = inOrigin(repoId, "git", "rev-parse", MAINTENANCE);
+    TestOrigin.commitOnBranch(
+        dataDir, repoId, MAINTENANCE, "later.txt", "landed after the gate\n", "one more push");
+    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+
+    releasePinned(repoId, MAINTENANCE, "gated at " + gated, gated)
+        .then()
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("reason", equalTo("HEAD_MOVED"))
+        .body("message", containsString(gated));
+
+    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
+    assertTrue(originBranches(repoId).contains(MAINTENANCE), "a refused pin deletes nothing");
+    assertEquals(List.of(), announcer.announced());
+
+    String head = inOrigin(repoId, "git", "rev-parse", MAINTENANCE);
+    releasePinned(repoId, MAINTENANCE, "gated at the head", head)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("branch", equalTo(MAINTENANCE));
+    assertEquals(1, announcer.announced().size(), "a fresh pin is an ordinary release");
+  }
+
+  /**
+   * A branch a workspace claims releases through the workspace flow, which cannot honour a pin
+   * yet — so a pinned call is refused rather than silently unpinned. The door split is where the
+   * workspace arm learns the pin.
+   */
+  @Test
+  public void aPinnedReleaseOfAWorkspaceClaimedBranchIsRefusedRatherThanUnpinned() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "claimed", "claimed-b");
+    String sha = inOrigin(repoId, "git", "rev-parse", "claimed-b");
+
+    releasePinned(repoId, "claimed-b", "pinned workspace release", sha)
+        .then()
+        .statusCode(Response.Status.CONFLICT.getStatusCode())
+        .body("reason", equalTo("HEAD_MOVED"))
+        .body("message", containsString("workspace"));
+
     assertEquals(List.of(), announcer.announced());
   }
 

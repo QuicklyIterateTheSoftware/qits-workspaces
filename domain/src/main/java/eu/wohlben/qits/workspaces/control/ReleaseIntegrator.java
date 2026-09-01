@@ -247,9 +247,17 @@ public class ReleaseIntegrator {
    * @param targetBranch what it lands on: the default branch for {@link Mode#RELEASE}, the source's
    *     parent for {@link Mode#PLAIN}
    * @param summary the commit subject after the scope
+   * @param expectedSha the source head the caller means to land, or null to land whatever the
+   *     branch holds — the release-quality-gates flow pins the sha its gates evaluated, and a head
+   *     that moved past it is {@link IntegrateConflictException.Reason#HEAD_MOVED}
    */
   public record Run(
-      String repoId, String sourceBranch, String targetBranch, String summary, Mode mode) {}
+      String repoId,
+      String sourceBranch,
+      String targetBranch,
+      String summary,
+      Mode mode,
+      String expectedSha) {}
 
   /**
    * What one run produced, and the record the {@code SCMRelease} publisher is handed.
@@ -302,9 +310,25 @@ public class ReleaseIntegrator {
     refresh(mirror);
     String targetRef = "refs/heads/" + targetBranch;
     String sourceRef = "refs/heads/" + sourceBranch;
-    if (mirror.resolve(targetRef).isEmpty() || mirror.resolve(sourceRef).isEmpty()) {
+    String sourceHead = mirror.resolve(sourceRef).orElse(null);
+    if (mirror.resolve(targetRef).isEmpty() || sourceHead == null) {
       throw new NotFoundException(
           "Repository " + repoId + " has no '" + sourceBranch + "' or '" + targetBranch + "'");
+    }
+    // [0b] the pin, before anything is attempted: a caller that gated one sha must not land what
+    // the branch has become since. Checked against the freshly refreshed mirror, and the merge
+    // below reads the same mirror snapshot, so what passed this line is what lands.
+    if (run.expectedSha() != null && !sourceHead.equals(run.expectedSha())) {
+      throw new IntegrateConflictException(
+          IntegrateConflictException.Reason.HEAD_MOVED,
+          "'"
+              + sourceBranch
+              + "' is at "
+              + sourceHead
+              + ", not the "
+              + run.expectedSha()
+              + " this release was pinned to — the branch moved past what was gated. Request the"
+              + " release of the new head.");
     }
 
     // [1] preflight, in the mirror's object store — nothing is checked out and no ref moves.

@@ -1934,6 +1934,22 @@ public class WorkspaceService {
    * @throws IntegrateConflictException for every refusal a caller can act on
    */
   public ReleaseResult releaseBranch(String repoId, String branch, String summary) {
+    return releaseBranch(repoId, branch, summary, null);
+  }
+
+  /**
+   * {@link #releaseBranch(String, String, String)} pinned to a commit: the release lands only if
+   * the branch's head still is {@code expectedSha} — {@link
+   * IntegrateConflictException.Reason#HEAD_MOVED} otherwise. The release-quality-gates flow is the
+   * caller: its gates evaluated one sha and must not ship what the branch has become since.
+   *
+   * <p><b>The workspace-claimed arm does not take the pin yet.</b> A branch a workspace claims
+   * releases through the workspace flow, whose own guard is {@code
+   * requireSyncedSourceForIntegration}; pinning that arm comes with the door split, and until then
+   * a pinned release of a claimed branch is refused rather than silently unpinned.
+   */
+  public ReleaseResult releaseBranch(
+      String repoId, String branch, String summary, String expectedSha) {
     var repo = repositories.require(repoId);
     // Blank or dash-leading names are rejected before git sees them, so a value like "-D" cannot be
     // smuggled in as a flag. Same guard, same reason, as mergeBranch's.
@@ -1955,6 +1971,14 @@ public class WorkspaceService {
     Workspace claimed =
         QuarkusTransaction.requiringNew().call(() -> findWorkspaceByBranch(repoId, branch));
     if (claimed != null) {
+      if (expectedSha != null) {
+        throw new IntegrateConflictException(
+            IntegrateConflictException.Reason.HEAD_MOVED,
+            "'"
+                + branch
+                + "' is claimed by a workspace, whose release cannot be pinned to a commit yet —"
+                + " release it through the workspace, or unpin.");
+      }
       return releaseWorkspace(claimed.id, summary);
     }
 
@@ -1963,7 +1987,7 @@ public class WorkspaceService {
     }
 
     ReleaseIntegrator.Landed landed =
-        landOnBranch(repo, branch, mainBranch, summary, ReleaseIntegrator.Mode.RELEASE);
+        landOnBranch(repo, branch, mainBranch, summary, ReleaseIntegrator.Mode.RELEASE, expectedSha);
 
     QuarkusTransaction.requiringNew().run(() -> notifyIncomingMerge(repoId, mainBranch));
     // The work is in the default branch, so the source is spent. Matching the workspace path's
@@ -2040,7 +2064,7 @@ public class WorkspaceService {
     // behind. Same guard the merge endpoints open with, for the same reason.
     requireSyncedSourceForIntegration(repoId, workspace);
 
-    ReleaseIntegrator.Landed landed = landOnBranch(repo, source, target, summary, mode);
+    ReleaseIntegrator.Landed landed = landOnBranch(repo, source, target, summary, mode, null);
 
     String subject =
         release
@@ -2082,12 +2106,15 @@ public class WorkspaceService {
       String source,
       String target,
       String summary,
-      ReleaseIntegrator.Mode mode) {
+      ReleaseIntegrator.Mode mode,
+      String expectedSha) {
     String repoId = repo.id();
     String leaseToken = acquireIntegrateLease(repoId);
     ReleaseIntegrator.Landed landed;
     try {
-      landed = integrator.land(new ReleaseIntegrator.Run(repoId, source, target, summary, mode));
+      landed =
+          integrator.land(
+              new ReleaseIntegrator.Run(repoId, source, target, summary, mode, expectedSha));
     } finally {
       processRegistry.releaseRepository(repoId, leaseToken);
     }
