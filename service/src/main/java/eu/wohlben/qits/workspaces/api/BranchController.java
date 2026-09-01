@@ -4,7 +4,10 @@ import eu.wohlben.qits.workspaces.control.RepositoryLookup;
 import eu.wohlben.qits.workspaces.control.WorkspaceService;
 import eu.wohlben.qits.workspaces.error.BadRequestException;
 import eu.wohlben.qits.workspaces.error.NotFoundException;
+import eu.wohlben.qits.workspaces.wiring.ProjectsReleaseRequests;
+import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.rest.client.inject.RestClient;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -48,6 +51,11 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 public class BranchController {
 
   @Inject WorkspaceService workspaceService;
+
+  /** The request-creating half's far side; the door forwards the ask with the caller's name on it. */
+  @Inject @RestClient ProjectsReleaseRequests releaseRequests;
+
+  @Inject SecurityIdentity identity;
 
   /**
    * The registry that turns the public identity {@code (projectId, repositoryName)} into the row id
@@ -116,18 +124,17 @@ public class BranchController {
   }
 
   /**
-   * Release a branch by name: merge it into the repository's default branch, stamped with a fresh
-   * {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>): <summary>} —
-   * pushed with {@code -o qits.release}, with a {@code SCMRelease} published.
+   * Ask for a branch to be released — <b>a release request, not a merge</b>. The door split's
+   * public half: what used to land here at once is created (or converged, merge-request-shaped) as
+   * a release request in qits-projects, settled by the quality gates off the commit ledger, and
+   * executed against {@code /branches/execute-release} once they pass. The caller polls the
+   * request; a fire-and-forget pipeline step simply exits, and the release lands when the build
+   * goes green — which is the ordering the trains never had.
    *
-   * <p><b>The branch-keyed sibling of {@code /workspaces/{id}/release}</b>, and a thin resolver over
-   * it rather than a second implementation: the flow is keyed by (repository, source branch)
-   * internally, so a branch name is all it ever needed. Same 409 family, same summary cap, same
-   * response record.
-   *
-   * <p>It exists for the caller that has a branch and no workspace: a maintenance branch is
-   * force-pushed by a build container, and a workspace is a container lifecycle with a branch claim
-   * and a resolution state machine — all wrong-shaped for a ref a pipeline overwrites at will.
+   * <p>The sha the request arms with is the branch's head on the git host at this instant — or the
+   * caller's {@code expectedSha} where given, which is how an ask can be pinned to exactly what the
+   * caller reviewed. The guards a caller could act on stay at this door: an unknown repository or
+   * branch is a 404, the default branch a 400, exactly as before.
    *
    * <p>A branch an ACTIVE workspace <em>does</em> claim is that workspace's release: the row
    * resolves to {@code INTEGRATED} exactly as the workspace-keyed door leaves it, because this door
@@ -143,9 +150,25 @@ public class BranchController {
    * naming the rule rather than a silent precedence order — a caller that sent both meant one of
    * them, and guessing which would be a release landing somewhere it was not asked to.
    */
+  /** What the request-creating doors answer: the request, to poll until it settles. */
+  @Schema(name = "ReleaseRequested")
+  public static record ReleaseRequested(
+      String requestId, String state, String branch, String commitSha, String detail) {
+
+    static ReleaseRequested of(ProjectsReleaseRequests.CreateResponse answer) {
+      ProjectsReleaseRequests.RequestView request = answer.request();
+      return new ReleaseRequested(
+          request.id(), request.state(), request.branch(), request.commitSha(), request.detail());
+    }
+  }
+
   @POST
   @Path("/release")
-  @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
+  @APIResponse(
+      responseCode = "200",
+      description =
+          "The release request, created or converged — poll it until RELEASED, REJECTED or FAILED."
+              + " Nothing has merged yet; the gates decide when it does.")
   @APIResponse(
       responseCode = "400",
       description =
@@ -159,12 +182,70 @@ public class BranchController {
           "No such repository, no repository by that name in that project, or the origin has no such"
               + " branch.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
+  public ReleaseRequested releaseBranch(
+      @QueryParam("repositoryId") String repoId,
+      @QueryParam("projectId") String projectId,
+      @QueryParam("repositoryName") String repositoryName,
+      @Valid ReleaseBranchRequest request) {
+    String repository = addressedRepository(repoId, projectId, repositoryName);
+    return requestRelease(repository, request.branch(), request.summary(), request.expectedSha());
+  }
+
+  /**
+   * The shared request-creating half of both public doors: resolve what is being asked (guards
+   * included — they are this door's, not the gate's), then hand the ask to qits-projects with the
+   * caller's own name on it.
+   */
+  ReleaseRequested requestRelease(
+      String repository, String branch, String summary, String expectedSha) {
+    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
+      throw new BadRequestException("Invalid branch: " + branch);
+    }
+    String mainBranch =
+        repositories.find(repository).map(RepositoryLookup.RepositoryView::mainBranch).orElse(null);
+    if (branch.equals(mainBranch)) {
+      throw new BadRequestException(
+          "'"
+              + branch
+              + "' is the repository's default branch, which is what a release lands on — there is"
+              + " nothing to release it into.");
+    }
+    String sha =
+        expectedSha != null ? expectedSha : workspaceService.branchHeadSha(repository, branch);
+    String caller =
+        identity == null || identity.isAnonymous() ? "qits-workspaces" : identity.getPrincipal().getName();
+    return ReleaseRequested.of(
+        releaseRequests.create(
+            repository,
+            caller,
+            "qits:system",
+            new ProjectsReleaseRequests.CreateBody(branch, sha, summary)));
+  }
+
+  /**
+   * The <b>execution arm</b> of the release-quality-gates flow: land the branch now, exactly as
+   * {@code /branches/release} always has — merge, calver stamp, tag, atomic push, promotion — and
+   * honouring the same {@code expectedSha} pin. It exists so the public door can become
+   * request-creating without the requests having nowhere to execute: qits-projects calls this once
+   * a request's gates have passed, pinned to the sha they evaluated.
+   *
+   * <p><b>Two roles, spelled in full</b> because a method-level list replaces the class's: {@code
+   * qits:system} is the machine arm's own caller (qits-projects executing a gated request), and
+   * {@code qits:admin} keeps an operator's direct hand on the lever — the escape hatch when the
+   * gate itself is what is broken. Same request record, same response record, same 409 family as
+   * the door it is the execution half of.
+   */
+  @POST
+  @Path("/execute-release")
+  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
+  @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
   @APIResponse(
       responseCode = "409",
       description =
-          "Nothing was released and the default branch is unchanged. `reason` says which refusal.",
+          "Nothing was released and the default branch is unchanged. `reason` says which refusal —"
+              + " HEAD_MOVED when the branch outran the pinned sha.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
-  public WorkspaceController.ReleaseRequest.Response releaseBranch(
+  public WorkspaceController.ReleaseRequest.Response executeRelease(
       @QueryParam("repositoryId") String repoId,
       @QueryParam("projectId") String projectId,
       @QueryParam("repositoryName") String repositoryName,

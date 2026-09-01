@@ -53,6 +53,13 @@ public final class StoryTarget {
   /** The release door this session drove seven services through. */
   public static final String BRANCH_RELEASE_PATH = API_PATH + "/branches/release";
 
+  /**
+   * The door split's execution arm — the landing the public door used to perform, kept whole for
+   * the gated executions and the operator's direct hand. The mechanics stories drive this one; the
+   * public door creates release requests in qits-projects now.
+   */
+  public static final String BRANCH_EXECUTE_RELEASE_PATH = API_PATH + "/branches/execute-release";
+
   /** Workspaces, addressed by their own id — the collection. */
   public static final String WORKSPACES_PATH = API_PATH + "/workspaces";
 

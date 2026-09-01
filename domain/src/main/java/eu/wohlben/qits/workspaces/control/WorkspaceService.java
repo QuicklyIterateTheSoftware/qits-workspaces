@@ -1875,7 +1875,17 @@ public class WorkspaceService {
    *     can act on
    */
   public ReleaseResult releaseWorkspace(Long id, String summary) {
-    ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.RELEASE);
+    return releaseWorkspace(id, summary, null);
+  }
+
+  /**
+   * {@link #releaseWorkspace(Long, String)} pinned to a commit — the execution arm's form: the
+   * gates evaluated {@code expectedSha}, and a workspace branch whose head moved past it is {@link
+   * IntegrateConflictException.Reason#HEAD_MOVED} rather than a landing of ungated work.
+   */
+  public ReleaseResult releaseWorkspace(Long id, String summary, String expectedSha) {
+    ReleaseIntegrator.Landed landed =
+        landWorkspace(id, summary, ReleaseIntegrator.Mode.RELEASE, expectedSha);
     return new ReleaseResult(
         landed.version(),
         landed.commitSha(),
@@ -1904,7 +1914,7 @@ public class WorkspaceService {
    *     can act on
    */
   public IntegrateResult integrateWorkspace(Long id, String summary) {
-    ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.PLAIN);
+    ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.PLAIN, null);
     return new IntegrateResult(landed.commitSha(), landed.branch(), landed.targetBranch());
   }
 
@@ -1938,15 +1948,39 @@ public class WorkspaceService {
   }
 
   /**
+   * The branch's head on the git host — the sha a release request arms with. A wire read, never
+   * the mirror: what is gated must be what the repository of record holds this instant.
+   */
+  public String branchHeadSha(String repoId, String branch) {
+    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
+      throw new BadRequestException("Invalid branch: " + branch);
+    }
+    return mirrors
+        .of(repoId)
+        .remoteBranchSha(branch)
+        .orElseThrow(
+            () ->
+                new NotFoundException(
+                    "Branch '" + branch + "' not found in repository " + repoId));
+  }
+
+  /** What a workspace-keyed release request needs off the row: the repository and the branch. */
+  public record ReleaseCoordinates(String repoId, String branch) {}
+
+  /** The active workspace's coordinates, for the request-creating door. 404 when not active. */
+  public ReleaseCoordinates releaseCoordinates(Long id) {
+    Workspace workspace = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
+    return new ReleaseCoordinates(workspace.repositoryId, workspace.branch);
+  }
+
+  /**
    * {@link #releaseBranch(String, String, String)} pinned to a commit: the release lands only if
    * the branch's head still is {@code expectedSha} — {@link
    * IntegrateConflictException.Reason#HEAD_MOVED} otherwise. The release-quality-gates flow is the
    * caller: its gates evaluated one sha and must not ship what the branch has become since.
    *
-   * <p><b>The workspace-claimed arm does not take the pin yet.</b> A branch a workspace claims
-   * releases through the workspace flow, whose own guard is {@code
-   * requireSyncedSourceForIntegration}; pinning that arm comes with the door split, and until then
-   * a pinned release of a claimed branch is refused rather than silently unpinned.
+   * <p>The workspace-claimed arm honours the pin too: it lands through the same integrator, so a
+   * gated workspace release is protected exactly as a plain branch is.
    */
   public ReleaseResult releaseBranch(
       String repoId, String branch, String summary, String expectedSha) {
@@ -1971,15 +2005,9 @@ public class WorkspaceService {
     Workspace claimed =
         QuarkusTransaction.requiringNew().call(() -> findWorkspaceByBranch(repoId, branch));
     if (claimed != null) {
-      if (expectedSha != null) {
-        throw new IntegrateConflictException(
-            IntegrateConflictException.Reason.HEAD_MOVED,
-            "'"
-                + branch
-                + "' is claimed by a workspace, whose release cannot be pinned to a commit yet —"
-                + " release it through the workspace, or unpin.");
-      }
-      return releaseWorkspace(claimed.id, summary);
+      // The claimed arm honours the pin too: the workspace flow lands through the same integrator,
+      // so HEAD_MOVED protects a gated workspace release exactly as it protects a plain branch.
+      return releaseWorkspace(claimed.id, summary, expectedSha);
     }
 
     if (!branchExists(repoId, branch)) {
@@ -2022,7 +2050,7 @@ public class WorkspaceService {
    * and both are decided in the first ten lines.
    */
   private ReleaseIntegrator.Landed landWorkspace(
-      Long id, String summary, ReleaseIntegrator.Mode mode) {
+      Long id, String summary, ReleaseIntegrator.Mode mode, String expectedSha) {
     // Deliberately NOT one @Transactional. Between the guards and the row work sit two waits a
     // transaction has no business holding open: the repository lease (up to a minute) and the push
     // (up to two). Narayana's default transaction timeout is shorter than their sum, so a busy
@@ -2064,7 +2092,8 @@ public class WorkspaceService {
     // behind. Same guard the merge endpoints open with, for the same reason.
     requireSyncedSourceForIntegration(repoId, workspace);
 
-    ReleaseIntegrator.Landed landed = landOnBranch(repo, source, target, summary, mode, null);
+    ReleaseIntegrator.Landed landed =
+        landOnBranch(repo, source, target, summary, mode, expectedSha);
 
     String subject =
         release

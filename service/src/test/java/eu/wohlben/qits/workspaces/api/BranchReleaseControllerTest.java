@@ -58,12 +58,95 @@ public class BranchReleaseControllerTest {
   @Inject FakeGitHostAddress gitHost;
   @Inject FakeReleaseAnnouncer announcer;
   @Inject WorkspaceService workspaceService;
+  @Inject @org.eclipse.microprofile.rest.client.inject.RestClient FakeProjectsReleaseRequests releaseRequests;
 
   @BeforeEach
   void resetDoubles() {
     announcer.reset();
     gitHost.reset();
     repositories.nameResolutionOutage(false);
+    releaseRequests.reset();
+  }
+
+  // -----------------------------------------------------------------------------------------
+  // the public door, which creates a request now
+  // -----------------------------------------------------------------------------------------
+
+  /**
+   * The door split's public half: {@code /branches/release} merges nothing any more — it creates
+   * (or converges) the release request in qits-projects, armed with the branch's head on the git
+   * host and carrying the caller's own name, and the gates decide when the execution arm lands it.
+   */
+  @Test
+  public void theReleaseDoorCreatesARequestAndMergesNothing() throws Exception {
+    String repoId = seedRepository();
+    seedMaintenanceBranch(repoId);
+    String head = inOrigin(repoId, "git", "rev-parse", MAINTENANCE);
+    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(new BranchController.ReleaseBranchRequest(MAINTENANCE, "a gated release", null))
+        .post("/workspaces/api/branches/release?repositoryId=" + repoId)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("state", equalTo("PENDING"))
+        .body("branch", equalTo(MAINTENANCE))
+        .body("commitSha", equalTo(head))
+        .body("requestId", not(emptyOrNullString()));
+
+    assertEquals(1, releaseRequests.asked().size());
+    FakeProjectsReleaseRequests.Asked asked = releaseRequests.asked().get(0);
+    assertEquals(repoId, asked.repoId());
+    assertEquals(head, asked.body().commitSha(), "the request arms with the wire head, not a cache");
+    assertEquals("qits:system", asked.roles());
+    assertNotNull(asked.user(), "the requester is the caller, forwarded by name");
+
+    assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"), "nothing merged");
+    assertTrue(originBranches(repoId).contains(MAINTENANCE), "nothing deleted");
+    assertEquals(List.of(), announcer.announced(), "nothing released, so nothing announced");
+  }
+
+  /** The guards a caller can act on stay at this door, and a refused ask reaches no gate. */
+  @Test
+  public void theReleaseDoorStillRefusesWhatItCanAnswerItself() throws Exception {
+    String repoId = seedRepository();
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(new BranchController.ReleaseBranchRequest("master", "the default branch", null))
+        .post("/workspaces/api/branches/release?repositoryId=" + repoId)
+        .then()
+        .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            new BranchController.ReleaseBranchRequest(
+                "maintenance/never-pushed", "nothing to arm", null))
+        .post("/workspaces/api/branches/release?repositoryId=" + repoId)
+        .then()
+        .statusCode(Response.Status.NOT_FOUND.getStatusCode());
+
+    assertEquals(List.of(), releaseRequests.asked(), "a refused ask reaches no gate");
+  }
+
+  /** An expectedSha in the ask arms the request with exactly that commit, resolved nowhere. */
+  @Test
+  public void theReleaseDoorArmsWithTheCallersShaWhenGiven() throws Exception {
+    String repoId = seedRepository();
+    seedMaintenanceBranch(repoId);
+    String pinned = inOrigin(repoId, "git", "rev-parse", MAINTENANCE + "~1");
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(new BranchController.ReleaseBranchRequest(MAINTENANCE, "pin what was reviewed", pinned))
+        .post("/workspaces/api/branches/release?repositoryId=" + repoId)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("commitSha", equalTo(pinned));
+
+    assertEquals(pinned, releaseRequests.asked().get(0).body().commitSha());
   }
 
   // -----------------------------------------------------------------------------------------
@@ -106,7 +189,7 @@ public class BranchReleaseControllerTest {
         .when()
         // RestAssured refuses a URI ending in "?", so the no-address case is the bare path — which
         // is the same request a caller who named nothing makes anyway.
-        .post("/workspaces/api/branches/release" + (query.isEmpty() ? "" : "?" + query));
+        .post("/workspaces/api/branches/execute-release" + (query.isEmpty() ? "" : "?" + query));
   }
 
   /** The pinned form the release-quality-gates execution sends: land exactly this head or refuse. */
@@ -116,7 +199,7 @@ public class BranchReleaseControllerTest {
         .contentType(ContentType.JSON)
         .body(new BranchController.ReleaseBranchRequest(branch, summary, expectedSha))
         .when()
-        .post("/workspaces/api/branches/release?repositoryId=" + repoId);
+        .post("/workspaces/api/branches/execute-release?repositoryId=" + repoId);
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
@@ -316,23 +399,30 @@ public class BranchReleaseControllerTest {
   }
 
   /**
-   * A branch a workspace claims releases through the workspace flow, which cannot honour a pin
-   * yet — so a pinned call is refused rather than silently unpinned. The door split is where the
-   * workspace arm learns the pin.
+   * The claimed arm honours the pin: a stale pin refuses without touching the workspace, and a
+   * fresh one releases through the workspace flow — row resolved, branch gone — exactly as an
+   * unpinned call does.
    */
   @Test
-  public void aPinnedReleaseOfAWorkspaceClaimedBranchIsRefusedRatherThanUnpinned() throws Exception {
+  public void aPinnedReleaseOfAWorkspaceClaimedBranchHonoursThePin() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "claimed", "claimed-b");
-    String sha = inOrigin(repoId, "git", "rev-parse", "claimed-b");
+    TestOrigin.commitOnBranch(dataDir, repoId, "claimed-b", "work.md", "shipped\n", "the work");
+    String stale = inOrigin(repoId, "git", "rev-parse", "claimed-b~1");
 
-    releasePinned(repoId, "claimed-b", "pinned workspace release", sha)
+    releasePinned(repoId, "claimed-b", "pinned workspace release", stale)
         .then()
         .statusCode(Response.Status.CONFLICT.getStatusCode())
-        .body("reason", equalTo("HEAD_MOVED"))
-        .body("message", containsString("workspace"));
-
+        .body("reason", equalTo("HEAD_MOVED"));
     assertEquals(List.of(), announcer.announced());
+    assertTrue(activeLabels(repoId).contains("claimed"), "a refused pin resolves no workspace");
+
+    String head = inOrigin(repoId, "git", "rev-parse", "claimed-b");
+    releasePinned(repoId, "claimed-b", "pinned workspace release", head)
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode());
+    assertEquals(1, announcer.announced().size());
+    assertFalse(activeLabels(repoId).contains("claimed"), "a fresh pin resolves the workspace");
   }
 
   /** A branch the origin does not have is a 404: the name is the identity, and there is no row. */

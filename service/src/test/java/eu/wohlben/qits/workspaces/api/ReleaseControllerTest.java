@@ -71,11 +71,13 @@ public class ReleaseControllerTest {
   @Inject FakeReleaseAnnouncer announcer;
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
+  @Inject @org.eclipse.microprofile.rest.client.inject.RestClient FakeProjectsReleaseRequests releaseRequests;
 
   @BeforeEach
   void resetDoubles() {
     announcer.reset();
     gitHost.reset();
+    releaseRequests.reset();
   }
 
   // -----------------------------------------------------------------------------------------
@@ -100,12 +102,25 @@ public class ReleaseControllerTest {
         .statusCode(Response.Status.OK.getStatusCode());
   }
 
+  /**
+   * The release mechanics run through the door split's EXECUTION arm now — the same landing this
+   * suite always proved, reached by the branch the workspace claims. {@code /workspaces/{id}/release}
+   * itself creates a release request (asserted in its own test below), and the execution arm's
+   * claimed-branch forwarding is what keeps every workspace-resolution claim in this file true.
+   */
   private io.restassured.response.Response release(String repoId, String label, String summary) {
+    String branch =
+        given()
+            .get("/workspaces/api/workspaces?repositoryId=" + repoId)
+            .then()
+            .statusCode(Response.Status.OK.getStatusCode())
+            .extract()
+            .path("entries.find { it.workspace.workspaceId == '" + label + "' }.workspace.branch");
     return given()
         .contentType(ContentType.JSON)
-        .body(new WorkspaceController.ReleaseRequest(summary))
+        .body(new BranchController.ReleaseBranchRequest(branch, summary, null))
         .when()
-        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, label) + "/release");
+        .post("/workspaces/api/branches/execute-release?repositoryId=" + repoId);
   }
 
   private String inOrigin(String repoId, String... argv) throws Exception {
@@ -901,5 +916,38 @@ public class ReleaseControllerTest {
     release(repoId, "master", "nowhere to go")
         .then()
         .statusCode(Response.Status.BAD_REQUEST.getStatusCode());
+  }
+
+  /**
+   * The door split: the workspace-keyed door creates a release request now — armed with the
+   * workspace branch's head, carrying the caller's name — and merges nothing itself. The workspace
+   * resolves when the gated release executes through the execution arm's claimed-branch forwarding,
+   * which every other test in this file drives.
+   */
+  @Test
+  public void theWorkspaceDoorCreatesAReleaseRequestNow() throws Exception {
+    String repoId = seedRepository();
+    createWorkspace(repoId, "req", "req-b");
+    String head = inOrigin(repoId, "git", "rev-parse", "req-b");
+    String masterBefore = inOrigin(repoId, "git", "rev-parse", "master");
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(new WorkspaceController.ReleaseRequest("a gated workspace release"))
+        .when()
+        .post("/workspaces/api/workspaces/" + workspaceIds.of(repoId, "req") + "/release")
+        .then()
+        .statusCode(Response.Status.OK.getStatusCode())
+        .body("state", org.hamcrest.Matchers.equalTo("PENDING"))
+        .body("branch", org.hamcrest.Matchers.equalTo("req-b"))
+        .body("commitSha", org.hamcrest.Matchers.equalTo(head));
+
+    org.junit.jupiter.api.Assertions.assertEquals(1, releaseRequests.asked().size());
+    org.junit.jupiter.api.Assertions.assertEquals(
+        head, releaseRequests.asked().get(0).body().commitSha());
+    org.junit.jupiter.api.Assertions.assertEquals(
+        masterBefore, inOrigin(repoId, "git", "rev-parse", "master"), "nothing merged at this door");
+    org.junit.jupiter.api.Assertions.assertTrue(
+        activeLabels(repoId).contains("req"), "the workspace resolves at execution, not at the ask");
   }
 }
