@@ -11,13 +11,19 @@ here" below.
 
 One line in this service's `.config/qits/deployments.yml`:
 
-    navigation-entries: … project.detail.Workspaces:1, project.detail.Editor:2=editor
+    navigation-entries: … project.detail.Workspaces:2, project.detail.Editor:3=editor
 
 Both rows are `project.detail` (the child slot of the Project node), the same application
-(`qits-workspaces`) in one container, at positions **1 (Workspaces)** and **2 (Editor)**. `=editor`
+(`qits-workspaces`) in one container, at positions **2 (Workspaces)** and **3 (Editor)**. `=editor`
 is the Editor row's own bare `editor` subpath — a project has one editor and it rides the wrapper's
-aggregate workspace, so the row takes no repository segment. Position 2 was free, which is why the
-Editor row lands immediately under Workspaces.
+aggregate workspace, so the row takes no repository segment. Nothing sits between the two numbers,
+which is why the Editor row lands immediately under Workspaces.
+
+The pair was **1 and 2** until 2026-09-02, when qits-projects took position 1 for its Epics row and
+the whole group shifted down one — Epics 1, Workspaces 2, Editor 3, Release Requests 4. What is
+verified here is the adjacency, not the numbers: this document's claim is that the Editor row draws
+directly beneath the Workspaces row, and a renumber that moves both by the same amount leaves it
+exactly as true.
 
 ## Evidence source 1 — the edge serves both rows, in order
 
