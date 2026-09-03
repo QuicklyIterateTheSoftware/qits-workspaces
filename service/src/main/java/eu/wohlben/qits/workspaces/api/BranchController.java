@@ -47,8 +47,31 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Path("/branches")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
-@jakarta.annotation.security.RolesAllowed("qits:admin")
+// THE PAIR AT CLASS LEVEL, AND THE HUMAN-ONLY GUARD IN THE METHOD BODIES — because method-level
+// @RolesAllowed on this class is not trustworthy in the deployed binary, measured 2026-09-03:
+// releaseBranch carried {"qits:admin","qits:system"} in the shipped tree (image c7c830ad) and the
+// runtime enforced the class-level admin-only anyway, while executeRelease's byte-identical
+// method annotation WAS enforced. Same file, same spelling, one method honored and one not; the
+// root cause is unfound and this class no longer bets on the mechanism. What is proven to hold:
+// class-level enforcement (merge answered 403 to a system token all along) and code in the body.
+// So the class admits both roles, the machine-and-person doors (release, execute-release) take
+// exactly that, and the person-only doors (merge, cleanup) REFUSE the system role in their first
+// line, where no annotation processor can lose it.
+@jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
 public class BranchController {
+
+  /**
+   * The person-only refusal, programmatic on purpose — see the class annotation's comment. A
+   * machine's token carries {@code qits:system} and never {@code qits:admin}; a person (or a
+   * commissioned context acting as one) carries {@code qits:admin}.
+   */
+  private void requireAdmin(String door) {
+    if (!identity.getRoles().contains("qits:admin")) {
+      throw new jakarta.ws.rs.ForbiddenException(
+          door + " is a person's door: it wants qits:admin, and this token carries only machine"
+              + " roles");
+    }
+  }
 
   @Inject WorkspaceService workspaceService;
 
@@ -102,6 +125,7 @@ public class BranchController {
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   public MergeBranchRequest.Response mergeBranch(
       @QueryParam("repositoryId") String repoId, @Valid MergeBranchRequest request) {
+    requireAdmin("/branches/merge");
     var result =
         workspaceService.mergeBranch(repoId, request.source(), request.target(), request.result());
     return new MergeBranchRequest.Response(
@@ -189,7 +213,6 @@ public class BranchController {
   // bump branches it pushes, and its client deliberately holds no qits:admin — that is a person's
   // role, and the bootstrap's grant comment defends it. Admitting the system role at the door keeps
   // that doctrine intact instead of promoting a service to personhood for one POST.
-  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
   public ReleaseRequested releaseBranch(
       @QueryParam("repositoryId") String repoId,
       @QueryParam("projectId") String projectId,
@@ -249,7 +272,7 @@ public class BranchController {
    */
   @POST
   @Path("/execute-release")
-  @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
+
   @APIResponse(responseCode = "200", description = "Released; the version and the merge commit.")
   @APIResponse(
       responseCode = "409",
@@ -335,6 +358,7 @@ public class BranchController {
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   public CleanupBranchRequest.Response cleanupBranch(
       @QueryParam("repositoryId") String repoId, @Valid CleanupBranchRequest request) {
+    requireAdmin("/branches/cleanup");
     workspaceService.cleanupBranch(repoId, request.branch(), request.result());
     return new CleanupBranchRequest.Response(true);
   }
