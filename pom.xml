@@ -45,7 +45,7 @@
     </modules>
 
     <properties>
-        <qits.eventstream.version>2026.902.53026</qits.eventstream.version>
+        <qits.eventstream.version>2026.902.231856</qits.eventstream.version>
         <!-- Both come out of qits-integrations-quarkus, so they move together. -->
         <qits.db-core.version>2026.902.53026</qits.db-core.version>
         <qits.arch-rules.version>2026.902.53026</qits.arch-rules.version>
