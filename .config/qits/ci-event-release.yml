@@ -10,10 +10,15 @@
 # `SoftwareRelease` per entry under `artifacts:` below. The event that could loop is
 # SoftwareRelease, and this file neither listens for it nor publishes it.
 #
-# THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT.
-# ci-post-receive.yml's `:$QITS_CI_SHA` push is the whole contract with qits-deployments and is untouched;
-# every deployment still comes from a sha. What this adds is a name a human and a downstream
-# consumer can say out loud, on the same image content.
+# THE VERSION TAG IS THE ONLY COORDINATE NOW, AND IT USED TO BE THE SECOND OF TWO. This file read
+# `:$QITS_CI_SHA` at the push below for as long as there was a per-push image beside it — the sha
+# coordinate was the contract with qits-deployments, and this pipeline pushed the released tree
+# under it a second time so the two would never disagree. Both halves of that are gone: per-push CI
+# is retired (ci-event-build.yml and ci-event-userflows.yml are one QA pipeline that publishes no
+# image at all), and cd deploys a RELEASE rather than a green push. So the push below tags
+# `$version` — the CalVer name the release was made under, which is what `artifacts:` declares, what
+# the SBOM is filed under a few lines later, and what every consumer of the resulting
+# `SoftwareRelease` asks for.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything, so it
 # cannot see what the step below pushed; it announces `{repository, version, packageType,
@@ -120,7 +125,7 @@ steps:
       # source is NOT an error — measured on buildx v0.36.1, `--secret id=x,env=DOES_NOT_EXIST`
       # builds green and the mounted variable is simply unset — so this is inert until a run carries
       # the pair. ci-post-receive.yml carries the same two flags, and the two must stay matched.
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspaces:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspaces:$version"
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
