@@ -31,7 +31,7 @@ import org.jboss.logging.Logger;
  *
  * <p><b>{@code @DefaultBean}, and keep it.</b> A test-scoped double must win, and two unqualified
  * beans of one type fail the build at {@code ArcProcessor#validate} — for every test at once. Same
- * annotation and same reason as {@code HttpRepositoryLookup} and {@code SCMReleaseAnnouncer}.
+ * annotation and same reason as {@code HttpRepositoryLookup}.
  *
  * <p><b>Commissioning is patient, and decommissioning is not.</b> A commission failure fails a
  * workspace launch, and the measured failure mode is a window rather than a verdict: the 2026-08-12

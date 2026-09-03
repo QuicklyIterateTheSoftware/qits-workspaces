@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspaces.control.FakeGitHostAddress;
-import eu.wohlben.qits.workspaces.control.FakeReleaseAnnouncer;
 import eu.wohlben.qits.workspaces.control.FakeRepositoryLookup;
 import eu.wohlben.qits.workspaces.control.TestGit;
 import eu.wohlben.qits.workspaces.control.TestOrigin;
@@ -27,12 +26,12 @@ import org.junit.jupiter.api.Test;
  * default branch.
  *
  * <p>An integrate lands a workspace on <b>its parent</b>: a task branch on the epic it forked from,
- * which the epic later releases. So the fixture every case here builds is a two-level stack, and the
- * assertions that carry the suite are the two things an integrate is <em>not</em>: no version
- * anywhere near the commit, and no {@code SCMRelease}. Everything it <em>is</em> — the detached
- * worktree, the single two-parent commit, the real push, the 409 family — it shares with the release
- * flow by construction, because {@code ReleaseIntegrator} is one method told which mode it is in.
- * {@code ReleaseControllerTest} is where those shared properties are proven hardest.
+ * which is later released — by a release request in qits-projects, not by anything here. So the
+ * fixture every case here builds is a two-level stack, and the assertion that carries the suite is
+ * what an integrate is <em>not</em>: no version anywhere near the commit, and no manifest touched.
+ * Everything it <em>is</em> — the detached worktree on a private mirror, the single two-parent
+ * commit, the real push, the 409 family — is {@code BranchIntegrator}, which is all that survived
+ * the release door leaving this service.
  *
  * <p>Like that suite, every case runs against a <b>real bare origin</b> and performs a <b>real
  * {@code git push}</b> into it. The one production difference asserted here is the argv: an
@@ -47,13 +46,11 @@ public class IntegrateControllerTest {
 
   @Inject FakeRepositoryLookup repositories;
   @Inject FakeGitHostAddress gitHost;
-  @Inject FakeReleaseAnnouncer announcer;
   @Inject WorkspaceIds workspaceIds;
   @Inject WorkspaceService workspaceService;
 
   @BeforeEach
   void resetDoubles() {
-    announcer.reset();
     gitHost.reset();
   }
 
@@ -108,7 +105,7 @@ public class IntegrateControllerTest {
         .path("entries.workspace.workspaceId");
   }
 
-  /** A minimal but real maven reactor root — the thing a release would rewrite and this must not. */
+  /** A minimal but real maven reactor root — the thing a release bump would rewrite, elsewhere. */
   private static final String POM =
       """
       <?xml version="1.0" encoding="UTF-8"?>
@@ -161,7 +158,7 @@ public class IntegrateControllerTest {
     assertEquals(
         masterBefore,
         inOrigin(repoId, "git", "rev-parse", "master"),
-        "an integrate never touches the default branch — that door is /release");
+        "an integrate never touches the default branch — nothing here writes it");
 
     // ONE commit, TWO parents, and they are the two tips that went in.
     String parents = inOrigin(repoId, "git", "rev-list", "--parents", "-n", "1", "epic-b");
@@ -175,7 +172,7 @@ public class IntegrateControllerTest {
         inOrigin(repoId, "git", "log", "-1", "--format=%s", "epic-b"),
         "the scope is the SOURCE branch, and the subject is not a release(...)");
     assertEquals(
-        "Integrates workspace branch `task-b` into `epic-b` without a release.",
+        "Integrates workspace branch `task-b` into `epic-b`.",
         inOrigin(repoId, "git", "log", "-1", "--format=%b", "epic-b").trim(),
         "the body names both branches, which the merge's parents record only as shas");
 
@@ -190,19 +187,14 @@ public class IntegrateControllerTest {
         inOrigin(repoId, "git", "diff", "--name-only", sourceTip, commitSha),
         "the merge commit's tree is the source's tree: no file changed on the way in");
 
-    // The workspace resolved, exactly as a release resolves one.
+    // The workspace resolved.
     assertTrue(!activeLabels(repoId).contains("task"), "an integrated workspace leaves the listing");
     assertTrue(activeLabels(repoId).contains("epic"), "the parent workspace is untouched");
 
-    // The difference that matters most: no release happened, so nothing was announced.
-    assertEquals(
-        List.of(),
-        announcer.announced(),
-        "a plain integrate is not a release and must publish no SCMRelease");
     assertEquals(
         "",
         inOrigin(repoId, "git", "tag", "-l"),
-        "a plain integrate stamps no version, so there is nothing for a tag to name");
+        "an integrate stamps no version, so there is nothing for a tag to name");
     assertEquals(
         "",
         inOrigin(
@@ -212,48 +204,7 @@ public class IntegrateControllerTest {
             "--format=%(refname)",
             "refs/heads/environment",
             "refs/heads/platform"),
-        "and it deploys nothing: promoting onto the deploy branches is a release's further pushes");
-  }
-
-  /**
-   * The stack, one level further: the epic that just absorbed a task can be released, and only then
-   * does a version exist. This is the shape the two endpoints were split for, asserted end to end
-   * rather than inferred from the two suites side by side.
-   */
-  @Test
-  public void theEpicThatAbsorbedATaskIsWhatGetsReleased() throws Exception {
-    String repoId = seedStack();
-    TestOrigin.commitOnBranch(dataDir, repoId, "task-b", "pom.xml", POM, "add a pom");
-
-    integrate(repoId, "task", "the task's work")
-        .then()
-        .statusCode(Response.Status.OK.getStatusCode());
-
-    // The release mechanics run through the door split's execution arm now; the public door only
-    // creates a request. The epic's branch is what the claimed arm resolves.
-    String version =
-        given()
-            .contentType(ContentType.JSON)
-            .body(new BranchController.ReleaseBranchRequest("epic-b", "ship the epic", null))
-            .when()
-            .post("/workspaces/api/branches/execute-release?repositoryId=" + repoId)
-            .then()
-            .statusCode(Response.Status.OK.getStatusCode())
-            .extract()
-            .path("version");
-
-    assertEquals(
-        "release(" + version + "): ship the epic",
-        inOrigin(repoId, "git", "log", "-1", "--format=%s", "master"));
-    assertTrue(
-        inOrigin(repoId, "git", "show", "master:pom.xml")
-            .contains("<version>" + version + "</version>"),
-        "the release is where the bump happens, and it happens once for the whole stack");
-    assertEquals(1, announcer.announced().size(), "one release, one SCMRelease");
-    assertEquals(
-        version,
-        inOrigin(repoId, "git", "tag", "-l"),
-        "one tag for the stack too — the integrate on the way in tagged nothing");
+        "one push, one ref: this flow writes nothing beside the target branch");
   }
 
   // -----------------------------------------------------------------------------------------
@@ -262,11 +213,11 @@ public class IntegrateControllerTest {
 
   /**
    * A workspace forked straight off the default branch has no parent to integrate into — its parent
-   * <em>is</em> the branch only a release may write. It is refused with the reason a client can
-   * branch on, so the UI offers the Release button instead of word-matching prose.
+   * <em>is</em> the branch this service does not write. It is refused with the reason a client can
+   * branch on, so the UI offers the release path instead of word-matching prose.
    */
   @Test
-  public void aWorkspaceWhoseParentIsTheDefaultBranchIsSentToRelease() throws Exception {
+  public void aWorkspaceWhoseParentIsTheDefaultBranchIsSentToTheReleaseFlow() throws Exception {
     String repoId = seedRepository();
     createWorkspace(repoId, "straight", "master", "straight-b");
     TestOrigin.commitOnBranch(dataDir, repoId, "straight-b", "notes.txt", "hi\n", "a note");
@@ -277,21 +228,20 @@ public class IntegrateControllerTest {
         .then()
         .statusCode(Response.Status.CONFLICT.getStatusCode())
         .body("reason", equalTo("RELEASE_REQUIRED"))
-        .body("message", containsString("/release"));
+        .body("message", containsString("release request"));
 
     assertEquals(masterBefore, inOrigin(repoId, "git", "rev-parse", "master"));
     assertTrue(activeLabels(repoId).contains("straight"), "nothing was attempted");
-    assertEquals(List.of(), announcer.announced());
   }
 
   // -----------------------------------------------------------------------------------------
-  // the refusals it shares with a release
+  // the refusals
   // -----------------------------------------------------------------------------------------
 
   /**
    * The 409 family is the flow's, not the endpoint's. A conflict leaves the <b>parent</b> branch
-   * byte-identical for the same reason it leaves the default branch alone in a release: the merge
-   * happens in a detached worktree and only the push moves a ref.
+   * byte-identical: the merge happens in a detached worktree on a mirror nobody serves, and only
+   * the push moves a ref.
    */
   @Test
   public void aConflictIsA409WithTheFileListAndLeavesTheParentByteIdentical() throws Exception {

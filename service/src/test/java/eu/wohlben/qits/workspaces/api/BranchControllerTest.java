@@ -251,6 +251,34 @@ public class BranchControllerTest {
         "a refused merge deletes nothing");
   }
 
+  /**
+   * <b>The release doors are gone, and this is what says so.</b> {@code /branches/release} created
+   * release requests in qits-projects and {@code /branches/execute-release} performed the landing;
+   * both left with the release flow on 2026-09-03 — qits-projects folds a request's sources through
+   * qits-githost, stamps, bumps and tags there, and nothing in this service writes a default branch
+   * any more.
+   *
+   * <p>Asserted as a <b>404 on the route</b> rather than as an absent method on a class: a resource
+   * method deleted from {@link BranchController} could be reintroduced anywhere in this jar under
+   * the same path, and a caller only ever sees the path. RESTEasy answers an unmapped path under a
+   * mapped resource with 404, which is the same answer any other unknown route gives — exactly the
+   * point.
+   */
+  @Test
+  public void theReleaseDoorsAreNotRoutedAnyMore() {
+    String repoId = createProjectAndRepository();
+
+    for (String door : new String[] {"release", "execute-release"}) {
+      given()
+          .contentType(ContentType.JSON)
+          .body("{\"branch\":\"feature\",\"summary\":\"nothing releases here\"}")
+          .when()
+          .post("/workspaces/api/branches/" + door + "?repositoryId=" + repoId)
+          .then()
+          .statusCode(Response.Status.NOT_FOUND.getStatusCode());
+    }
+  }
+
   @Test
   public void testCleanupBranchRemovesEligibleWorkspace() {
     String repoId = createProjectAndRepository();

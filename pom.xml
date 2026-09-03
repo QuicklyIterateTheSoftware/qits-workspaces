@@ -39,7 +39,6 @@
         <!-- Listed in dependency order for readability; Maven computes reactor order itself. -->
         <module>workspace-daemon-protocol</module>
         <module>gitmirror</module>
-        <module>workspaces-events</module>
         <module>domain</module>
         <module>service</module>
     </modules>
@@ -210,11 +209,6 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-service-mock</artifactId>
                 <version>${qits.service-mock.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>${project.groupId}</groupId>
-                <artifactId>qits-workspaces-events</artifactId>
-                <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>

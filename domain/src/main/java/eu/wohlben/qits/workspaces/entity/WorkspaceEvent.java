@@ -28,12 +28,11 @@ import lombok.NoArgsConstructor;
  *
  * <p><b>A {@link CausedRow}, and the one that carries this context's trace.</b> The workspace row
  * records why the unit of work exists; a timeline entry records a later moment with a cause of its
- * own — a MERGED, RELEASED or INTEGRATED entry answers to whatever asked for that landing, not to
- * whoever opened the workspace weeks earlier. Every {@code recordEvent} call site sits on the
- * flow's own thread with no executor between it and the caller, so the {@code CausationStamp}
- * listener reads the REST filter's restored scope and nothing has to be passed as data. The
- * high-value caller is a machine: {@code POST /workspaces/api/branches/release} is driven by a
- * pipeline step, so a release entry can name the run that ordered it.
+ * own — a MERGED or INTEGRATED entry answers to whatever asked for that landing, not to whoever
+ * opened the workspace weeks earlier. Every {@code recordEvent} call site sits on the flow's own
+ * thread with no executor between it and the caller, so the {@code CausationStamp} listener reads
+ * the REST filter's restored scope and nothing has to be passed as data — including when the caller
+ * is a machine driving these doors with its own bearer.
  */
 @Entity
 @Table(name = "workspace_event")

@@ -66,14 +66,6 @@
             <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
-            <!-- This service's event vocabulary — today just SoftwareRelease. Declared explicitly
-                 rather than taken transitively through qits-eventstream above, because this module
-                 uses the class by name (bus/SoftwareReleaseAnnouncer constructs it) and a
-                 compile-time use belongs in the pom that makes it. -->
-            <groupId>${project.groupId}</groupId>
-            <artifactId>qits-workspaces-events</artifactId>
-        </dependency>
-        <dependency>
             <!-- DbRetry, used by name in ContainerProxyRoute's daemon lookup. It also arrives
                  through `domain`, which names PatientPgDriver in the datasource block it ships;
                  declared here as well because this module calls the class. -->

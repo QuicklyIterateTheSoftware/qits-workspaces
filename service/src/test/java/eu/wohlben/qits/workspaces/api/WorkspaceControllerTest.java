@@ -111,12 +111,13 @@ public class WorkspaceControllerTest {
         .body("workspace.workspaceId", equalTo("adhoc-changes"));
 
     String guide = TestOrigin.fileAtBranch(dataDir, repoId, "adhoc-changes", "WORKSPACE.md");
-    // The sentence, as the shipped guide spells it: the assertion drifted from WORKSPACE_GUIDE when
-    // SPAs joined libraries on the main-only side of it, and a quoted fragment is only worth
-    // asserting while it is the one a workspace really receives.
+    // Two sentences, as the shipped guide spells them: where a release is asked for, and what a
+    // release is. Both moved when the release door left this service, and a quoted fragment is only
+    // worth asserting while it is the one a workspace really receives.
     org.junit.jupiter.api.Assertions.assertTrue(
-        guide.contains("shared libraries and SPAs are released into `main` only"), guide);
-    org.junit.jupiter.api.Assertions.assertTrue(guide.contains("environment branch"));
+        guide.contains("ask **qits-projects** to release it"), guide);
+    org.junit.jupiter.api.Assertions.assertTrue(
+        guide.contains("a green gate turns it into a version **tag**"), guide);
   }
 
   /**

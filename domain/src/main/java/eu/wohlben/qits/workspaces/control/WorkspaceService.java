@@ -189,11 +189,8 @@ public class WorkspaceService {
 
   @Inject GitIdentity gitIdentity;
 
-  /**
-   * The git half of {@link #releaseWorkspace} and {@link #integrateWorkspace}: worktree, merge,
-   * stamp, bump, commit, push — one method, told which of the two it is running.
-   */
-  @Inject ReleaseIntegrator integrator;
+  /** The git half of {@link #integrateWorkspace}: worktree, merge, commit, push. */
+  @Inject BranchIntegrator integrator;
 
   /**
    * The repository-scoped mutex integrate serializes on. The concrete registry rather than the
@@ -202,13 +199,6 @@ public class WorkspaceService {
    * subscribes to. It is a bean of this module, so it is always present.
    */
   @Inject TechnicalProcessRegistry processRegistry;
-
-  /**
-   * The {@code SCMRelease} seam — see {@link ReleaseAnnouncer}. Nothing implements it yet, and
-   * that is the intended state: this feature keeps the publish point clean and the event feature
-   * fills it. {@code Instance<>} so absent stays a supported configuration afterwards too.
-   */
-  @Inject Instance<ReleaseAnnouncer> releaseAnnouncer;
 
   /**
    * Creates {@code branch} from {@code parentBranch} — <b>as a push</b>, through the git host.
@@ -1283,24 +1273,24 @@ public class WorkspaceService {
 
       This checkout is an aggregate workspace. The wrapper and every checked-out submodule use the same workspace branch. Commit and push changes in the repository where they belong; the workspace credential has normal Git push access so each repository can move independently.
 
-      A local commit is not automatically part of the running environment. Changes have to be orchestrated by **releasing** them: shared libraries and SPAs are released into `main` only, while applications and services are released into `main` and promoted onto the environment branch that runs them (for example `environment/dev`) — the green build of that branch is what deploys.
+      A local commit is not automatically part of the running environment. Changes have to be orchestrated by **releasing** them: a release request folds your branch with `main` (and with every released tag not yet merged back), the quality gate builds that fold, and a green gate turns it into a version **tag**. A service's deployment follows from that release; `main` is merged only once the deployment is live.
 
       Release dependencies before their consumers, then let the affected application or service release carry the new versions into the environment. Keep the wrapper branch as the map of the workspace, but treat each submodule's own release as the unit that promotes code.
 
       ## Releasing from inside this container
 
-      **Branch → door.** Never push `main` or `environment/*` yourself. Push your branch (every push already builds it in CI), and when the build is green ask qits-workspaces to release the branch. The door is machine-authenticated and this container carries its own identity — a commissioned idp client in `QITS_COMMISSIONED_CLIENT_ID` / `QITS_COMMISSIONED_CLIENT_SECRET` — so mint a bearer for the service you call. Platform services are dialed as `<tier>-qits-<name>:8080` on the platform network, and a token is cut for exactly one of them (its `audience` is that alias); `QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE` names this tier's workspaces service (for example `dev-qits-workspaces`, so the tier is `dev`).
+      **Branch → release request.** Never push `main` yourself. Push your branch, then ask **qits-projects** to release it. The door is machine-authenticated and this container carries its own identity — a commissioned idp client in `QITS_COMMISSIONED_CLIENT_ID` / `QITS_COMMISSIONED_CLIENT_SECRET` — so mint a bearer for the service you call. Platform services are dialed as `<tier>-qits-<name>:8080` on the platform network, and a token is cut for exactly one of them (its `audience` is that alias); `QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE` names this tier's workspaces service (for example `dev-qits-workspaces`, so the tier is `dev`).
 
           token() { curl -fsS -u "$QITS_COMMISSIONED_CLIENT_ID:$QITS_COMMISSIONED_CLIENT_SECRET" -d "grant_type=client_credentials&audience=$1" "$QITS_GIT_AUTH_TOKEN_URL" | jq -r .access_token; }
-          WS=http://$QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE:8080/workspaces/api
+          PROJECTS=http://<tier>-qits-projects:8080/projects/api
 
-          curl -sS -X POST -H "Authorization: Bearer $(token $QITS_WORKSPACE_DAEMON_AUTH_AUDIENCE)" -H 'Content-Type: application/json' "$WS/branches/release?repositoryId=<repository>" -d '{"branch":"<your branch>","summary":"<what this release is>"}'
+          curl -sS -X POST -H "Authorization: Bearer $(token <tier>-qits-projects)" -H 'Content-Type: application/json' "$PROJECTS/repositories/<repository>/release-requests" -d '{"branch":"<your branch>","summary":"<what this release is>"}'
 
-      The answer is `{"version","commitSha","branch","promotions"}`: one commit `release(<version>): <summary>` merged into `main`, tagged and announced. `promotions` lists the deploy branches the commit was pushed onto — **empty for a library or an SPA** (they have no `.config/qits/deployments.yml`, so nothing deploys and that is correct), and for a service each entry carries an `error` when that promotion failed. A `409` with reason `ALREADY_INTEGRATED` means the branch was already released. Watch the build that ships it: `curl -sS -H "Authorization: Bearer $(token <tier>-qits-ci)" http://<tier>-qits-ci:8080/ci/api/runs/active` (and `/ci/api/runs/finished?limit=10`) — the deploy is the green run of the environment branch at your merge commit.
+      Nothing has merged when that answers. The request folds `main`, your branch and every released tag still in flight onto its own `release/<id>` branch, the QA pipeline builds that fold, and a green gate releases it: the manifests are stamped, the fold is tagged with the version, and the source branches are deleted. Poll the request (`GET $PROJECTS/repositories/<repository>/release-requests/<id>`) until it reads `RELEASED` — `CONFLICTED` means the fold does not merge and is yours to resolve, `FAILED` and `REJECTED` say why in `detail`. Watch the build behind it: `curl -sS -H "Authorization: Bearer $(token <tier>-qits-ci)" http://<tier>-qits-ci:8080/ci/api/runs/active` (and `/ci/api/runs/finished?limit=10`).
 
       **Trains.** Releasing an SPA or a library deploys nothing by itself: the service that embeds or depends on it follows by event — CI commits a `bump(...)` onto that service's `maintenance/<dependency>` branch and releases it on its own. To ship a service change together with its SPA, release the SPA first and the service once the bump has reached the service's `main`; the service branch then merges cleanly on top of the new pin. Never move a submodule gitlink (`service/src/main/webui`) by hand to follow a release you made — the train owns that pin, and `git add -A` would stage it silently (`.gitmodules` says `ignore = all`); confirm with `git ls-tree HEAD <path>` before committing.
 
-      **After a release the source branch is gone in that repository** (the door deletes it). Your local checkout still holds it; `git fetch && git switch main` there before the next change. The wrapper's branch and this workspace are untouched by a submodule's release.
+      **After a release the source branch is gone in that repository** (the release deletes it). Your local checkout still holds it; `git fetch && git switch main` there before the next change. Note `main` catches up only after the deployment, so a freshly released repository can sit at the tag for a while. The wrapper's branch and this workspace are untouched by a submodule's release.
 
       ## Toolchain notes
 
@@ -1312,7 +1302,7 @@ public class WorkspaceService {
             git checkout -- package-lock.json
 
         Order matters: the broad mirror swap first, the path-anchored `@qits` correction second. A service's `mvn verify` runs that same install inside `service/src/main/webui` (Quinoa), so install there first and the package step passes.
-      - The release door, CI and every other platform API sit on the platform network at the aliases above; the public edge (`https://...`) wants a browser session, not this container's bearer.
+      - qits-projects, CI and every other platform API sit on the platform network at the aliases above; the public edge (`https://...`) wants a browser session, not this container's bearer.
       """;
 
   /**
@@ -1850,207 +1840,33 @@ public class WorkspaceService {
   }
 
   /**
-   * The one door into the repository's default branch: merge this workspace's branch into it,
-   * stamped with a fresh version, as a single commit that is then <b>pushed</b> through the ordinary
-   * git host.
+   * The workspace door into git, and it never reaches the default branch: merge this workspace's
+   * branch into <b>its parent</b> — a {@code task/…} landing on the {@code epic/…} it forked from —
+   * as a single pushed commit that stamps nothing.
    *
-   * <p><b>The target is not a parameter.</b> It is always the repository's default branch, by
-   * construction — that is the feature, and it is why this is its own verb rather than a widening of
-   * {@link #mergeWorkspace}: a different response (a version, a sha), different failure modes, and
-   * different semantics. Merge moves a ref; release performs a release.
+   * <p><b>It is not a release and there is no longer a door here that is.</b> A release is a release
+   * request in qits-projects: the sources are octopus-merged on a backing branch through
+   * qits-githost, the version stamp and the manifest bump happen there, the tag is what a release
+   * <em>is</em>, and {@code main} is merged only after the deployment. A workspace whose parent
+   * <em>is</em> the default branch is therefore refused here and sent to that flow, rather than
+   * quietly writing the one branch this service does not own.
    *
-   * <p><b>Synchronous.</b> The whole flow is a local merge, a few file edits and one push to a
-   * container on the same network. The caller needs the version and the sha to say anything useful,
-   * and a conflict is a user-facing error that wants an immediate answer; the push's bounded timeout
-   * is what keeps "seconds" honest. {@code INTEGRATED} still rides the existing SSE stream, so a UI
-   * that would rather not hold the request open already has a channel.
-   *
-   * <p><b>Not idempotent, by design.</b> Each call stamps a new version from the clock, because two
-   * releases are two releases. Retry safety comes from the flow's shape instead: a failed release
-   * moved no ref (the detached worktree), so retrying is clean, and a succeeded one whose response
-   * was lost is refused on the retry with {@code ALREADY_INTEGRATED} rather than producing an empty
-   * second release. The {@code INTEGRATED} row is the durable record either way.
-   *
-   * @throws eu.wohlben.qits.workspaces.error.IntegrateConflictException for every refusal the caller
-   *     can act on
-   */
-  public ReleaseResult releaseWorkspace(Long id, String summary) {
-    return releaseWorkspace(id, summary, null);
-  }
-
-  /**
-   * {@link #releaseWorkspace(Long, String)} pinned to a commit — the execution arm's form: the
-   * gates evaluated {@code expectedSha}, and a workspace branch whose head moved past it is {@link
-   * IntegrateConflictException.Reason#HEAD_MOVED} rather than a landing of ungated work.
-   */
-  public ReleaseResult releaseWorkspace(Long id, String summary, String expectedSha) {
-    ReleaseIntegrator.Landed landed =
-        landWorkspace(id, summary, ReleaseIntegrator.Mode.RELEASE, expectedSha);
-    return new ReleaseResult(
-        landed.version(),
-        landed.commitSha(),
-        landed.branch(),
-        landed.promotions());
-  }
-
-  /**
-   * The other door, and it never reaches the default branch: merge this workspace's branch into
-   * <b>its parent</b> — a {@code task/…} landing on the {@code epic/…} it forked from — as a single
-   * pushed commit that stamps nothing.
-   *
-   * <p><b>Two processes, not one flow with a switch.</b> An integrate moves work one level up a
-   * stack; a release turns a branch into a version of the software. They share every safety property
-   * ({@link ReleaseIntegrator} is literally one method) and share no meaning, which is why a
-   * workspace whose parent <em>is</em> the default branch is refused here and sent to {@link
-   * #releaseWorkspace} rather than quietly doing a release without a version.
-   *
-   * <p>The workspace resolves exactly as a release resolves it: the work is in the parent, so the
-   * container, the volume, the branch and the ACTIVE row all go. What is missing compared with a
-   * release is the version, the manifest bump, the {@code qits.release} push option and the {@code
-   * SCMRelease} event — none of which a merge between two working branches has any business
-   * producing.
+   * <p>The work is in the parent afterwards, so the workspace resolves: the container, the volume,
+   * the branch and the ACTIVE row all go.
    *
    * @throws eu.wohlben.qits.workspaces.error.IntegrateConflictException for every refusal the caller
    *     can act on
    */
   public IntegrateResult integrateWorkspace(Long id, String summary) {
-    ReleaseIntegrator.Landed landed = landWorkspace(id, summary, ReleaseIntegrator.Mode.PLAIN, null);
+    BranchIntegrator.Landed landed = landWorkspace(id, summary);
     return new IntegrateResult(landed.commitSha(), landed.branch(), landed.targetBranch());
   }
 
   /**
-   * The same release, keyed by <b>branch name</b> instead of by a workspace row: merge {@code
-   * branch} into the repository's default branch, stamped, as one pushed commit, with a {@code
-   * SCMRelease} published.
-   *
-   * <p><b>A resolver, not a second flow.</b> {@link ReleaseIntegrator} is keyed by (repository,
-   * source branch) and by nothing else — the worktree name included — so everything below the
-   * endpoint is literally the same method the workspace-keyed door calls. What this adds is the two
-   * things a branch name does not carry: which workspace, if any, claims it, and who deletes it
-   * afterwards.
-   *
-   * <p><b>A branch a workspace claims is that workspace's release.</b> The call is forwarded to
-   * {@link #releaseWorkspace}, so the row resolves to {@code INTEGRATED}, the container and the
-   * volume go, and the branch is deleted — the terminal state the workspace-keyed door leaves. The
-   * alternative (releasing the ref and walking away) would strand an ACTIVE workspace on a branch
-   * that just merged and no longer exists.
-   *
-   * <p>The caller is a pipeline step, not a person: a maintenance branch is force-pushed by a build
-   * container, so no workspace row exists or should exist for it. That is the whole reason this door
-   * is here — see {@code BranchController}'s keying rule.
-   *
-   * @throws NotFoundException when the origin has no such branch
-   * @throws BadRequestException for the default branch itself, which cannot be released into itself
-   * @throws IntegrateConflictException for every refusal a caller can act on
+   * The body of {@link #integrateWorkspace}: the guards, the lease, the git flow and the
+   * resolution.
    */
-  public ReleaseResult releaseBranch(String repoId, String branch, String summary) {
-    return releaseBranch(repoId, branch, summary, null);
-  }
-
-  /**
-   * The branch's head on the git host — the sha a release request arms with. A wire read, never
-   * the mirror: what is gated must be what the repository of record holds this instant.
-   */
-  public String branchHeadSha(String repoId, String branch) {
-    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
-      throw new BadRequestException("Invalid branch: " + branch);
-    }
-    return mirrors
-        .of(repoId)
-        .remoteBranchSha(branch)
-        .orElseThrow(
-            () ->
-                new NotFoundException(
-                    "Branch '" + branch + "' not found in repository " + repoId));
-  }
-
-  /** What a workspace-keyed release request needs off the row: the repository and the branch. */
-  public record ReleaseCoordinates(String repoId, String branch) {}
-
-  /** The active workspace's coordinates, for the request-creating door. 404 when not active. */
-  public ReleaseCoordinates releaseCoordinates(Long id) {
-    Workspace workspace = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
-    return new ReleaseCoordinates(workspace.repositoryId, workspace.branch);
-  }
-
-  /**
-   * {@link #releaseBranch(String, String, String)} pinned to a commit: the release lands only if
-   * the branch's head still is {@code expectedSha} — {@link
-   * IntegrateConflictException.Reason#HEAD_MOVED} otherwise. The release-quality-gates flow is the
-   * caller: its gates evaluated one sha and must not ship what the branch has become since.
-   *
-   * <p>The workspace-claimed arm honours the pin too: it lands through the same integrator, so a
-   * gated workspace release is protected exactly as a plain branch is.
-   */
-  public ReleaseResult releaseBranch(
-      String repoId, String branch, String summary, String expectedSha) {
-    var repo = repositories.require(repoId);
-    // Blank or dash-leading names are rejected before git sees them, so a value like "-D" cannot be
-    // smuggled in as a flag. Same guard, same reason, as mergeBranch's.
-    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
-      throw new BadRequestException("Invalid branch: " + branch);
-    }
-    if (summary == null || summary.isBlank()) {
-      throw new BadRequestException("A release needs a summary for its commit");
-    }
-    String mainBranch = defaultMainBranch(repo);
-    if (branch.equals(mainBranch)) {
-      throw new BadRequestException(
-          "'"
-              + branch
-              + "' is the repository's default branch, which is what a release lands on — there is"
-              + " nothing to release it into.");
-    }
-
-    Workspace claimed =
-        QuarkusTransaction.requiringNew().call(() -> findWorkspaceByBranch(repoId, branch));
-    if (claimed != null) {
-      // The claimed arm honours the pin too: the workspace flow lands through the same integrator,
-      // so HEAD_MOVED protects a gated workspace release exactly as it protects a plain branch.
-      return releaseWorkspace(claimed.id, summary, expectedSha);
-    }
-
-    if (!branchExists(repoId, branch)) {
-      throw new NotFoundException("Branch '" + branch + "' not found in repository " + repoId);
-    }
-
-    ReleaseIntegrator.Landed landed =
-        landOnBranch(repo, branch, mainBranch, summary, ReleaseIntegrator.Mode.RELEASE, expectedSha);
-
-    QuarkusTransaction.requiringNew().run(() -> notifyIncomingMerge(repoId, mainBranch));
-    // The work is in the default branch, so the source is spent. Matching the workspace path's
-    // cleanup: it leaves no stale ref claiming something is still pending, and the next
-    // force-push of a maintenance branch is then a create, which the git host's hook allows.
-    deleteLandedBranch(repoId, branch);
-
-    return new ReleaseResult(
-        landed.version(),
-        landed.commitSha(),
-        landed.branch(),
-        landed.promotions());
-  }
-
-  /** Best-effort, as in {@code doDiscard}: the release is in and a surviving ref must not undo it. */
-  private void deleteLandedBranch(String repoId, String branch) {
-    try {
-      PushOutcome deleted = mirrors.of(repoId).deleteBranch(branch);
-      if (!deleted.accepted()) {
-        LOG.warnf(
-            "the git host refused the deletion of released branch '%s' of %s: %s",
-            branch, repoId, deleted.output());
-      }
-    } catch (GitMirrorException e) {
-      LOG.warnf(e, "failed to delete released branch '%s' of %s", branch, repoId);
-    }
-  }
-
-  /**
-   * The shared body of {@link #releaseWorkspace} and {@link #integrateWorkspace}: the guards, the
-   * lease, the git flow, the announcement and the resolution. Only the target and the mode differ,
-   * and both are decided in the first ten lines.
-   */
-  private ReleaseIntegrator.Landed landWorkspace(
-      Long id, String summary, ReleaseIntegrator.Mode mode, String expectedSha) {
+  private BranchIntegrator.Landed landWorkspace(Long id, String summary) {
     // Deliberately NOT one @Transactional. Between the guards and the row work sit two waits a
     // transaction has no business holding open: the repository lease (up to a minute) and the push
     // (up to two). Narayana's default transaction timeout is shorter than their sum, so a busy
@@ -2060,26 +1876,23 @@ public class WorkspaceService {
     Workspace workspace = QuarkusTransaction.requiringNew().call(() -> requireActive(id));
     String repoId = workspace.repositoryId;
     var repo = repositories.require(repoId);
-    boolean release = mode == ReleaseIntegrator.Mode.RELEASE;
     String mainBranch = defaultMainBranch(repo);
-    // A release lands on the default branch by construction. An integrate lands on the branch this
-    // workspace forked from — and on the default branch never, which is the next guard.
-    String target = release ? mainBranch : parentBranchOf(workspace, mainBranch);
+    // An integrate lands on the branch this workspace forked from — and on the default branch
+    // never, which is the next guard.
+    String target = parentBranchOf(workspace, mainBranch);
     String source = workspace.branch;
 
     if (summary == null || summary.isBlank()) {
-      throw new BadRequestException(
-          "A" + (release ? " release" : "n integrate") + " needs a summary for its commit");
+      throw new BadRequestException("An integrate needs a summary for its commit");
     }
     if (source == null || source.isBlank() || source.startsWith("-")) {
       throw new BadRequestException(
           "Workspace '" + workspace.workspaceId + "' has no branch to integrate");
     }
-    if (!release) {
-      // The rule that keeps the two doors apart. A workspace forked straight off the default branch
-      // has nothing to integrate into: its parent IS the branch only a release may write.
-      refuseMainAsMergeTarget(repo, target, workspace.id);
-    }
+    // The rule that keeps this door off the one branch this service does not write. A workspace
+    // forked straight off the default branch has nothing to integrate into: its parent IS that
+    // branch, and only a release request lands there.
+    refuseMainAsMergeTarget(repo, target, workspace.id);
     if (source.equals(target)) {
       throw new BadRequestException(
           "Workspace '"
@@ -2092,13 +1905,9 @@ public class WorkspaceService {
     // behind. Same guard the merge endpoints open with, for the same reason.
     requireSyncedSourceForIntegration(repoId, workspace);
 
-    ReleaseIntegrator.Landed landed =
-        landOnBranch(repo, source, target, summary, mode, expectedSha);
+    BranchIntegrator.Landed landed = landOnBranch(repo, source, target, summary);
 
-    String subject =
-        release
-            ? "release(" + landed.version() + "): " + summary
-            : "integrate(" + source + "): " + summary;
+    String subject = "integrate(" + source + "): " + summary;
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
@@ -2120,37 +1929,16 @@ public class WorkspaceService {
     return landed;
   }
 
-  /**
-   * The git half, under the repository lease, with the announcement that must outlive a failed
-   * transaction — everything both doors share once they know their source, their target and their
-   * mode.
-   *
-   * <p>The announcement sits here rather than with the row work, and deliberately: the push has
-   * already happened and cannot be taken back, so a statement conditional on the caller's later
-   * transaction committing would be silent about a release that really did occur. A plain integrate
-   * announces nothing, because a plain integrate released nothing.
-   */
-  private ReleaseIntegrator.Landed landOnBranch(
-      RepositoryLookup.RepositoryView repo,
-      String source,
-      String target,
-      String summary,
-      ReleaseIntegrator.Mode mode,
-      String expectedSha) {
+  /** The git half, under the repository lease, once the source and the target are known. */
+  private BranchIntegrator.Landed landOnBranch(
+      RepositoryLookup.RepositoryView repo, String source, String target, String summary) {
     String repoId = repo.id();
     String leaseToken = acquireIntegrateLease(repoId);
-    ReleaseIntegrator.Landed landed;
     try {
-      landed =
-          integrator.land(
-              new ReleaseIntegrator.Run(repoId, source, target, summary, mode, expectedSha));
+      return integrator.land(new BranchIntegrator.Run(repoId, source, target, summary));
     } finally {
       processRegistry.releaseRepository(repoId, leaseToken);
     }
-    if (mode == ReleaseIntegrator.Mode.RELEASE) {
-      announceRelease(repo, landed);
-    }
-    return landed;
   }
 
   /** The branch a workspace forked from; the default branch for one that records none. */
@@ -2185,7 +1973,7 @@ public class WorkspaceService {
       lastKind = ((RepoReservation.Conflict) lease).runningKind();
       if (System.currentTimeMillis() >= deadline) {
         throw new ConflictException(
-            "Repository is busy with '" + lastKind + "'; nothing was released — try again.");
+            "Repository is busy with '" + lastKind + "'; nothing landed — try again.");
       }
       try {
         Thread.sleep(100);
@@ -2196,37 +1984,17 @@ public class WorkspaceService {
     }
   }
 
-  /** The {@link ReleaseAnnouncer} seam's single call site. */
-  private void announceRelease(
-      RepositoryLookup.RepositoryView repo, ReleaseIntegrator.Landed release) {
-    if (releaseAnnouncer.isUnsatisfied()) {
-      return;
-    }
-    releaseAnnouncer
-        .get()
-        .onReleasePublished(
-            repo.projectId(),
-            repo.id(),
-            repo.name(),
-            release.branch(),
-            release.version(),
-            release.commitSha(),
-            release.publishedAt());
-  }
-
   /**
-   * The rule that makes "release is the only flow into the default branch" true in the API and not
+   * The rule that makes "this service does not write the default branch" true in the API and not
    * only at the git host.
    *
    * <p>{@code merge} and {@code integrate} keep working for every other target — landing on a
    * <em>parent</em> branch is what stacked workspaces do all day — but any of them whose target
-   * resolves to the default branch is refused here, naming the door that writes it properly. Without
-   * this the claim would be false in the API even while true at the git host, and the git host would
-   * then refuse the write anyway: a worse error, later, instead of a clear one now.
-   *
-   * <p>The message names <b>both</b> doors, because a caller who reached this line wanted one of
-   * them and cannot be told which from here: {@code /integrate} for a plain merge into a parent,
-   * {@code /release} for the version-stamped push into the default branch.
+   * resolves to the default branch is refused here, naming the flow that does write it. The default
+   * branch is qits-projects' now: a release request folds its sources, releases a tag, and {@code
+   * main} is finalized after the deployment. Without this guard the claim would be false in the API
+   * even while true at the git host, and the git host's own hook would then refuse the write anyway:
+   * a worse error, later, instead of a clear one now.
    *
    * <p>It carries {@code RELEASE_REQUIRED} rather than a bare 409, so a client can offer the right
    * button instead of word-matching prose for an endpoint name. Nothing was attempted, which is what
@@ -2242,13 +2010,12 @@ public class WorkspaceService {
         IntegrateConflictException.Reason.RELEASE_REQUIRED,
         "'"
             + resolvedTarget
-            + "' is the repository's default branch and is written by release alone. Use POST"
+            + "' is the repository's default branch and is written by the release flow alone. Ask"
+            + " qits-projects for a release request naming this branch; it lands the release as a"
+            + " tag and merges the default branch once the deployment is live. POST"
             + " /workspaces/api/workspaces/"
             + id
-            + "/release, which merges, stamps a release version and pushes it as one commit — or"
-            + " POST /workspaces/api/workspaces/"
-            + id
-            + "/integrate to merge into this branch's parent instead, which stamps nothing.");
+            + "/integrate merges into this branch's parent instead.");
   }
 
   /** The id of the ACTIVE workspace owning {@code branch}, or null — for an error message only. */
@@ -2392,10 +2159,6 @@ public class WorkspaceService {
    * <ul>
    *   <li><b>The repository's main branch</b> — {@link #canCleanupBranch} refuses it too; belt and
    *       braces for the ref everything else forks from.
-   *   <li><b>{@code environment/*}</b> — the deploy refs are fully merged <i>by construction</i>
-   *       (a promotion pushes a released main sha onto them), which is exactly the shape this
-   *       sweep condemns; deleting one would sever the tier's deploy trigger. The caller may pass
-   *       more prefixes to keep; it cannot pass fewer.
    *   <li><b>Workspace-backed branches</b> — {@link #cleanupBranch} deletes the workspace along
    *       with the branch, which is right under a human's click and wrong overnight: a freshly
    *       provisioned workspace with nothing committed yet is "fully merged", and its owner would
@@ -2414,8 +2177,12 @@ public class WorkspaceService {
       List<SweepRepository> repositories, Set<String> keepPrefixes, boolean dryRun) {
     List<SweptBranch> removed = new ArrayList<>();
     List<SweepError> errors = new ArrayList<>();
+    // Every prefix kept is the caller's now. `environment/` used to be hard-coded here because a
+    // release promoted its sha onto the tier's deploy ref, which made those branches fully merged
+    // by construction — exactly the shape this sweep condemns. Nothing writes them any more:
+    // deployment follows the release event, not a ref, so a surviving environment/* branch is a
+    // leftover and the sweep may take it. A deployment that still wants one kept passes it.
     Set<String> protectedPrefixes = new java.util.HashSet<>(keepPrefixes == null ? Set.of() : keepPrefixes);
-    protectedPrefixes.add("environment/");
     int repositoriesExamined = 0;
     int branchesExamined = 0;
 
@@ -2635,28 +2402,10 @@ public class WorkspaceService {
       String commitHash, boolean hasConflicts, String output, boolean cleanedUp) {}
 
   /**
-   * What a successful release answers. Three facts, none derivable from the others: the version
-   * that was just minted, the merge commit carrying both the merge and the bump, and the source
-   * branch — which the merge's parents record as a sha but never as a name.
-   *
-   * <p>Plus the promotions, which are a fourth fact: one entry per deploy branch the release was
-   * pushed to again, each carrying why that push failed ({@code null} when it landed). Empty when
-   * promotion is disabled. <b>A release with a failed promotion still happened</b> — the version is
-   * real, the default branch has it, CI is building it, and only that deploy did not follow. {@link
-   * ReleaseIntegrator} is where that decision lives and why.
-   */
-  public record ReleaseResult(
-      String version,
-      String commitSha,
-      String branch,
-      List<ReleaseIntegrator.Promotion> promotions) {}
-
-  /**
-   * What a successful plain integrate answers. <b>No version</b>, because none was minted — the
-   * absence is the contract, and a null field would have invited a caller to look for one. The
-   * target is here and is not on {@link ReleaseResult} for the mirror-image reason: a release's
-   * target is always the default branch and would be a constant, while an integrate's is whichever
-   * parent this branch forked from.
+   * What a successful integrate answers: the merge commit, the source branch — which the merge's
+   * parents record as a sha but never as a name — and the target it landed on. <b>No version</b>,
+   * because this service mints none: a version belongs to a release, and a release is a release
+   * request in qits-projects.
    */
   public record IntegrateResult(String commitSha, String branch, String targetBranch) {}
 }
