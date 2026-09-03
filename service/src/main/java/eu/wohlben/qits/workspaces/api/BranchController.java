@@ -47,16 +47,21 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Path("/branches")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
-// THE PAIR AT CLASS LEVEL, AND THE HUMAN-ONLY GUARD IN THE METHOD BODIES — because method-level
-// @RolesAllowed on this class is not trustworthy in the deployed binary, measured 2026-09-03:
-// releaseBranch carried {"qits:admin","qits:system"} in the shipped tree (image c7c830ad) and the
-// runtime enforced the class-level admin-only anyway, while executeRelease's byte-identical
-// method annotation WAS enforced. Same file, same spelling, one method honored and one not; the
-// root cause is unfound and this class no longer bets on the mechanism. What is proven to hold:
-// class-level enforcement (merge answered 403 to a system token all along) and code in the body.
-// So the class admits both roles, the machine-and-person doors (release, execute-release) take
-// exactly that, and the person-only doors (merge, cleanup) REFUSE the system role in their first
-// line, where no annotation processor can lose it.
+// THE PAIR AT CLASS LEVEL, AND THE HUMAN-ONLY GUARD IN THE METHOD BODIES. The 403 of 2026-09-03
+// that forced this shape is root-caused (reproduced minimally on this Quarkus, and read out of the
+// deployed binary's security-check registrations): method-level @RolesAllowed was honored all
+// along — but a class-level @RolesAllowed is inherited by EVERY non-private method of the bean and
+// is enforced on INTERNAL calls too, because ArC's subclass overrides them. releaseBranch passed
+// its own widened check and then virtually dispatched into the package-private requestRelease(),
+// which under the then-admin-only class annotation refused the system token with the empty-body
+// 403 that looked like the endpoint's own. executeRelease calls only a private helper — private
+// methods are never intercepted — hence one door open and its twin shut. The rule this class now
+// lives by: an endpoint that WIDENS the class's roles must call only private members of this bean,
+// or every non-private member it reaches must carry the same widened list. This shape is immune by
+// construction — the class admits both roles, the machine-and-person doors (release,
+// execute-release) take exactly that, and the person-only doors (merge, cleanup) REFUSE the system
+// role in their first line, where requireAdmin being PRIVATE is load-bearing: no interceptor ever
+// re-checks it.
 @jakarta.annotation.security.RolesAllowed({"qits:admin", "qits:system"})
 public class BranchController {
 
