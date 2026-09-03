@@ -31,7 +31,7 @@
          and the mandatory -Dqits.variant=oauth|forwardauth|local auth profiles. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-workspaces</artifactId>
-    <version>2026.902.225813</version>
+    <version>2026.903.10848</version>
     <packaging>pom</packaging>
     <name>qits-workspaces</name>
 
@@ -45,7 +45,7 @@
     </modules>
 
     <properties>
-        <qits.eventstream.version>2026.902.53026</qits.eventstream.version>
+        <qits.eventstream.version>2026.902.231856</qits.eventstream.version>
         <!-- Both come out of qits-integrations-quarkus, so they move together. -->
         <qits.db-core.version>2026.902.53026</qits.db-core.version>
         <qits.arch-rules.version>2026.902.53026</qits.arch-rules.version>
