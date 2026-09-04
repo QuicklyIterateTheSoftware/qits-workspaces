@@ -37,16 +37,6 @@ public class FakeRepositoryLookup implements RepositoryLookup {
 
   private final Map<String, String> mainBranches = new ConcurrentHashMap<>();
 
-  /**
-   * Whether a by-name resolution behaves as an unreachable qits-projects does — it throws. The
-   * release door's name form has to tell "no such name" (a 404) from "could not ask" (a 5xx), and
-   * an in-memory map can only be one of them without this switch.
-   *
-   * <p>It is off unless a test turns it on, and a test that turns it on turns it back off: this is
-   * one {@code @ApplicationScoped} bean for the whole module's suite.
-   */
-  private volatile boolean nameResolutionOutage;
-
   private final Map<String, String> archetypes = new ConcurrentHashMap<>();
 
   /**
@@ -62,9 +52,12 @@ public class FakeRepositoryLookup implements RepositoryLookup {
   }
 
   /**
-   * Whether a by-id resolution behaves as an unreachable qits-projects does — it throws. The same
-   * switch {@link #nameResolutionOutage} is, one route over: the wrapper-main posture reads {@code
-   * find}, and "could not ask" has to be tellable from "not a wrapper" there too.
+   * Whether a by-id resolution behaves as an unreachable qits-projects does — it throws. A caller
+   * turns empty into a 404, so "could not ask" has to be tellable from "not there": the wrapper-main
+   * posture reads {@code find} and must not read an outage as "not a wrapper".
+   *
+   * <p>It is off unless a test turns it on, and a test that turns it on turns it back off: this is
+   * one {@code @ApplicationScoped} bean for the whole module's suite.
    */
   private volatile boolean findOutage;
 
@@ -109,30 +102,6 @@ public class FakeRepositoryLookup implements RepositoryLookup {
                     entry.getValue(),
                     archetypes.get(entry.getKey())))
         .toList();
-  }
-
-  /**
-   * The alias table, standing in for qits-projects': {@code (projectId, name)} → the row. Names are
-   * derived from ids by {@link #nameOf}, so a registered repository is addressable both ways and a
-   * caller that confuses the two resolves nothing — which is the whole point of the pair.
-   */
-  @Override
-  public Optional<RepositoryView> findByName(String projectId, String name) {
-    if (nameResolutionOutage) {
-      throw new IllegalStateException("qits-projects unreachable (fake outage)");
-    }
-    if (!PROJECT_ID.equals(projectId) || name == null) {
-      return Optional.empty();
-    }
-    return mainBranches.keySet().stream()
-        .filter(repoId -> registeredName(repoId).equals(name))
-        .findFirst()
-        .flatMap(this::find);
-  }
-
-  /** Make every by-name resolution fail the way an unreachable registry does. Reset it. */
-  public void nameResolutionOutage(boolean broken) {
-    this.nameResolutionOutage = broken;
   }
 
   /** Make every by-id resolution fail the way an unreachable registry does. Reset it. */
@@ -186,7 +155,6 @@ public class FakeRepositoryLookup implements RepositoryLookup {
     mainBranches.clear();
     archetypes.clear();
     names.clear();
-    nameResolutionOutage = false;
     findOutage = false;
     findCalls.set(0);
   }

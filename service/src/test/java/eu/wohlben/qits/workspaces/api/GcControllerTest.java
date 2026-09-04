@@ -25,10 +25,16 @@ import org.junit.jupiter.api.Test;
  * The branch sweep — the nightly gc's door — and, above all, what it must never touch.
  *
  * <p>The fixture is one origin wearing every hat at once: a fully-merged plain branch (the one
- * thing the sweep exists to remove), a fully-merged {@code environment/} ref (merged BY
- * CONSTRUCTION — the exact shape the sweep condemns, protected exactly because of that), a
- * diverged branch (unmerged work), and the main branch. The interesting assertions are the
- * survivors.
+ * thing the sweep exists to remove), a leftover {@code environment/} ref, a diverged branch
+ * (unmerged work), and the main branch. The interesting assertions are the survivors.
+ *
+ * <p><b>{@code environment/} is no longer protected, and that is the change rather than an
+ * oversight.</b> It was hard-coded as a keep-prefix because a release promoted its sha onto the
+ * tier's deploy ref, which made those branches fully merged by construction — the exact shape this
+ * sweep condemns — and deleting one severed the tier's deploy trigger. Nothing writes them now:
+ * deployment follows the release event and no ref at all, so a surviving {@code environment/*} is a
+ * leftover the sweep may take. A caller that still wants one kept passes the prefix, which is what
+ * {@code aCallerMayWidenTheProtectionButNeverNarrowIt} covers.
  */
 @QuarkusTest
 public class GcControllerTest {
@@ -85,7 +91,8 @@ public class GcControllerTest {
 
     assertThat(report.getBoolean("dryRun"), is(true));
     assertThat(report.getList("removed.branch", String.class), hasItem("merged-work"));
-    assertThat(report.getList("removed.branch", String.class), not(hasItem("environment/dev")));
+    // The retired deploy ref is fully merged and unprotected now, so the sweep names it too.
+    assertThat(report.getList("removed.branch", String.class), hasItem("environment/dev"));
     assertThat(report.getList("removed.branch", String.class), not(hasItem("feature")));
     assertThat(report.getList("removed.branch", String.class), not(hasItem("master")));
     // Named, not touched: the ref is still there.
@@ -93,7 +100,7 @@ public class GcControllerTest {
   }
 
   @Test
-  public void aRealRunRemovesOnlyTheMergedPlainBranch() throws Exception {
+  public void aRealRunRemovesEveryMergedPlainBranch() throws Exception {
     String repoId = seedOrigin();
 
     JsonPath report = sweep(repoId, false);
@@ -103,11 +110,36 @@ public class GcControllerTest {
 
     String survivors = originBranches(repoId);
     assertThat(survivors, not(containsString("merged-work")));
-    // The three protections, each surviving for its own reason: the deploy ref (prefix), the
-    // diverged branch (unmerged commits), and the main branch itself.
-    assertThat(survivors, containsString("environment/dev"));
+    assertThat(survivors, not(containsString("environment/dev")));
+    // The two protections that remain, each for its own reason: the diverged branch (unmerged
+    // commits) and the main branch itself.
     assertThat(survivors, containsString("feature"));
     assertThat(survivors, containsString("master"));
+  }
+
+  /** The prefix a deployment still wants kept is the caller's to name — and it holds. */
+  @Test
+  public void aKeptPrefixSurvivesTheSweep() throws Exception {
+    String repoId = seedOrigin();
+
+    JsonPath report =
+        given()
+            .contentType(ContentType.JSON)
+            .body(
+                Map.of(
+                    "dryRun", false,
+                    "repositories",
+                        List.of(Map.of("id", repoId, "name", "test-repo", "mainBranch", "master")),
+                    "keepPrefixes", List.of("environment/")))
+            .when()
+            .post("/workspaces/api/gc/branches")
+            .then()
+            .statusCode(200)
+            .extract()
+            .jsonPath();
+
+    assertThat(report.getList("removed.branch", String.class), not(hasItem("environment/dev")));
+    assertThat(originBranches(repoId), containsString("environment/dev"));
   }
 
   @Test
@@ -122,7 +154,7 @@ public class GcControllerTest {
                     "dryRun", true,
                     "repositories",
                         List.of(Map.of("id", repoId, "name", "test-repo", "mainBranch", "master")),
-                    "keepPrefixes", List.of("merged-")))
+                    "keepPrefixes", List.of("merged-", "environment/")))
             .when()
             .post("/workspaces/api/gc/branches")
             .then()

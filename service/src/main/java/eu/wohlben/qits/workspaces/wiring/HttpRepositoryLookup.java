@@ -143,59 +143,6 @@ public class HttpRepositoryLookup implements RepositoryLookup {
   }
 
   /**
-   * The public identity resolved to the internal one: qits-projects' alias table answers the row
-   * id, and the ordinary by-id read then supplies the view. <b>Two calls rather than one</b>, and
-   * deliberately — the by-name route answers an id alone, and inventing a view out of the two
-   * strings the caller already holds would report a name and a main branch nobody verified.
-   *
-   * <p>Only a 404 from the alias read is {@link Optional#empty()}; every other status and every
-   * transport failure throws, because the release door turns empty into a 404 naming the (project,
-   * name) — so a dead qits-projects folded into it would read as a repository that does not exist.
-   * The by-id read that follows draws the same line for itself.
-   */
-  @Override
-  public Optional<RepositoryView> findByName(String projectId, String name) {
-    if (projectId == null || projectId.isBlank() || name == null || name.isBlank()) {
-      return Optional.empty();
-    }
-    String address = configuredAddress();
-    if (address == null) {
-      // Only reachable in dev/test, where assertConfigured warned instead of throwing.
-      return Optional.empty();
-    }
-    ProjectsProjectRepositories.ByNameResponse answer;
-    try {
-      answer = projectRepositories.byName(projectId, name, projectsBearer.authorization().orElse(null));
-    } catch (WebApplicationException http) {
-      int status = http.getResponse().getStatus();
-      if (status == 404) {
-        return Optional.empty();
-      }
-      throw new IllegalStateException(
-          "qits-projects answered "
-              + status
-              + " while resolving repository '"
-              + name
-              + "' in project "
-              + projectId,
-          http);
-    } catch (RuntimeException transportFailure) {
-      throw new IllegalStateException(
-          "qits-projects unreachable at "
-              + address
-              + " while resolving repository '"
-              + name
-              + "' in project "
-              + projectId,
-          transportFailure);
-    }
-    if (answer == null || answer.repositoryId() == null || answer.repositoryId().isBlank()) {
-      return Optional.empty();
-    }
-    return find(answer.repositoryId());
-  }
-
-  /**
    * The same distinction {@link #find} draws, and it matters more here: an empty list is a project
    * with no repositories, so a failure folded into one would branch a wrapper alone and call that
    * done. Every failure throws, a 404 included — the project id comes from a repository this

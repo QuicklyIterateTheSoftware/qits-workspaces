@@ -25,14 +25,14 @@ public interface RepositoryLookup {
   /**
    * The repository facts this context reads.
    *
-   * <p>{@code projectId} and {@code name} are here for one caller and one reason: {@code
-   * SCMRelease} names the project a release belongs to and the repository a CI selection can
-   * address, and the flow that publishes it holds a repository id and nothing else. {@code name}
-   * is the registered name — the coordinate that is the same on every platform instance, while
-   * {@code id} is whatever that instance's registry minted (a manifest repository's id equals its
-   * name, a self-seeded one's is a UUID). Both are nullable — a registry that does not answer with
-   * one costs the event a field, never the release. The workspace daemon also receives both so its
-   * name-addressed clone lets committed relative submodule URLs resolve to sibling repositories.
+   * <p>{@code projectId} and {@code name} arrived for the {@code SCMRelease} this service used to
+   * publish — the event named the project a release belonged to and the repository a CI selection
+   * could address — and the publisher is qits-projects' now. They stay because the <b>workspace
+   * daemon</b> receives both, so its name-addressed clone lets committed relative submodule URLs
+   * resolve to sibling repositories. {@code name} is the registered name — the coordinate that is
+   * the same on every platform instance, while {@code id} is whatever that instance's registry
+   * minted (a manifest repository's id equals its name, a self-seeded one's is a UUID). Both are
+   * nullable: a registry that does not answer with one costs a label, never a workspace.
    *
    * <p>{@code archetype} joined for the web editor, and it is the fifth field for one question:
    * <b>is this repository a project's wrapper</b> ({@code PROJECT}). Paired with {@code mainBranch}
@@ -65,28 +65,6 @@ public interface RepositoryLookup {
 
   /** The repository behind {@code repoId}, or empty when it does not exist. */
   Optional<RepositoryView> find(String repoId);
-
-  /**
-   * The repository a project-scoped <b>name</b> addresses — {@code (projectId, name)}, the public
-   * identity — or empty when that project holds no repository by that name.
-   *
-   * <p>The row id is opaque and per-instance; the name is the coordinate a pipeline, a clone url
-   * and a human all spell. So a caller that has a name must be able to reach a repository without
-   * ever learning the id, and this is the seam that lets it: {@code POST /branches/release} takes
-   * {@code projectId} + {@code repositoryName} and resolves here.
-   *
-   * <p><b>Empty means "no such name", never "could not ask"</b> — the same distinction {@link
-   * #find} draws and for the same reason: the caller turns empty into a 404, so an unreachable
-   * registry has to throw instead of reporting a live repository as absent.
-   *
-   * <p>A {@code default} for the reason {@link #listByProject} is one: {@link #find} stays the
-   * single abstract method, so a stub can still be written as a lambda. Answering empty is a
-   * supported implementation here — an embedding with no alias table has no names to resolve, and a
-   * caller that addresses by id never asks.
-   */
-  default Optional<RepositoryView> findByName(String projectId, String name) {
-    return Optional.empty();
-  }
 
   /**
    * Every repository registered in a project — what resolves a wrapper's committed submodule urls

@@ -13,7 +13,7 @@ import eu.wohlben.qits.userflows.UserflowRunsAfter;
 import eu.wohlben.qits.userflows.report.ReportAssertions;
 import eu.wohlben.qits.userflows.report.Slugs;
 import eu.wohlben.qits.userflows.report.UserflowReport;
-import eu.wohlben.qits.workspaces.stories.branches.ReleaseDoorIT;
+import eu.wohlben.qits.workspaces.api.TokenValidationBootstrapIT;
 import eu.wohlben.qits.workspaces.stories.support.StoryGitHost;
 import eu.wohlben.qits.workspaces.stories.support.StoryIdentities;
 import eu.wohlben.qits.workspaces.stories.support.StoryNetwork;
@@ -33,8 +33,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.TestMethodOrder;
 
 /**
- * <b>Four ways not to release something</b>, and every one of them is a claim only a <b>packaged</b>
+ * <b>Four ways not to get through a door</b>, and every one of them is a claim only a <b>packaged</b>
  * run with the machine-auth gate on can make.
+ *
+ * <p>The door they are refused at is {@code POST /branches/merge} — one of the two verbs left under
+ * {@code /branches} since the release door went to qits-projects. It stands for the whole JSON API
+ * here: the claims below are about the gate in front of every route, not about merging, which is why
+ * they survived the door they used to be told through.
  *
  * <p>No {@code @QuarkusTest} in this repository can. qits-auth-core's synthetic dev identity holds
  * every platform role and is {@code LaunchMode}-guarded, so under {@code @QuarkusTest} an anonymous
@@ -42,9 +47,9 @@ import org.junit.jupiter.api.TestMethodOrder;
  * NORMAL} mode, where the credential really is the only thing opening a door.
  *
  * <p>Three of the four are about the caller and one is about the platform, and the split is the
- * point: a caller who may not release, a caller who is nobody, a token that is not this platform's —
+ * point: a caller who may not act, a caller who is nobody, a token that is not this platform's —
  * and a registry that could not be asked, which is the one case where the honest answer is a 5xx.
- * Folding that into the 404 the door already has would tell a pipeline step its repository had been
+ * Folding that into the 404 the door already has would tell a caller its repository had been
  * deleted.
  *
  * <p><b>Every story here is also a negative claim about the git host</b>, and that is what makes
@@ -66,15 +71,15 @@ import org.junit.jupiter.api.TestMethodOrder;
 @QuarkusIntegrationTest
 @TestProfile(StoryProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-public class ReleaseDoorRefusalIT {
+public class MergeDoorRefusalIT {
 
   static final String CATEGORY = "refusals";
 
   static final String CATEGORY_SLUG = Slugs.slug(CATEGORY);
 
-  static final String WRONG_ROLE = "A caller without qits:admin cannot release anything";
+  static final String WRONG_ROLE = "A caller without qits:admin cannot move a branch";
 
-  static final String ANONYMOUS = "An unauthenticated caller never reaches the release door";
+  static final String ANONYMOUS = "An unauthenticated caller never reaches the branch doors";
 
   static final String OUTAGE = "A registry that cannot be asked is not a repository that is not there";
 
@@ -88,10 +93,9 @@ public class ReleaseDoorRefusalIT {
 
   static final String STRANGER_SLUG = Slugs.slug(STRANGER);
 
-  /** The door every story here is refused at, and the query it is addressed by. */
+  /** The door every story here is refused at, and the scope it is addressed by. */
   private static final String DOOR =
-      StoryTarget.BRANCH_EXECUTE_RELEASE_PATH
-          + StoryTarget.releaseQuery(StoryTarget.PROJECT, StoryTarget.SERVICE_REPO);
+      StoryTarget.BRANCH_MERGE_PATH + StoryTarget.repositoryQuery(StoryTarget.REFUSAL_REPO_ID);
 
   /** Every credential a story here minted, so the reports can be searched for all of them. */
   private static final List<String> MINTED = new ArrayList<>();
@@ -114,10 +118,11 @@ public class ReleaseDoorRefusalIT {
   @UserStory(value = WRONG_ROLE, category = CATEGORY)
   @UserStoryDescription(
       """
-      Releasing writes a repository's default branch and deploys what it wrote, so it is the platform
-      admin's verb and nobody else's. A caller here is real — the idp signed its token, the audience
-      is this service's, the request is well formed — and it carries qits:reader, a role this
-      platform genuinely issues and this service names on no route at all.
+      Merging one branch into another moves a ref in somebody's repository, so it is the platform
+      admin's verb and nobody else's — a person's door, and the two that are left under /branches are
+      both a person's. A caller here is real — the idp signed its token, the audience is this
+      service's, the request is well formed — and it carries qits:reader, a role this platform
+      genuinely issues and this service names on no route at all.
 
       The answer is 403 rather than 401, and the difference matters to a client: 401 says "I do not
       know who you are", which a caller fixes by presenting a credential, and 403 says "I know
@@ -126,7 +131,7 @@ public class ReleaseDoorRefusalIT {
       What it costs this platform is one refusal and nothing else. The repository is not resolved,
       the mirror is not refreshed, and the git host never hears about it.
       """)
-  @UserflowRunsAfter(ReleaseDoorIT.class)
+  @UserflowRunsAfter(TokenValidationBootstrapIT.class)
   @Order(1)
   void aCallerWithTheWrongRoleIsRefused(Interactions story) {
     NetworkCapture.actor(StoryIdentities.WRONG_ROLE);
@@ -136,7 +141,7 @@ public class ReleaseDoorRefusalIT {
 
     StoryIdentities.bearer(given(), bearer)
         .contentType(ContentType.JSON)
-        .body(StoryTarget.releaseBody(StoryTarget.WORK_BRANCH, "not mine to release"))
+        .body(StoryTarget.mergeBody(StoryTarget.WORK_BRANCH, "some-epic"))
         .when()
         .post(DOOR)
         .then()
@@ -160,7 +165,7 @@ public class ReleaseDoorRefusalIT {
       """
       Anonymous is not a security state in this service — it means "no name for the audit row", and
       most of what this process does happens behind an edge that has already authenticated somebody.
-      What makes the release door different is that it is annotated, and an annotated route asks the
+      What makes this door different is that it is annotated, and an annotated route asks the
       identity for a role.
 
       With the machine-auth gate on there are exactly two ways to be somebody: an idp-minted bearer,
@@ -172,14 +177,14 @@ public class ReleaseDoorRefusalIT {
       happily: it holds every platform role, and it exists in dev and test only. A packaged process
       runs in NORMAL mode, and this story is the proof that the difference is real.
       """)
-  @UserflowRunsAfter(ReleaseDoorIT.class)
+  @UserflowRunsAfter(TokenValidationBootstrapIT.class)
   @Order(2)
   void anAnonymousCallerIsRefused(Interactions story) {
     NetworkCapture.actor(StoryIdentities.ANONYMOUS);
 
     given()
         .contentType(ContentType.JSON)
-        .body(StoryTarget.releaseBody(StoryTarget.WORK_BRANCH, "who am i"))
+        .body(StoryTarget.mergeBody(StoryTarget.WORK_BRANCH, "some-epic"))
         .when()
         .post(DOOR)
         .then()
@@ -194,21 +199,21 @@ public class ReleaseDoorRefusalIT {
   @UserStory(value = OUTAGE, category = CATEGORY)
   @UserStoryDescription(
       """
-      The release door takes the repository's public identity and resolves it through qits-projects.
-      Two things can go wrong there and they must not answer the same way.
+      Every branch verb resolves its repository through qits-projects before it touches git. Two
+      things can go wrong there and they must not answer the same way.
 
-      A (project, name) pair the registry does not know is a 404 naming the pair: the caller asked
-      about a repository that is not there. A registry that could not be ASKED is a 5xx — because a
-      pipeline step reading a 404 concludes its repository has been deleted, and acts on it. Only a
-      404 from the registry becomes "empty"; every other status and every transport failure throws,
-      and that distinction is most of what the RepositoryLookup port exists for.
+      A repository the registry does not know is a 404: the caller asked about something that is not
+      there. A registry that could not be ASKED is a 5xx — because a caller reading a 404 concludes
+      its repository has been deleted, and acts on it. Only a 404 from the registry becomes "empty";
+      every other status and every transport failure throws, and that distinction is most of what
+      the RepositoryLookup port exists for.
 
       The refusal is armed on the far side rather than requested by the caller: nothing in the URL
-      of a release could say "the registry is down tonight", because the registry being down is a
-      property of the registry. And it stops the flow at the first hop — the git host is never
-      reached, so an outage costs this platform a failed request and not a clone.
+      could say "the registry is down tonight", because the registry being down is a property of the
+      registry. And it stops the flow at the first hop — the git host is never reached, so an outage
+      costs this platform a failed request and not a clone.
       """)
-  @UserflowRunsAfter(ReleaseDoorIT.class)
+  @UserflowRunsAfter(TokenValidationBootstrapIT.class)
   @Order(3)
   void aRegistryOutageIsNotAMissingRepository(Interactions story) {
     NetworkCapture.actor(StoryIdentities.PIPELINE);
@@ -219,7 +224,7 @@ public class ReleaseDoorRefusalIT {
       StoryPeers.refuse("/projects/");
       StoryIdentities.bearer(given(), bearer)
           .contentType(ContentType.JSON)
-          .body(StoryTarget.releaseBody(StoryTarget.WORK_BRANCH, "while the registry is down"))
+          .body(StoryTarget.mergeBody(StoryTarget.WORK_BRANCH, "some-epic"))
           .when()
           .post(DOOR)
           .then()
@@ -229,8 +234,8 @@ public class ReleaseDoorRefusalIT {
     }
     story
         .note(
-            "qits-projects answers 503 and the door answers 5xx — never the 404 it uses for a name"
-                + " that resolves to nothing, because a pipeline step told 404 concludes its"
+            "qits-projects answers 503 and the door answers 5xx — never the 404 it uses for a"
+                + " repository that resolves to nothing, because a caller told 404 concludes its"
                 + " repository has been deleted")
         .as("outage-is-not-absence")
         ;
@@ -259,7 +264,7 @@ public class ReleaseDoorRefusalIT {
       repository is never resolved, the mirror is never refreshed, and no ref is read — and the idp
       is not asked either, because the key that failed was one this service already held.
       """)
-  @UserflowRunsAfter(ReleaseDoorIT.class)
+  @UserflowRunsAfter(TokenValidationBootstrapIT.class)
   @Order(4)
   void aStrangersTokenIsRefused(Interactions story) {
     MockIdp idp = MockIdp.attach();
@@ -271,7 +276,7 @@ public class ReleaseDoorRefusalIT {
 
     StoryIdentities.bearer(given(), bearer)
         .contentType(ContentType.JSON)
-        .body(StoryTarget.releaseBody(StoryTarget.WORK_BRANCH, "not this platform's"))
+        .body(StoryTarget.mergeBody(StoryTarget.WORK_BRANCH, "some-epic"))
         .when()
         .post(DOOR)
         .then()
@@ -327,10 +332,7 @@ public class ReleaseDoorRefusalIT {
         StoryPeers.PROJECTS,
         StoryPeers.label(
             "GET",
-            StoryPeers.PROJECT_PATH
-                + StoryTarget.PROJECT
-                + "/repositories/by-name/"
-                + StoryTarget.SERVICE_REPO,
+            StoryPeers.REPOSITORY_PATH + StoryTarget.REFUSAL_REPO_ID,
             StoryPeers.REFUSED_STATUS));
     // TWO: the door, and the one hop it got to before stopping. The git host is named as an absence
     // because "it stopped at the registry" is a claim about where it did NOT get to.
@@ -366,7 +368,7 @@ public class ReleaseDoorRefusalIT {
         NetworkEdge.HTTP,
         actor,
         StoryTarget.SERVICE,
-        "POST " + StoryTarget.BRANCH_EXECUTE_RELEASE_PATH + " -> " + status);
+        "POST " + StoryTarget.BRANCH_MERGE_PATH + " -> " + status);
   }
 
   /** One arrow in and none out — the shape of a refusal that cost the platform nothing. */

@@ -7,7 +7,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-workspaces</artifactId>
-        <version>2026.904.44234</version>
+        <version>2026.904.131430</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -64,14 +64,6 @@
                  is still empty. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-eventstream</artifactId>
-        </dependency>
-        <dependency>
-            <!-- This service's event vocabulary — today just SoftwareRelease. Declared explicitly
-                 rather than taken transitively through qits-eventstream above, because this module
-                 uses the class by name (bus/SoftwareReleaseAnnouncer constructs it) and a
-                 compile-time use belongs in the pom that makes it. -->
-            <groupId>${project.groupId}</groupId>
-            <artifactId>qits-workspaces-events</artifactId>
         </dependency>
         <dependency>
             <!-- DbRetry, used by name in ContainerProxyRoute's daemon lookup. It also arrives

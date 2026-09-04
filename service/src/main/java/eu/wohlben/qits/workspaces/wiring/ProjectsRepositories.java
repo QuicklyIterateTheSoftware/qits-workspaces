@@ -49,10 +49,10 @@ public interface ProjectsRepositories {
    * {@code backupUrl} and {@code lastBackup}; not binding to them is what keeps that service free to
    * change them, and {@code ignoreUnknown} is what makes that true rather than aspirational.
    *
-   * <p>{@code projectId} joined when {@code SCMRelease} landed: the event names the project a
-   * release belongs to, and this is the only place the workspaces context can learn it. {@code
-   * name} joined for the same event, one defect later — {@code id} is per-platform (a self-seeded
-   * repository's is a UUID) and a committed CI selection can only name the registered name.
+   * <p>{@code projectId} and {@code name} joined for the {@code SCMRelease} this service used to
+   * publish and stayed for the workspace daemon, which clones by the public {@code (project, name)}
+   * pair — {@code id} is per-platform (a self-seeded repository's is a UUID) and no committed url
+   * can name it.
    *
    * <p>{@code archetype} joined for the web editor, and it is the one field bound here that this
    * context deliberately did <em>not</em> bind before. It answers exactly one question — is this

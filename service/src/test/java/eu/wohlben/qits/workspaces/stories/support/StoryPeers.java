@@ -29,7 +29,7 @@ import java.util.concurrent.Executors;
  *
  * <pre>
  * the repository registry     qits-projects         GET  /projects/api/repositories/{id}
- *                                                   GET  /projects/api/projects/{p}/repositories/by-name/{n}
+ *                                                   GET  /projects/api/projects/{p}/repositories
  * the container orchestrator  qits-containers       GET/PUT/DELETE /containers/api/containers/{owner}/workspace…
  * the identity provider       qits-platform-idp     POST /idp/token          (this service's own credentials)
  *                                                   POST /idp/api/clients    (a workspace's commissioned one)
@@ -60,9 +60,9 @@ import java.util.concurrent.Executors;
  * orchestrator's would be.
  *
  * <p>The second is {@link #refuse}, and it exists because <b>no story-controlled value reaches these
- * paths in a way a refusal could key on</b>: the release door's registry read is
- * {@code /projects/api/projects/qits/repositories/by-name/story-service} for a repository that
- * exists, and "the registry is down tonight" is a property of the registry rather than of the name.
+ * paths in a way a refusal could key on</b>: a door's registry read is {@code
+ * /projects/api/repositories/<id>} for whatever repository the caller named, and "the registry is
+ * down tonight" is a property of the registry rather than of the id.
  * It is spelled as a file — written by the one story about an outage, in a {@code try}/{@code
  * finally} that always clears it, wiped again when the stub starts, and read fresh on every request.
  * A file rather than a static field because the stub is started by the <b>test profile</b>, which a
@@ -77,8 +77,8 @@ import java.util.concurrent.Executors;
  * first story that needs any of them and never again — and they draw as ONE arrow, because an edge
  * is {@code (kind, from, to, label)} and the three agree in all four.
  *
- * <p>The corollary to know when running one class alone: {@code stories.branches.ReleaseDoorIT}
- * claims that arrow, and any other story class run on its own inherits it and fails its own edge
+ * <p>The corollary to know when running one class alone: the first workspace story claims that
+ * arrow, and any other story class run on its own inherits it and fails its own edge
  * count — loudly, which is the right way for that assumption to break. Measured elsewhere the other
  * way: at {@code expires_in: 1} the credential outlives some stories and not others, and the arrow
  * appears in whichever diagram happened to be more than a second after the last, which is a {@code
@@ -333,17 +333,10 @@ public final class StoryPeers {
   }
 
   private static Answer projectRoute(String path) {
-    // /projects/api/projects/{projectId}/repositories[/by-name/{name}]
+    // /projects/api/projects/{projectId}/repositories — the alias route the release door resolved
+    // its public (project, name) pair through went with the door.
     String rest = path.substring(PROJECT_PATH.length());
     String[] segments = rest.split("/");
-    if (segments.length == 4 && "repositories".equals(segments[1]) && "by-name".equals(segments[2])) {
-      return byName(segments[0], segments[3])
-          .map(row -> new Answer(200, "{\"repositoryId\":\"" + row.id() + "\"}"))
-          .orElseGet(
-              () ->
-                  new Answer(
-                      404, notFound("no repository " + segments[3] + " in " + segments[0])));
-    }
     if (segments.length == 2 && "repositories".equals(segments[1])) {
       String entries =
           rows().stream()
@@ -478,12 +471,6 @@ public final class StoryPeers {
 
   private static Optional<Repository> registered(String repoId) {
     return rows().stream().filter(row -> row.id().equals(repoId)).findFirst();
-  }
-
-  private static Optional<Repository> byName(String projectId, String name) {
-    return rows().stream()
-        .filter(row -> row.projectId().equals(projectId) && row.name().equals(name))
-        .findFirst();
   }
 
   private static List<Repository> rows() {
@@ -629,11 +616,6 @@ public final class StoryPeers {
   /** The repository read by row id — a uuid scrubs, an authored id survives. Deliberately both. */
   public static String repositoryRead(String repoId) {
     return read(REPOSITORY_PATH + repoId);
-  }
-
-  /** The repository resolved by its public identity — two authored literals, so nothing scrubs. */
-  public static String byNameRead(String projectId, String name) {
-    return read(PROJECT_PATH + projectId + "/repositories/by-name/" + name);
   }
 
   /** The container this workspace's provision addressed. */

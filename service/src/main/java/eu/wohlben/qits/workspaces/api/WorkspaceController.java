@@ -46,9 +46,6 @@ public class WorkspaceController {
 
   @Inject WorkspaceService workspaceService;
 
-  /** The shared request-creating half of both release doors lives with the branch door. */
-  @Inject BranchController branchController;
-
   @Inject WorkspaceMapper workspaceMapper;
 
   /**
@@ -299,15 +296,18 @@ public class WorkspaceController {
    * Merge this workspace's branch into an arbitrary target, in a host-side worktree, without a
    * push.
    *
-   * <p>409 when the target resolves to the repository's default branch, naming both doors that do
-   * write it: {@code /release} and {@code /integrate}.
+   * <p>409 when the target resolves to the repository's default branch, which this service does not
+   * write at all — a release request in qits-projects does. {@code /integrate} is the door for a
+   * merge into this branch's parent.
    */
   @POST
   @Path("/{id}/merge")
   @APIResponse(responseCode = "200", description = "Merged.")
   @APIResponse(
       responseCode = "409",
-      description = "The target is the repository's default branch. Use /integrate or /release.",
+      description =
+          "The target is the repository's default branch. Use /integrate, or ask qits-projects for"
+              + " a release request.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   @APIResponse(
       responseCode = "404",
@@ -321,84 +321,6 @@ public class WorkspaceController {
         result.commitHash(), result.hasConflicts(), result.output());
   }
 
-  /**
-   * @param summary the commit's subject after the scope. Capped at 100 because a conventional
-   *     subject budget is 72 and {@code release(2026.731.193059): } already costs ~24 of it — the
-   *     cap lets the summary be the whole of what is left and no more.
-   */
-  public static record ReleaseRequest(@NotBlank @Size(max = 100) String summary) {
-    /**
-     * @param promotions one entry per deploy branch this release was pushed to again, empty when
-     *     promotion is disabled
-     * @see eu.wohlben.qits.workspaces.control.WorkspaceService.ReleaseResult
-     */
-    public record Response(
-        String version, String commitSha, String branch, List<Promotion> promotions) {
-
-      /**
-       * @param branch the deploy branch
-       * @param error why that promotion failed, {@code null} when it landed. <b>A 200 with an
-       *     {@code error} here is a release that happened and did not deploy from that branch</b> —
-       *     show it.
-       */
-      public record Promotion(String branch, String error) {}
-
-      /** The one mapping, so the two release doors cannot answer with two shapes. */
-      static Response of(WorkspaceService.ReleaseResult result) {
-        return new Response(
-            result.version(),
-            result.commitSha(),
-            result.branch(),
-            result.promotions().stream()
-                .map(promotion -> new Promotion(promotion.branch(), promotion.error()))
-                .toList());
-      }
-    }
-  }
-
-  /**
-   * Release this workspace: merge its branch into the repository's default branch, stamped with a
-   * fresh {@code YYYY.MMDD.HHMMSS} version, as <b>one</b> commit — {@code release(<version>):
-   * <summary>} — which is then pushed through the ordinary git host, where the ordinary
-   * post-receive fires and the ordinary pipeline builds it. A {@code SCMRelease} event is
-   * published the instant the push is accepted.
-   *
-   * <p><b>The one door into the default branch</b>, and the target is not a parameter: it is always
-   * that branch, which is the feature. Workspace-keyed, so it lives here rather than on {@code
-   * /branches} — the rule {@link BranchController}'s own javadoc supplies.
-   *
-   * <p>The failures are 409s and they are told apart structurally. Each body carries the usual
-   * {@code message} plus an additive {@code reason} — {@code CONFLICT}, {@code MERGE_CONFLICT},
-   * {@code NOT_FAST_FORWARD}, {@code ALREADY_INTEGRATED}, {@code PUSH_REJECTED} — and, for the two
-   * conflict modes, a {@code conflicts} array of the conflicted paths. A conflict or a lost race
-   * released <b>nothing</b> and left the default branch byte-identical; "already integrated" is what
-   * a lost 200 looks like on retry and means the work is in.
-   */
-  @POST
-  @Path("/{id}/release")
-  @APIResponse(
-      responseCode = "200",
-      description =
-          "The release request for this workspace's branch, created or converged — poll it until"
-              + " RELEASED. The workspace resolves when the gated release executes, not at this"
-              + " call.")
-  @APIResponse(
-      responseCode = "400",
-      description = "No summary, an oversized one, or a workspace with no branch to release.",
-      content = @Content(schema = @Schema(implementation = ApiError.class)))
-  @APIResponse(
-      responseCode = "404",
-      description = "No such workspace.",
-      content = @Content(schema = @Schema(implementation = ApiError.class)))
-  public BranchController.ReleaseRequested release(
-      @PathParam("id") Long id, @Valid ReleaseRequest request) {
-    // The door split: what used to merge here at once is a release request now, gated on the
-    // build ledger and executed through /branches/execute-release when green — whose claimed arm
-    // is what resolves this workspace, exactly as the synchronous door did.
-    WorkspaceService.ReleaseCoordinates where = workspaceService.releaseCoordinates(id);
-    return branchController.requestRelease(where.repoId(), where.branch(), request.summary(), null);
-  }
-
   /** @param summary the commit's subject after the {@code integrate(<branch>)} scope. */
   public static record IntegrateRequest(@NotBlank @Size(max = 100) String summary) {
     /** @see eu.wohlben.qits.workspaces.control.WorkspaceService.IntegrateResult */
@@ -409,17 +331,15 @@ public class WorkspaceController {
    * Integrate this workspace into <b>its parent branch</b>: a {@code task/…} landing on the {@code
    * epic/…} it forked from, as one pushed merge commit — {@code integrate(<branch>): <summary>}.
    *
-   * <p><b>No version, and that is the difference.</b> This stamps nothing, bumps no manifest, sends
-   * no {@code qits.release} push option and publishes no {@code SCMRelease}; the response
-   * carries no {@code version} field for the same reason. Releasing is what the epic then does with
-   * {@code /release}. A workspace forked straight off the default branch is refused with a 409
-   * naming that endpoint, because its parent is the branch only a release may write.
+   * <p><b>No version, and that is the difference.</b> This stamps nothing and bumps no manifest;
+   * the response carries no {@code version} field for the same reason. Releasing the epic is a
+   * release request in qits-projects, and a workspace forked straight off the default branch is
+   * refused with a 409 naming it, because its parent is the one branch this service does not write.
    *
-   * <p>Everything else is the release flow exactly — repository lease, merge-tree preflight,
-   * detached worktree, {@code merge --no-ff}, one two-parent commit, a fast-forward push through
-   * receive-pack, worktree cleanup in a {@code finally}, and the same 409 family with the same
-   * {@code reason} values. The workspace resolves to {@code INTEGRATED} and its branch is deleted,
-   * as it does after a release.
+   * <p>The mechanics are what they always were — repository lease, merge-tree preflight, detached
+   * worktree on a private mirror, {@code merge --no-ff}, one two-parent commit, a fast-forward push
+   * through receive-pack, worktree cleanup in a {@code finally}, and the 409 family with its {@code
+   * reason} values. The workspace resolves to {@code INTEGRATED} and its branch is deleted.
    */
   @POST
   @Path("/{id}/integrate")
@@ -436,7 +356,7 @@ public class WorkspaceController {
       responseCode = "409",
       description =
           "Nothing landed and the target is unchanged — including when the parent is the default"
-              + " branch, which only /release may write. `reason` says which refusal.",
+              + " branch, which only the release flow writes. `reason` says which refusal.",
       content = @Content(schema = @Schema(implementation = ApiError.class)))
   public IntegrateRequest.Response integrate(
       @PathParam("id") Long id, @Valid IntegrateRequest request) {
