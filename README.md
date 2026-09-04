@@ -387,3 +387,5 @@ Not covered anywhere yet: **startup reconciliation** of workspaces against the l
 (containerless-but-live-branch → STOPPED, dangling-volume reaping). That logic lives in the
 repositories context's `RepositoryDiscoveryService`, which walks the repositories data dir; this
 context has no reconciler of its own.
+
+Released through the new release-request flow on 2026-09-04, verifying the deploy path end to end.
