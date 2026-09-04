@@ -49,11 +49,13 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 @Consumes(MediaType.APPLICATION_JSON)
 // ADMIN AT CLASS LEVEL, AND THE SAME REFUSAL IN THE METHOD BODIES. Both doors left here are a
 // person's: merging a branch and deleting one are what somebody clicks in the branch list, and no
-// machine on this platform asks for either. The class annotation is what enforces it — measured
-// 2026-09-03, method-level @RolesAllowed on this class is not trustworthy in the deployed binary
-// (one method's byte-identical annotation was honored and another's was not, root cause unfound),
-// so the guard is also spelled in the first line of each body, where no annotation processor can
-// lose it. Belt and braces on purpose: this class no longer bets on the mechanism.
+// machine on this platform asks for either — the machine-and-person release doors left with the
+// release flow (qits-projects executes releases now). The 403 of 2026-09-03 is root-caused: a
+// class-level @RolesAllowed is inherited by EVERY non-private method of the bean and enforced on
+// INTERNAL calls too, because ArC's subclass overrides them — so an endpoint that widens the
+// class's roles must call only private members. With every door here person-only, the class list
+// and the method bodies agree by construction; the body-level refusal stays as the belt that
+// survives any future widening.
 @jakarta.annotation.security.RolesAllowed("qits:admin")
 public class BranchController {
 
