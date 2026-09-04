@@ -25,7 +25,8 @@
 # so the SPA's .gitignore keeps it out of git — which docker does not read — but it is now the one
 # artefact the image build CONSUMES rather than produces: @qits/ui-components lives only on the
 # platform's npm registry, which a RUN step in a docker build can reach by no address, so the bundle
-# is built by .config/qits/ci-post-receive.yml beforehand and has to survive into the context.
+# is built by .config/qits/ci-event-release.yml beforehand — and by ci-event-release-request.yml
+# when the QA pipeline builds a fold — and has to survive into the context.
 # Re-adding the exclusion turns the image build red at the `test -f` guard.
 
 # Agent scratch, and the one entry the sibling repos do not carry: `.claude/worktrees/` holds full
