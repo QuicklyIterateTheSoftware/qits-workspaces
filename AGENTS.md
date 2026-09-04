@@ -1306,7 +1306,8 @@ build-time key; it would silently take the default, which is this repo's own wor
 
 **It is opted in by NAME, not by `skipITs`.** The root pom keeps `skipITs=true`, because failsafe
 has one run per module and flipping it would turn the five docker-backed `Daemon*IT` back on with
-it. Run it — and `.config/qits/ci-event-userflows.yml` runs it — as a comma list:
+it. Run it — and the userflow half of `.config/qits/ci-event-release-request.yml` runs it — as a comma
+list:
 
     ./mvnw verify -DskipITs=false -Dquarkus.quinoa=false \
       -Dit.test=TokenValidationBootstrapIT,WorkspaceProvisionIT,EditorEnsureIT,OperatorReadsIT,MergeDoorRefusalIT
@@ -1402,6 +1403,7 @@ class orderer is installed the one way Quarkus permits — the
 `junit.quarkus.orderer.secondary-orderer` line in `service`'s test properties; a local
 `junit-platform.properties` hard-fails surefire.
 
-`.config/qits/ci-event-userflows.yml` publishes the reports per commit as the docs bundle
-`@userflows/qits-workspaces`, and is **non-gating by design**: it is a separate file from
-`ci-post-receive.yml` so a red story does not cost the branch its image.
+The userflow half of `.config/qits/ci-event-release-request.yml` publishes the reports as the docs
+bundle `@userflows/qits-workspaces` — once per release-request fold, since per-push CI retired — and
+is **non-gating by design**: it declares `gating: false`, so a red story shows the run red without
+holding the fold at qits-projects' release gate.
