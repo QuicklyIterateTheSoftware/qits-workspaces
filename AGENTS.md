@@ -69,17 +69,21 @@ split package:
   with no container, no database and no augmentation. `domain` builds it from config in exactly one
   bean (`GitMirrorRegistry`) and calls it through a handful of records. The boundary is deliberate:
   the same machinery could move into a daemon of its own, or into qits-artifacts as in-process JGit,
-  without the release flow noticing.
+  without the integrate flow noticing.
 - `domain/` — `entity`, `persistence`, `dto`, `mapper`, `control`, `error`. Framework-free in the
   sense that matters: no JAX-RS, no websockets. Entities are Panache active-record with public
   fields; mappers are MapStruct `@Mapper(componentModel = "jakarta")`. It depends on
   qits-eventstream for the causation persistence trio and nothing else out of that jar — see
   "The causation stamp on every push" for why the boundary reads *seams* rather than *the bus*.
 - `service/` — `api` (JAX-RS + SSE, including the raw vertx routes), `daemonhost` (the control
-  socket and registry), `bus` (the event-bus wiring), `wiring`, `security`.
-- `workspaces-events/` — `events`, and nothing else. Plain records on `qits-eventstream`, no CDI:
-  this is the vocabulary a *consumer* depends on, which is why it is not a package inside `domain`.
-  `domain` does not depend on it — the domain's seam is a port, and the bus stays in the deployable.
+  socket and registry), `bus` (what is left of the event-bus wiring: the push causation stamp),
+  `wiring`, `security`.
+
+There **was** a `workspaces-events/` module — `events` and nothing else, the vocabulary a consumer
+depended on — holding `SCMRelease`. It went with the release door on 2026-09-03: qits-projects
+publishes that event now and declares its own identical record, and no other repository ever
+imported this jar (qits-ci keeps a local copy of its own). Do not reintroduce the module for an
+event this service does not publish.
 
 `control/` is flat on purpose, and deliberately stayed flat as the context grew: the monorepo split
 it across `domain.repository`, `domain.workspace`, `domain.service`, `domain.bootstrap`,
@@ -119,9 +123,9 @@ new entity that skips the decision fails the build naming the class. Two in, fou
   the capture ingest) run on the request thread, so the `CausationStamp` listener reads the REST
   filter's restored scope. Nothing is set as data because nothing crosses an executor.
 - **`WorkspaceEvent`** — in, and it is the one that carries the trace. The workspace row says why
-  the unit of work exists; a MERGED/RELEASED/INTEGRATED entry answers to whatever asked for *that*
-  landing. All six `recordEvent` sites are on the flow's own thread, and the machine caller worth
-  tracing is `POST /workspaces/api/branches/release`, driven by a pipeline step.
+  the unit of work exists; a MERGED/INTEGRATED entry answers to whatever asked for *that* landing.
+  All six `recordEvent` sites are on the flow's own thread, including the ones a machine caller
+  drives with a bearer of its own.
 - **`ServiceEvent`** — out. `ServiceEventPersister` writes on supervisor/scheduler threads with no
   request context (that is what its `@ActivateRequestContext` is for), no scope stands there and no
   cause is in reach as data. The column would be null forever.
@@ -250,7 +254,7 @@ Three things follow, and each is a way to get this wrong:
 **What is deliberately not wrapped**, beyond the read-seam rules above (which all still hold — stay
 outside `WorkspaceService`'s `synchronized` methods, and never split a multi-op bracket):
 
-- **The workflow verbs** — `createWorkspace`, `merge*`, `release*`, `cleanupBranch`,
+- **The workflow verbs** — `createWorkspace`, `merge*`, `integrateWorkspace`, `cleanupBranch`,
   `discardWorkspace`. They orchestrate pushes and containers, so their bodies are not database-only
   and re-running one is not a re-run of a write.
 - **`ServiceEventService.publish`** and the other fail-soft diagnostics: dropping one is the
@@ -470,39 +474,6 @@ artifactId. Any change to it must be mirrored in
 [qits-workspace-daemon](https://github.com/QuicklyIterateTheSoftware/qits-workspace-daemon) and bump
 `DaemonProtocol.CAPABILITY_VERSION`. `DaemonCodecTest` runs on both sides and is what catches drift.
 
-## The version bump engine
-
-`VersionStamp` + `VersionBumper` in `domain/…/control/` write a release version into a checkout.
-Pure: they read and write files under one directory and touch nothing else, which is what lets the
-release flow call them inside a detached worktree before any ref has moved. Only a release calls
-them; a plain integrate never reaches this code.
-
-`VersionStamp.of(Instant)` is `YYYY.MMDD.HHMMSS` — `2026.731.193059` — computed as **integer
-arithmetic in UTC**, so no identifier can carry a leading zero. That is the whole point of the
-shape: the requested `$year.$month.$day-HHMMSS` is invalid semver outright, and its obvious repair
-is valid at 19:30:59 and *invalid* at 09:30:59, a bug that passes every daytime test.
-
-**Both bumpers splice character spans into the original text; neither ever round-trips a tree.** A
-re-serialized pom reformats the whole file, and a re-serialized `package-lock.json` reorders
-thousands of lines including the `resolved` URLs this platform pins deliberately. The one thing to
-know before touching `PomVersions`: **the JDK's StAX `Location.getCharacterOffset()` is exact only
-inside the scanner's first 8192-character buffer** — measured, 231 of 2857 start elements wrong
-across the platform's 45 poms, and every real service pom is bigger than one buffer. Line/column
-was exact for all 2857 and is what the locator uses. Jackson's char offsets have no such caveat
-(74,075 string values, all exact), but its string values are decoded lazily, so `currentLocation()`
-is only past the literal *after* `getText()` has been called.
-
-What moves: every reactor pom's own `<version>` and its in-reactor `<parent><version>` — one
-element per pom, six for a five-module reactor — plus any *literal* in-reactor dependency version,
-of which the platform has zero (all 20 are `${project.version}`). The reactor is walked by
-`<module>`, never by directory scan, which is what keeps `.claude/worktrees/` out without an
-exclusion list. On the npm side exactly three fields: `package.json`'s `version` and the lock's
-`.version` and `.packages[""].version`, the three `npm ci` compares. `projects/*/package.json` is
-bumped too — for the publishable library repos that inner manifest is the released one.
-
-A missing or unparseable manifest **fails loudly**. A bump that silently skips a file ships a
-release whose artifacts still carry the previous version, and that is discovered much later.
-
 ## The mirror, and what it replaced
 
 Nothing here opens the shared volume of bare origins any more — there is no config key naming it and
@@ -524,139 +495,103 @@ Three kinds of git call, and the distinction decides correctness:
   polls it. Nothing that *decides* anything reads through the window — `canCleanupBranch` forces a
   refresh, and a refresh that fails leaves the counts UNKNOWN, which refuses.
 - **Writes** are pushes. All of them. `createBranch` is `push <from>:refs/heads/<new>`, cleanup and
-  discard are `push :refs/heads/<branch>`, a merge is a worktree on the mirror plus
-  `push HEAD:refs/heads/<target>`, a release is that plus the tag and then the same commit again
-  onto the environment branch. There is no other door, which is the property the whole change exists
-  to establish.
+  discard are `push :refs/heads/<branch>`, and a merge is a worktree on the mirror plus
+  `push HEAD:refs/heads/<target>`. There is no other door, which is the property the whole change
+  exists to establish.
 
-Only a release's pushes carry `-o qits.release` — the default branch's, and the promotion that
-follows it; nothing else writes the default branch, so nothing else needs an option. The default
-branch's push carries a **second** option, `-o qits.no-ci`, when the release also has a deploy
-branch to push: one sha on two refs is two builds and only the deploy branch's means anything. The
-mirror is a **cache**: delete it and the next request re-clones.
+**Only one push option is left, and it is not a release's.** `-o qits.release` went with the release
+door — the git host's protection hook guards the default branch alone, and nothing here writes one —
+and so did the `-o qits.no-ci` that quieted a release's trunk push. What survives is
+`RepoMirror.createBranch`'s own `-o qits.no-ci`: a branch create points at a commit the host already
+built, so a build for it would be a redundant run per created branch (an aggregate workspace creates
+one per registered submodule). The mirror is a **cache**: delete it and the next request re-clones.
 
-## The two doors: release and integrate
+## The release door left, and what stayed
 
-**`POST /workspaces/api/workspaces/{id}/release`** is **the one door into a repository's default
-branch**. It merges the workspace's branch into that branch, stamps a fresh `YYYY.MMDD.HHMMSS`
-version into the same index, commits both as **one** commit — `release(<version>): <summary>` —
-**pushes** it — together with an annotated **tag** named the version — publishes `SCMRelease`, and
-**promotes** the same commit onto every deploy branch the repository's own spec declares, which is
-what deploys it.
+**Until 2026-09-03 this service released.** `POST /workspaces/api/workspaces/{id}/release` and
+`POST /workspaces/api/branches/{release,execute-release}` merged a branch into the repository's
+default branch, stamped a CalVer `YYYY.MMDD.HHMMSS` version into the same index, committed both as
+one `release(<version>): <summary>` commit, pushed it atomically with an annotated tag under
+`-o qits.release`, published `SCMRelease`, and promoted the same sha onto an `environment/*` entry
+branch. **All of it is gone**, along with `Mode.RELEASE`, `VersionStamp`, `VersionBumper`,
+`MavenVersionBumper`, `NpmVersionBumper`, `PomVersions`, `PackageJsonVersions`, `TextSplice`,
+`DeploymentSpecReader`, `ReleaseAnnouncer`, `SCMReleaseAnnouncer`, the `workspaces-events` module
+that held `SCMRelease`, and `qits.workspaces.release.entry-branch`.
+
+**A release is a release request in qits-projects now**: it folds `main`, the named branches and
+every released-but-unmerged tag onto a `release/<id>` branch through qits-githost's in-core git
+primitives, the QA pipeline builds that fold, and a green gate stamps the manifests, tags the fold
+and publishes `SCMRelease`. `main` is finalized after the deployment. The bump engine's logic was
+ported to qits-projects (`PomVersions` there carries the note); the version-uniqueness guarantee is
+now githost's refusal to overwrite a tag ref rather than an atomic branch+tag push.
+
+**What stayed is the workspace feature.** `BranchIntegrator` — the renamed `ReleaseIntegrator`, with
+every release arm removed — is the git half of landing one workspace branch on another: refresh the
+mirror, preflight the merge in the object store, merge in a **detached worktree on the mirror**,
+commit once, push. `WorkspaceService.landWorkspace`/`landOnBranch` wrap it with the guards, the
+repository lease and the workspace's resolution.
 
 **`POST /workspaces/api/workspaces/{id}/integrate`** lands a workspace on **its parent branch** — a
 `task/…` on the `epic/…` it forked from — as one pushed commit `integrate(<source>): <summary>`. No
-stamp, no bump, no `qits.release` push option, **no tag**, no event, and no `version` in the
-response. A workspace whose parent *is* the default branch is refused with `RELEASE_REQUIRED` and
-sent to `/release`, because that is the only door that may write it.
+stamp, no bump, no push option, no tag, no event, no `version` in the response. A workspace whose
+parent *is* the default branch is refused with `RELEASE_REQUIRED` naming the release flow, because
+this service writes no default branch at all.
 
-**They are two processes and one method.** `ReleaseIntegrator.land(Run)` takes a `Mode`, and the
-mode is the whole difference: stamp-and-bump, the commit subject, the push option, the tag.
-Everything below
-is shared by construction rather than by two implementations agreeing to keep matching — which is
-what makes "integrate is as safe as release" a fact instead of a claim. The flow is keyed by
-**(repository, source branch)**, worktree name included, so a branch-keyed sibling endpoint is a thin
-resolver over the same method rather than a second copy.
-
-`WorkspaceService.landOnBranch` is that shared middle — the lease, `land`, the announcement;
-`landWorkspace` wraps it with the workspace's guards and its resolution, and the two public methods
-are ten lines each and differ only in the target and the mode.
-
-## The third spelling: releasing a branch by name
-
-**`POST /workspaces/api/branches/release?projectId=…&repositoryName=…`** `{branch, summary}` →
-`{version, commitSha, branch, promotions[]}`. It really is a resolver: `releaseBranch` picks the target and calls
-`landOnBranch` with the arguments the workspace path passes, so nothing about the release is
-re-implemented. It answers with the record `/workspaces/{id}/release` answers with — the *same Java
-type*, so the two cannot drift into two schemas. What a branch name adds is only what an id already
-carried: which workspace claims it, and who deletes it afterwards.
-
-- **A branch an ACTIVE workspace claims is forwarded to `releaseWorkspace`.** Not "resolved the same
-  way" — it *is* the workspace-keyed call, so the row ends `INTEGRATED` with its container and volume
-  gone. Releasing the ref and walking away would strand a workspace on a branch that just merged.
-- **The source branch is deleted on success**, matching the workspace path's cleanup. That is what
-  lets the maintenance train's next force-push be a create, which the git host's hook allows.
-- 404 for a branch the origin does not have, 400 for the default branch itself, and the 409 family
-  unchanged.
-
-**The repository is addressed exactly one way per call, and the door refuses to choose for you.**
-Either `repositoryId=<id>` — the internal row id, the spelling this endpoint had alone — or
-`projectId=<project>&repositoryName=<name>`, the **public identity**: the pair a clone url, a
-committed pipeline and a person all spell, while a row id is minted per platform instance and is
-addressable only through the registry that minted it. Both at once, neither, or half the name form
-is a **400 naming the rule**; a precedence order would be a release landing in a repository nobody
-named twice. The name is resolved through `RepositoryLookup.findByName`, which is qits-projects'
-alias table (`GET /projects/api/projects/{projectId}/repositories/by-name/{repoName}`, `qits:system`)
-followed by the ordinary by-id read — two calls, because the alias route answers an id alone and a
-view built from the caller's own two strings would report a main branch nobody looked up. A name
-that resolves to nothing is a **404** naming the pair; a registry that could not be asked is a
-**5xx**, which is the distinction the whole port exists to keep — an outage folded into the 404
-would tell a pipeline step its repository had been deleted.
-
-The caller this exists for is a pipeline step, not a person: a `maintenance/<upstream>` ref is
-force-pushed by a build container, and a workspace is a container lifecycle plus a branch claim plus
-a resolution state machine — all wrong-shaped for a ref a pipeline overwrites at will.
-`BranchReleaseControllerTest` names its fixture branches that way, slash and all, which is also what
-proves the worktree slug survives a branch name that cannot be a directory name.
+**`POST /workspaces/api/branches/{merge,cleanup}`** are the branch-keyed pair, and both are a
+person's door (`@RolesAllowed("qits:admin")` at class level, restated in each body — see
+`BranchController`'s comment for the measurement behind the belt-and-braces). `merge` takes an
+arbitrary target and answers with conflicts rather than throwing; `cleanup` removes a branch when
+that loses no work.
 
 **Every ref this service moves is moved by a push, and that is the point.** The bare origins used to
 be on our own disk, on the volume the git host serves, so a branch could be created, merged or
 deleted by writing the ref — which is exactly what this service did, and it is why **no branch
 creation, no merge and no cleanup it ever performed produced a CI run**: a filesystem ref update
 fires no `post-receive`. Pushing over HTTP through qits-githost makes receive-pack the sole writer
-of every ref, so the protection hook sees every release and the existing post-receive → qits-ci →
-build chain happens for the ordinary reason. Nothing downstream learns a new trick. The address is
-`qits.githost.url` behind the `GitHostAddress` port.
+of every ref. The address is `qits.githost.url` behind the `GitHostAddress` port.
 
-Five properties, each of which is why a step is where it is:
+Three properties, each of which is why a step is where it is:
 
-- **`git worktree add --detach` on the MIRROR is what makes "no partial state" true.** The merge,
-  the bump, the commit and the tag all happen against a `HEAD` that is not a branch, in a repository
-  nobody serves, so a conflict, a bump failure or a crash leaves the target branch
-  **byte-identical**. A failed run needs no unwind — only a worktree removal, which `MirrorWorktree`
-  does on close. The orphaned commit is git's to collect.
-- **`git merge --no-ff --no-commit` is what makes bump-and-merge one commit.** `MERGE_HEAD` stays
-  set and the index stays staged; the bump writes into that same index; the single `git commit` that
-  follows is a two-parent merge that also carries the version change. No amend, no second commit.
-- **The push is the compare-and-swap.** A release carries `--push-option=qits.release`, which the
-  git host accepts for **fast-forward updates only** — deliberately not force — so two releases
-  racing cannot both win. The loser is rejected as non-fast-forward and told to retry. That is why no
-  distributed lock exists here. An integrate sends no option and is no less safe: the hook guards the
-  default branch alone, and fast-forward-only is receive-pack's property rather than the option's.
-  What the compare-and-swap does **not** settle is two releases of this flow: the lease holds across
-  the push, so they are sequential and the second is a clean fast-forward. The tag settles those.
-- **The tag is the version-uniqueness guarantee**, and it rides the same push — see below.
-- **The stamp is taken once**, at step 4, and threaded through. Recomputed per file, a slow bump
-  would write two versions into one commit. A plain integrate takes none at all, which is what makes
-  "no version" a fact about the flow rather than a field the controller drops.
+- **`git worktree add --detach` on the MIRROR is what makes "no partial state" true.** The merge and
+  the commit happen against a `HEAD` that is not a branch, in a repository nobody serves, so a
+  conflict or a crash leaves the target branch **byte-identical**. A failed run needs no unwind —
+  only a worktree removal, which `MirrorWorktree` does on close. The orphaned commit is git's to
+  collect.
+- **`git merge --no-ff --no-commit` is what makes the landing one commit.** `MERGE_HEAD` stays set
+  and the index stays staged; the single `git commit` that follows is a two-parent merge. No amend,
+  no second commit. (It is also what let the release's bump write into the same index, back when
+  there was one.)
+- **The push is the compare-and-swap**, with no option and none needed: an ordinary push is
+  fast-forward-only, which is receive-pack's property rather than an option's. A target that moved
+  is `NOT_FAST_FORWARD` — nothing landed, try again. The repository lease turns the common case from
+  "one fails" into "one waits".
 
 **The 409s carry a `reason`, and it is additive.** The envelope is still `{"message": …}`; an
 `IntegrateConflictException` adds `reason` ∈ `CONFLICT` / `MERGE_CONFLICT` / `NOT_FAST_FORWARD` /
-`ALREADY_INTEGRATED` / `PUSH_REJECTED` / `VERSION_ALREADY_RELEASED` / `RELEASE_REQUIRED`, plus
-`conflicts` (the conflicted paths) for the two conflict modes. `WorkspacesExceptionMapper` is where
-that happens and it is the only type it special-cases. `PUSH_REJECTED` is the git host's protection
-hook refusing: **that must surface as a 4xx carrying the hook's own message, never a 500**, because
-the message is the only thing on screen that says what to do instead — and it is **not retryable**,
-which is how the client treats it, so never reuse the value for a race. `VERSION_ALREADY_RELEASED`
-is the opposite case and is why it is not that value: the version's tag already exists, and a retry
-a second later simply works. `RELEASE_REQUIRED` is the wrong-door refusal and the only one where
-nothing was attempted.
+`ALREADY_INTEGRATED` / `PUSH_REJECTED` / `RELEASE_REQUIRED`, plus `conflicts` (the conflicted paths)
+for the two conflict modes. `WorkspacesExceptionMapper` is where that happens and it is the only type
+it special-cases. `PUSH_REJECTED` is the git host's protection hook refusing: **that must surface as
+a 4xx carrying the hook's own message, never a 500**, because the message is the only thing on screen
+that says what to do instead — and it is **not retryable**, which is how the client treats it, so
+never reuse the value for a race. `RELEASE_REQUIRED` is the wrong-door refusal and the only one where
+nothing was attempted. The set also **shrinks when a flow leaves**: `VERSION_ALREADY_RELEASED` and
+`HEAD_MOVED` went with the release door and nothing here can produce either.
 
 The enum reaches `docs/openapi.yml` through `api/ApiError`, a schema-only record declared on the
 `@APIResponse`s and returned by nothing — the mapper still builds the body, because the extra fields
 are present only when they apply and a record would write them as explicit nulls.
 
 **`merge` and `branches/merge` 409 with `RELEASE_REQUIRED` when the target resolves to the default
-branch**, naming both doors and the workspace id. They keep every other target — merging into a
-*parent* branch is what stacked workspaces do all day, which is also what `/integrate` now does with
-a push and a lease behind it. **`merge` is not redundant**: it still takes an arbitrary target and
-answers with conflicts rather than throwing, and `branches/merge` needs no workspace at all.
+branch.** They keep every other target — merging into a *parent* branch is what stacked workspaces do
+all day, which is also what `/integrate` does with a push and a lease behind it. **`merge` is not
+redundant**: it still takes an arbitrary target and answers with conflicts rather than throwing, and
+`branches/merge` needs no workspace at all.
 
 One consequence, recorded because it is a real loss rather than an oversight: **a plain branch can no
 longer be auto-cleaned up after integration.** A plain branch's cleanup parent is the main branch by
-definition (`canCleanupBranch`), so it is eligible only once merged *into* that branch — and that
-door is release's, while release is workspace-keyed. Workspace branches still resolve and are still
-deleted; that happens inside the flow.
+definition (`canCleanupBranch`), so it is eligible only once merged *into* that branch — and nothing
+here merges into that branch. Workspace branches still resolve and are still deleted; that happens
+inside `/integrate`.
 
 **Three inherited sharp edges this flow had to fix rather than inherit**, and two of them were
 platform-wide:
@@ -678,13 +613,18 @@ platform-wide:
   turn slow into broken. The machinery lives in `gitmirror`'s `GitCli`; `GitExecutor` delegates to
   it rather than carrying a second copy.
 
+**`gitmirror` still carries more than the flow above uses** — `tag`, `--atomic`, `withOption` — and
+that is deliberate: the module is the git substrate, its primitives are git's rather than a flow's,
+and `RepoMirrorTest` proves them offline. Do not read an unused primitive there as a leftover of the
+release door.
+
 **`TestOrigin` sets `receive.advertisePushOptions`**, and it is load-bearing rather than tidy. JGit
 advertises push options in production; a local `receive-pack` does **not** by default, and `git push
---push-option` fails outright against a server that did not advertise them. Without that line the
-fixture would refuse the exact argv that ships. `FakeGitHostAddress` points the mirror at the local
-bare and replaces the **transport only** — the clone, the fetch, the `ls-remote`, the push, the ref
-negotiation and the fast-forward check are all real, which is what lets `ReleaseControllerTest`
-assert the compare-and-swap.
+--push-option` fails outright against a server that did not advertise them. Nothing this service
+pushes carries one today, and the line stays because the fixture must be able to refuse the exact
+argv that ships rather than a laxer one. `FakeGitHostAddress` points the mirror at the local bare and
+replaces the **transport only** — the clone, the fetch, the `ls-remote`, the push, the ref
+negotiation and the fast-forward check are all real.
 
 **`GitHostAddress` has two methods returning one string, and the split is why.** `fetchUrl` is asked
 by every read; `pushUrl` is asked once, immediately before a push. `FakeGitHostAddress.beforeNextPush`
@@ -693,126 +633,17 @@ rather than on the mirror's first fetch. A deployment returns the same value fro
 (`ConfiguredGitHostAddress` literally does). Staged rather than raced, because a real race is
 nondeterministic about which side loses.
 
-## The release tag
-
-A release pushes **two** refs: `HEAD:refs/heads/<main>` and an annotated tag named the version
-exactly — `2026.801.63140`, **no `v` prefix**, because it is the same string the manifests, the event
-and the image tags carry. The tagger is the release commit's own identity and the tag message is the
-release commit's subject line. A plain integrate tags nothing; it stamps no version, so there is no
-name for a tag to be.
-
-**It used to need a dance, and it does not any more.** `prepareWorktree` added its worktree **on the
-bare origin**, and a linked worktree shares the common ref store — which there was the bare
-qits-artifacts serves off the same volume. So `git tag -a` wrote `refs/tags/<version>` straight into
-the served repository with no push at all, the push then reported `[up to date]` with **zero receive
-commands**, and a failed run left the tag behind in a repository other people read. The workaround
-was `tag -a` → `rev-parse` the tag **object** → `tag -d` → push by sha, plus a `finally` that swept
-up the ref when a run died mid-dance.
-
-The worktree is on a **mirror** now, which nobody serves, so all three reasons are gone and so are
-all three steps:
-
-    git tag -a <version> -m <subject> HEAD
-    git push --atomic --porcelain -o qits.release <remote> \
-        HEAD:refs/heads/<main> refs/tags/<version>:refs/tags/<version>
-
-**One push, `--atomic`, never `--force`.** One push is one receive-pack, so both commands ride one
-pre-receive and one post-receive. Atomic is what makes the pair all-or-nothing: a refused branch (the
-default branch moved) leaves no tag, and a refused tag takes the branch update down with it. Without
-`--atomic` the tag lands even when the branch is refused — measured.
-
-**That refusal is the version-uniqueness guarantee** (`VERSION_ALREADY_RELEASED`). Nothing checked
-version uniqueness before, and `VersionStamp` used to claim the fast-forward push rejected a
-same-second tie — it does not, because the lease serializes releases and the second one's push is a
-clean fast-forward. A non-forced push cannot overwrite an existing tag ref, so the tag turns the
-missing constraint into a property of the SCM. It still fires from **both** ends: the mirror is
-refreshed from the git host at step 0, so its tags are the host's tags and `git tag -a` refuses a
-name already released before this flow has pushed anything; the push covers a writer who gets there
-later.
-
-It is **reachable**, not theoretical. `ReleaseControllerTest`'s two concurrent releases collide most
-runs — the lease runs them back to back and a release of a small repository is well under a second,
-so both stamp one version and the second is refused. That test asserts the pair of outcomes rather
-than "both land", which it did before the tag existed.
-
-**What the `finally` sweeps now is cache hygiene, not a ref.** A run that tagged and then failed to
-push leaves the tag in the mirror, where it names nothing anybody can see — but it would refuse this
-repository's next attempt at the same version out of a local leftover, so it is dropped. It cannot
-erase a real release tag, because a real release tag is on the git host and this deletes only the
-copy.
-
-## The promotions: the further pushes, and the ones that deploy
-
-A release pushes the released commit **again**, onto the **entry branch**. That push is what ships:
-the deployer registers and deploys an application from a green build on a branch an environment
-listens to, so `main` is the integration trunk that builds and the entry branch is what deploys.
-Pushing only `main` builds and deploys nothing — the same rule the direct-push escape hatch follows.
-
-- **One branch, and it is the platform's answer.** `qits.workspaces.release.entry-branch`
-  (`environment/prod` shipped) names it, and it is the same for every repository: the deploy ref of
-  the environment the platform serves from. It was a per-repository list read out of each spec's
-  `deploy_branches`, and that was wrong twice — every repository named the same single ref, so it
-  was one answer copied into thirteen files, and a release pushed its sha onto *every* entry, so
-  three tiers listed would have shipped into all three in the same second. A fan-out, not a ladder.
-  Advancing a release up a ladder of tiers is a separate operation over the deployer's environment
-  rows and does not exist yet.
-- **What the repository still decides is whether it deploys at all**, and it says so by carrying
-  `.config/qits/deployments.yml`. No file, no promotion: a library or an SPA deploys from no ref,
-  and pushing one for it buys a CI build and a branch nobody reads. Everything *inside* the file is
-  the deployer's, and `DeploymentSpecReader` opens none of it — it is a five-line `isRegularFile`
-  check now, down from a vendored ~120-line line parser.
-- **Separate pushes, in this order, never one atomic push.** The default branch first, then the
-  entry branch. A promotion riding along atomically would let a stuck deploy branch refuse the
-  *release*, which is the one ref this flow exists to move.
-- **The trunk push goes quiet when there is somewhere to promote to.** It carries `-o qits.no-ci` as
-  well as `-o qits.release`, so one sha does not build twice — the entry branch's build is the
-  release's signal. A repository that promotes nowhere keeps its trunk push CI-hot: there that build
-  is the only proof the release is sound. The promotion push is never quiet.
-- **Create or fast-forward, never a force.** A push to a ref that is not there is a create, which is
-  the ordinary first case for a repository that has never deployed. A non-fast-forward means the
-  branch holds something the release is not built on, and it is reported rather than overwritten.
-- **The push carries `-o qits.release` like the release push it follows.** A deploy branch is not
-  the repository's default ref, so the protection hook does not read it today; the option is
-  fast-forward-only at the hook, which is exactly what this push is, so it costs nothing and keeps
-  one release one push argv. No second mechanism exists — it is `worktree.push(PushSpec)` again.
-- **A blank `entry-branch` disables promotion, and outranks the repository.** The key is both the
-  destination and the kill switch; a deployment that must stop writing deploy branches has to be
-  able to, and a switch a repository could talk its way past would not be one.
-  `ReleasePromotionDisabledTest` holds it against a repository that *does* carry a spec.
-- **`ReleaseIntegrator` says where releases land, once, at boot.** Both states it reports are
-  otherwise silent: a release that promotes nowhere is a 200 with an empty `promotions`, and an
-  entry branch no environment listens to builds and deploys nothing at all.
-
-**A failed promotion is a partial success, not a failed release**, and that decision lives in
-`ReleaseIntegrator` (the class javadoc says why, beside the code). By the time it runs receive-pack
-has accepted the release: the commit is on the default branch, the tag is on the host, post-receive
-has fired and CI is building. Throwing there would cost the caller its version and its sha, skip
-`SCMRelease` and leave the workspace ACTIVE on a branch that is already merged — and undo none of the
-push. So it is **200 with an `error` on that branch's entry**: the sentence naming what refused it
-and which sha to push once the branch is sorted out, logged at ERROR. The precedent is
-`deleteLandedBranch`, which is best-effort for the same reason: once the release is in, nothing after
-it may pretend it is not.
-
-The response carries `promotions` for it — `{branch, error}`, `error` null when the push landed — on
-the record **both** release doors answer with. **A list holding at most one entry**: it stays a list
-because the tier ladder will make it plural again, for a reason the old per-repository list never
-had. It is empty when the repository carries no spec, when promotion is off, and for **a plain
-integrate**, which released nothing to deploy.
-
-**This repository carries its own** `.config/qits/deployments.yml`, so it releases through the
-mechanism it implements.
-
 ## The causation stamp on every push
 
 The git host publishes an SCM event per ref a push moves — `SCMPublishCommit`, `SCMPublishTag`,
 `SCMDeleteBranch`, `SCMDeleteTag` — and it publishes them **under whatever `X-Qits-Causation-Id` the
 push carried**, read off the receive-pack request. Every ref this service moves is moved by a push,
-so this hop is where a chain would otherwise break: release → push → commit event → CI run → deploy
-is one chain only because the producer says what it was doing.
+so this hop is where a chain would otherwise break: an ask → push → commit event → CI run is one
+chain only because the producer says what it was doing.
 
 `domain/…/control/PushCausation` is the port and `service/…/bus/EventstreamPushCausation` reads
-`CausationScope`, the same split `ReleaseAnnouncer`/`SCMReleaseAnnouncer` already has and for the
-same reason: `domain` stays free of the bus's **seams**. `GitMirrorRegistry` injects it as
+`CausationScope` — the port-in-`domain`, implementation-in-`service` split the `SCMRelease`
+announcer used to share, and the only one left: `domain` stays free of the bus's **seams**. `GitMirrorRegistry` injects it as
 `Instance<T>` and hands `GitMirrors` a `Supplier<String>`; `RepoMirror.push(cwd, spec)` turns the
 answer into `-c http.extraHeader=X-Qits-Causation-Id: <uuid>`.
 
@@ -837,7 +668,7 @@ Four things are deliberate:
   stays that way. `EventstreamPushCausationTest` asserts it equals `CausationHeader.NAME`; nothing
   else connects the two strings.
 - **A value that will not parse as a UUID is dropped rather than interpolated.** A cause is
-  advisory and must never fail a release, and a newline in an HTTP header would be injection. The
+  advisory and must never fail a push, and a newline in an HTTP header would be injection. The
   parse is the check and the sanitiser at once.
 - **Absent is a supported configuration.** No implementation, no cause, no header — which is exactly
   how every push behaved before the git host published anything.
@@ -847,53 +678,36 @@ Nothing in the suites can assert the header *arriving*: the fixtures are local b
 this repo's — that a push made inside a scope, through the injected registry, still lands — and
 qits-githost owns the far end.
 
-## The SCMRelease event
+## The SCMRelease event, which is not published here any more
 
-A **release** publishes `SCMRelease {projectId, repository, repositoryName, branch, version}` the
-instant the push is accepted. A plain integrate publishes nothing — an event that fired for both
-would make "a release happened" unlistenable, which is the one thing this event exists to be.
+**qits-projects publishes it.** `SCMRelease {projectId, repository, repositoryName, branch,
+version}` says source control has this release and nothing more — the statement that an artifact
+exists is qits-ci's `SoftwareRelease`, a whole build later. This service published it from the
+instant a release push was accepted until 2026-09-03; the publisher moved with the release door, and
+`ReleaseAnnouncer`, `SCMReleaseAnnouncer`, the `workspaces-events` module that held the record and
+`bus/EventWireReflection` all went with it. **The wire name is the class name**
+(`QitsEvent.signature()` returns the simple class name), so qits-projects' own identical record is
+the same event on the wire; nothing keying on the signature noticed the move.
 
-**It means source control has this release, and nothing more.** It does not mean an artifact exists:
-that statement is qits-ci's own `SoftwareRelease`, published once per artifact when a repository's
-release pipeline goes green, and the gap between the two is a whole build. The event here was called
-`SoftwareRelease` until 2026-08-01 and was read as a statement about a package, which worked by
-timing rather than by design — see the superproject's `docs/scm-release-split-notes.md`. **The wire name is
-the class name** (`QitsEvent.signature()` returns the simple class name), so the class rename was the
-wire rename; the payload's fields did not change.
+What the file `.config/qits/ci-event-release.yml` in this repository does is unchanged: it selects
+`SCMRelease` for **this** repository and builds the released tag. The publisher is somebody else's
+now, the consumer is still ours.
 
-`ReleaseAnnouncer` in `domain/…/control/` is the port; `service/…/bus/SCMReleaseAnnouncer` is
-the implementation, so the domain module stays free of the bus's seams and its transport (the
-`RunAnnouncer` precedent in qits-ci-service, copied down to the package name; "seams" rather than
-"the bus"
-since the causation persistence trio moved in — see the push-causation section above). It is announced **after the push and before
-the transaction commits**: the push is irreversible the instant receive-pack accepts it, so a
-statement conditional on the transaction would be silent about a release that really happened.
+**What is left of the bus here is the causation half** (above): `EventstreamPushCausation` reading
+the ambient scope onto every push, and the eventstream jar's persistence trio on the entities. This
+service publishes nothing and listens for nothing, and `qits.eventstream.enabled` stays off in
+`%dev`/`%test` because the sweeper is the jar's.
 
-Five things about it are easy to undo by accident:
+Two things the move left behind here, both worth not re-deriving:
 
-- **`SCMReleaseAnnouncer` is a `@DefaultBean`.** The suite's `FakeReleaseAnnouncer` must win,
-  and two unqualified beans of one type fail the build at `ArcProcessor#validate` — for every test at
-  once, not at runtime. Same annotation and same reason as `HttpRepositoryLookup`.
-- **`bus/EventWireReflection` is what makes the publish work in a native image.** `CanonicalJson`
-  builds its own `ObjectMapper` by hand, so nothing registers the event's reflection metadata for it.
-  qits-ci measured both halves of that on deployed binaries: without the targets every publish dies
-  with Jackson's "no serializer found" and the event never even reaches the outbox; without the
-  mix-in `classNames` entry the payload silently gains `eventId`. A JVM suite cannot see either.
-- **`eventId` and `occurredAt` stay out of the payload.** They are record components and are
-  excluded by the library's mix-in, which is why they can be components at all; `SCMReleaseTest`
-  asserts the exact canonical string, so a field added here is a deliberate edit there.
-- **`repositoryName` is the field a committed CI selection can address, and `repository` is not.**
-  A row id is whatever the platform instance's registry minted: for a repository the platform
-  manifest declares it equals the name, but a repository the projects self-seed reconcile
-  registered gets a **UUID**, different on every instance. So
-  `repository: { exact: qits-projects-daemon }` in a `.config/qits/ci-event-*.yml` matched nothing
-  on this platform, and matched **silently** — CI logs matches and never non-matches, so the two
-  daemons' release pipelines simply never fired. Both fields ship: the id for anyone joining back
-  to the registry, the name for anyone selecting on it. A selection that names a manifest
-  repository keeps matching `repository` and is honest doing so.
-- **`RepositoryLookup.RepositoryView` widened to `(id, name, projectId, mainBranch)`** for this and
-  for nothing else. `name` and `projectId` are both nullable: a registry that does not answer with
-  one costs the event a field, never the release.
+- **`RepositoryLookup.RepositoryView` carries `name` and `projectId`** because `SCMRelease` needed a
+  coordinate a committed CI selection could address — a row id is per-platform (a self-seeded
+  repository's is a UUID) and `repository: { exact: … }` on an id matched nothing, silently. The
+  fields stayed for the workspace daemon, which clones by the public `(project, name)` pair. Both
+  are nullable.
+- **A `@DefaultBean` on a wiring implementation is load-bearing** wherever the suite has a double:
+  two unqualified beans of one type fail the build at `ArcProcessor#validate`, for every test at
+  once. `HttpRepositoryLookup` carries it; `SCMReleaseAnnouncer` did.
 
 ## Authentication
 
@@ -1418,10 +1232,10 @@ than per caller. A second role invented here would be a vocabulary qits-idp does
   must never be served from a window.
 - `TestOrigin.recordPushOptions` installs a real `pre-receive` hook on a fixture origin that logs
   each ref with the push options it arrived under, and `pushOptionsFor` reads one back. It is the
-  only way to see a `--push-option` from outside the pushing process, and it is what makes "the
-  trunk push carries `qits.no-ci` exactly when there is a deploy branch" an assertion about the
-  shipped argv. Install it *after* the fixture commits: it records every push from then on, and the
-  reader takes the first line for a ref.
+  only way to see a `--push-option` from outside the pushing process, and it is what makes "a branch
+  create is a quiet push" an assertion about the shipped argv rather than about a constant. Install
+  it *after* the fixture commits: it records every push from then on, and the reader takes the first
+  line for a ref.
 - `TestGit.exec` is how a test runs git in one of those fixture directories. It is a thin static
   helper over `gitmirror`'s `GitCli`, and it replaced `GitExecutor` — a production CDI bean whose
   only remaining callers were tests. `GitCli`'s own properties (the per-line tap, the unterminated
@@ -1430,14 +1244,9 @@ than per caller. A second role invented here would be a vocabulary qits-idp does
 - `gitmirror/`'s own suite (`RepoMirrorTest`) is the one that proves the substrate: clone, fetch,
   prune, `ls-remote` answering while the mirror is stale, a branch create and delete arriving as
   pushes, the worktree merge/commit/tag/atomic-push sequence, and a leftover worktree being pruned
-  rather than inherited. No Quarkus, no database — 14 cases, about a second.
-- `domain/src/test/resources/version-fixtures/` holds **copies of real manifests** — qits-ci-service's
-  five-module reactor verbatim, comments and all, plus an SPA's `package.json` with a trimmed lock
-  and a pnpm library repo. That is a deliberate exception to "tests build their own": the bump
-  engine's job is to leave everything it did not mean to touch byte-identical, and a fixture written
-  to be convenient cannot prove that. `VersionFixtures.copy` puts one in a `@TempDir`, because the
-  bumpers write. The assertion that carries the suite is the round trip: replacing the new version
-  back with the old one must reproduce the original file exactly.
+  rather than inherited. No Quarkus, no database — 14 cases, about a second. It still covers the tag
+  and the atomic push, which no flow in this service uses any more: they are git primitives of the
+  substrate, not leftovers of the release door.
 - The `Fake*` doubles are duplicated between `domain/src/test` and `service/src/test`. That is
   deliberate and matches the monorepo — the two modules do not share a test classpath.
 - **`FakeCredentialCommissioner` starts UNWIRED, and must stay that way for everyone else.** A bean
@@ -1476,7 +1285,7 @@ address is now something a test profile supplies. It is no longer one IT: it is 
 **story catalogue** under `service/src/test/java/…/workspaces/stories/`, and everything below is
 about the whole of it.
 
-**Thirteen stories, six classes, one launched process.** Every class names
+**Ten stories, five classes, one launched process.** Every class names
 `stories.support.StoryProfile`, because a `@TestProfile` is what failsafe launches a process for and
 two profiles would be two qits-workspaces — two boots, two JWKS fetches, two database sets, two
 mirror trees, and a diagram whose startup traffic landed in whichever process happened to be
@@ -1485,11 +1294,10 @@ running.
 | class | category | what it is about |
 | --- | --- | --- |
 | `api.TokenValidationBootstrapIT` | authentication | the boot: the JWKS fetch, the commission reconcile, and a bearer cut for another audience |
-| `stories.branches.ReleaseDoorIT` | release | the release door — a deployable repository, a library, and a branch already in the trunk |
 | `stories.creation.WorkspaceProvisionIT` | workspaces | a workspace provisioned end to end, daemon dial included |
 | `stories.editor.EditorEnsureIT` | editor | the editor door — the wrapper's main workspace begun, with a branch check but no push |
 | `stories.operations.OperatorReadsIT` | operations | what a live read costs, and what a stored read does not |
-| `stories.refusals.ReleaseDoorRefusalIT` | refusals | four ways not to release something |
+| `stories.refusals.MergeDoorRefusalIT` | refusals | four ways not to get through a door, told at `/branches/merge` |
 
 **Every override the profile sets is a RUNTIME key**, including the two that only look like
 environment (`QITS_RESOURCE_DB_*`, `QITS_RESOURCE_EVENTSTREAM_*` — spelled as the deployer spells
@@ -1501,7 +1309,7 @@ has one run per module and flipping it would turn the five docker-backed `Daemon
 it. Run it — and `.config/qits/ci-event-userflows.yml` runs it — as a comma list:
 
     ./mvnw verify -DskipITs=false -Dquarkus.quinoa=false \
-      -Dit.test=TokenValidationBootstrapIT,ReleaseDoorIT,WorkspaceProvisionIT,EditorEnsureIT,OperatorReadsIT,ReleaseDoorRefusalIT
+      -Dit.test=TokenValidationBootstrapIT,WorkspaceProvisionIT,EditorEnsureIT,OperatorReadsIT,MergeDoorRefusalIT
 
 Adding a story class means adding it there **and** in the ci file. `-Dit.test` alone still runs the
 surefire suites, which is the honest gate; a run that wants only the stories adds
@@ -1544,14 +1352,14 @@ socket by hand, because the framework ships no socket tap and a frame is not a r
 
 1. **Order is load-bearing and the package names carry it.** `UserflowClassOrderer` sorts by
    fully-qualified class name, so `…workspaces.api` drains before `…workspaces.stories.*` and the
-   boot story owns the startup traffic; within `stories`, `branches` < `creation` < `editor` <
-   `operations` < `refusals`. `@UserflowRunsAfter` states the ones that are real dependencies as
+   boot story owns the startup traffic; within `stories`, `creation` < `editor` < `operations` <
+   `refusals`. `@UserflowRunsAfter` states the ones that are real dependencies as
    well — `editor` runs after `creation` because the containers-client token the editor's container
    PUT reuses is first minted there.
 2. **A cached fetch belongs to whichever story paid for it.** quarkus-oidc-client caches its mint
    for an hour (`StoryPeers` answers `expires_in: 3600` on purpose), so `POST /idp/token` lands in
-   the first release story for the `githost`/`projects` clients and in the workspace story for the
-   `containers` one — and in no story after. Running one class alone inherits the arrow and fails
+   the first story that needs each of the three named clients — today the workspace provision for
+   all of them — and in no story after. Running one class alone inherits the arrow and fails
    its own edge count, loudly, which is the right way for that assumption to break.
 3. **An id that reaches a label inside a segment has to be AUTHORED.** `Labels` rewrites whole
    segments it can tell were generated, so a uuid row id scrubs to `{id}` in
@@ -1564,8 +1372,8 @@ socket by hand, because the framework ships no socket tap and a frame is not a r
    the next story's diagram.
 
 **`assertEdgeCount` is what every class ends with**, because a count is how an absence is asserted
-when the peer itself was legitimately reached — "the refused release never wrote a ref" is five
-edges with no `git-receive-pack` among them, and no presence check can say that.
+when the peer itself was legitimately reached — "the refused caller never reached the git host" is
+one edge in and none out, and no presence check can say that.
 
 ### What is deliberately not covered, and why
 
@@ -1584,9 +1392,9 @@ edges with no `git-receive-pack` among them, and no presence check can say that.
   claim.
 - **The git host's protection hook and its authorization.** `StoryGitHost` exports what it serves
   unconditionally. Who may push a protected ref is qits-githost-service's suite's question.
-- **A release losing a race.** The lease serialises this flow's own releases, and staging a writer
-  *outside* the flow needs a hook on the far side of a socket from the launched process. It is
-  `ReleaseControllerTest`'s, with `FakeGitHostAddress.beforeNextPush`.
+- **A landing losing a race.** The lease serialises this flow's own integrates, and staging a
+  writer *outside* the flow needs a hook on the far side of a socket from the launched process. It
+  is a `@QuarkusTest`'s, with `FakeGitHostAddress.beforeNextPush`.
 
 Every story is **browserless** (an `Interactions` parameter and no `Flow`), so the framework's
 transitive Playwright never launches anything and no Chromium is needed to build this module. The

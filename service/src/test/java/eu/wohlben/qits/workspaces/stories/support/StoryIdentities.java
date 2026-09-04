@@ -13,14 +13,13 @@ import io.restassured.specification.RequestSpecification;
  *       entire reason a header can be trusted inside.
  *   <li><b>A MACHINE's is an idp-minted bearer</b>, and it carries whichever roles the idp copied
  *       into its {@code groups} claim — quarkus-oidc reads them as roles with no configuration at
- *       all. A pipeline step's commissioned credential carries {@code qits:admin}, which is what
- *       lets it drive {@code POST /workspaces/api/branches/release}; the daemon control socket wants
- *       {@code qits:system}.
+ *       all. A pipeline step's commissioned credential carries whatever it was granted; the daemon
+ *       control socket wants {@code qits:system}.
  * </ul>
  *
  * <p><b>Almost every door here is {@code @RolesAllowed("qits:admin")}</b> and the two tracks open it
- * alike: an operator presses Release in the branch list, and a build container releases the
- * maintenance branch it just force-pushed. The exceptions are {@code /gc/branches}, which adds
+ * alike: an operator works in the branch list, and a commissioned container drives the same routes
+ * with a bearer of its own. The exceptions are {@code /gc/branches}, which adds
  * {@code qits:system} because its caller is qits-platform-orchestrator's nightly run, and the daemon
  * control socket, which is {@code qits:system} <b>only</b> because its caller is a container.
  *
@@ -62,10 +61,10 @@ public final class StoryIdentities {
 
   // --- how a diagram names each initiator ---------------------------------------------------------
 
-  /** The person who creates a workspace, reads the list and presses Release in the branch list. */
+  /** The person who creates a workspace, reads the list and merges a branch in it. */
   public static final String OPERATOR = "an operator";
 
-  /** A build container driving the release door with its own commissioned credential. */
+  /** A build container driving this API with its own commissioned credential. */
   public static final String PIPELINE = "a pipeline step";
 
   /** The in-container workspace-daemon, which dials out and is never dialled. */

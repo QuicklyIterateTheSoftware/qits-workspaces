@@ -7,8 +7,9 @@ feature capture, and the routes over all of it — the machine surface at `/work
 and the client at the root of `workspaces.<env>.<domain>`.
 
 A workspace is a branch of a repository **plus** a per-workspace container that clones that branch
-into `/workspace`. This service creates, merges, releases and deletes that branch the same way
-anything else does: by pushing to the git host. This repo owns everything about that from the host's side of
+into `/workspace`. This service creates, merges and deletes that branch the same way anything else
+does: by pushing to the git host. It does **not** release one — a release is a release request in
+qits-projects, which folds the sources through qits-githost and lands a tag. This repo owns everything about that from the host's side of
 the boundary. Everything that runs *inside* the container belongs to
 [qits-workspace-daemon](https://github.com/QuicklyIterateTheSoftware/qits-workspace-daemon).
 
@@ -22,7 +23,6 @@ the boundary. Everything that runs *inside* the container belongs to
 | `domain/` | `eu.wohlben.qits.workspaces.*` — entity, persistence, dto, mapper, control, and the framework-free SPIs the daemon implements. No web, no JAX-RS. |
 | `service/` | `eu.wohlben.qits.workspaces.{api,daemonhost}` — JAX-RS routes, the SSE channels, and the daemon control socket + registry. |
 | `workspace-daemon-protocol/` | A **vendored copy** of the daemon wire contract. See that module's pom for why. |
-| `workspaces-events/` | `eu.wohlben.qits.workspaces.events` — this service's event vocabulary, today `SCMRelease`. Plain records; a consumer depends on this jar and gets no domain. |
 | `service/src/main/webui/` | The SPA — a **submodule**, [qits-workspaces-frontend](https://github.com/QuicklyIterateTheSoftware/qits-workspaces-frontend). Quinoa builds it into the artifact and serves it at `/`. |
 
 So a checkout needs one command a plain clone does not give you:
@@ -135,32 +135,16 @@ tree, rebuildable — delete it and the next request re-clones), does its merges
 mirror, and reaches the served repository only by pushing. An unreachable git host is no longer a
 one-endpoint problem.
 
-A release is **promoted**: the same commit, pushed again onto the entry branch, and that push is what
-deploys — the deployer ships an application from a green build on a branch an environment listens to,
-so `main` builds and the entry branch ships. Fast-forward or create, never a force.
-
-**One entry branch, and it is the platform's answer.** `qits.workspaces.release.entry-branch`
-(default `environment/prod`) names it, and every repository releases onto it: it is the deploy ref of
-the environment the platform serves from. It was a per-repository `deploy_branches` list, and that
-was wrong twice — every repository named the same single ref, and a release pushed onto *every*
-entry, so three tiers listed would have shipped into all three at once. Advancing a release from one
-tier to the next is a separate operation over the deployer's environment rows, and it does not exist
-yet.
-
-**What the repository decides is whether it deploys at all**, and it says so by carrying
-`.config/qits/deployments.yml` — the same file the deployer reads, whose contents are all the
-deployer's. **No spec file, no promotion**: a library or a component bundle deploys from no ref, and
-pushing one for it costs a CI build and a branch nobody reads.
-
-**A blank `entry-branch` disables promotion**, whatever a repository carries: the switch belongs to
-the deployment.
-
-**The trunk push goes quiet when there is somewhere to promote to** — it carries `-o qits.no-ci`, so
-one sha does not build twice and the entry branch's build is the release's signal. A release with
-nowhere to deploy keeps its trunk push CI-hot, because there that build is the only proof.
-
-A promotion that fails does not fail the release (the release push is already accepted): the answer
-is a 200 whose `promotions` entry carries an `error`, and the failure is logged at ERROR.
+**The release door left this service on 2026-09-03**, and with it everything that was only a
+release's: `Mode.RELEASE`, the CalVer `VersionStamp`, the pom/package.json bumpers, the annotated
+tag, the `-o qits.release` push option (a branch create keeps its own `-o qits.no-ci`), the
+`SCMRelease` publication, and the
+promotion onto an `environment/*` entry branch (`qits.workspaces.release.entry-branch`, now an unset
+key). A release is a **release request in qits-projects**: it folds `main`, the named branches and
+every released-but-unmerged tag onto a `release/<id>` branch through qits-githost's git primitives,
+the QA pipeline builds that fold, and a green gate stamps the manifests and creates the version tag.
+`main` is finalized after the deployment. Nothing here writes a default branch — `/branches/merge`
+and `/workspaces/{id}/integrate` refuse it with `RELEASE_REQUIRED`.
 
 One behaviour worth knowing before you debug it: **a missing repository and an unreachable
 qits-projects are different answers.** Only a 404 becomes "no such repository" (and then a 404 from
@@ -193,9 +177,10 @@ naming what is missing, rather than opening a store nobody meant.
 The `eventstream` database is named explicitly because the derived default would collide with every
 other consumer of that library on the same postgres; `db` takes the derived `qits_workspaces`.
 
-**The event bus needs nothing else.** A release publishes `SCMRelease` through the `qits-eventstream`
-jar, which ships every remaining key as a default — `qits.events.url` is the qits-net alias. Set it
-when the bus lives somewhere else:
+**The event bus needs nothing else.** This service publishes no event any more (`SCMRelease` went
+with the release door); what remains of the `qits-eventstream` jar is the causation stamp on every
+push and the outbox database it boots with. Every remaining key ships as a default — `qits.events.url`
+is the qits-net alias. Set it when the bus lives somewhere else:
 
     QITS_EVENTS_URL=http://qits-events:8080
 
@@ -221,8 +206,8 @@ Git still asks for its own qits-githost-audience bearer.
 
 **It mirrors the container's lifetime, not the row's.** A provision commissions, a recreate
 commissions afresh and hands the old one back, `deleteContainer` hands it back while the workspace
-stays ACTIVE (the next start commissions again), and every resolution — integrate, release, discard,
-the branch-gone abandon — hands it back for good. **A stop-then-start keeps it**, because the
+stays ACTIVE (the next start commissions again), and every resolution — integrate, discard, the
+branch-gone abandon — hands it back for good. **A stop-then-start keeps it**, because the
 orchestrator has no start verb: a stopped container is started by presenting its spec again, and a
 spec whose environment moved is a *replaced* container. That is also why the pair lives on the
 workspace row rather than being handed in at provision time.

@@ -18,7 +18,7 @@ import java.util.Map;
  *
  * <h2>Its own databases</h2>
  *
- * <p>The catalogue <b>writes</b>: three releases, a workspace, its provision and its events. Sharing
+ * <p>The catalogue <b>writes</b>: a workspace, its provision, an editor and their events. Sharing
  * the surefire suite's databases would make either suite's assertions depend on whether the other
  * had run, so the names here are this profile's own, and both are cleaned at start so a re-run does
  * not read the last run's rows.
@@ -47,8 +47,8 @@ import java.util.Map;
  *       is exercised rather than replaced.
  *   <li><b>{@code qits.githost.url}</b> — {@link StoryGitHost}, a real smart-HTTP git server. The
  *       packaged artifact carries {@code ConfiguredGitHostAddress} and no test double can win over
- *       it, so a release story needs a git host that answers over HTTP or it is not about the
- *       release door at all.
+ *       it, so a story whose subject is a clone or a push needs a git host that answers over HTTP
+ *       or it is not about this service's git at all.
  *   <li><b>{@code qits.projects.url} / {@code qits.containers.url} / {@code qits.events.url}</b> —
  *       {@link StoryPeers}, one stub answering as all three.
  *   <li><b>the three named oidc clients, ENABLED</b> — shipped off, because a platform running its
@@ -58,21 +58,15 @@ import java.util.Map;
  *       argv</b> without a bearer to hang on {@code -c http.extraHeader}. It is also what enables
  *       the commission call, which is gated on the default client's switch.
  *   <li><b>{@code qits.eventstream.enabled=true}</b> — the bus, which {@code %dev} and {@code %test}
- *       both keep dark. It is on here because the {@code SCMRelease} a release publishes is one of
- *       the three things the door promises and the only one with no other evidence. Turning it on
- *       costs nothing in stray traffic: the stream subscriber logs "no listener wants a signature:
- *       not dialling the event stream" and never dials (this service listens for nothing), the
- *       catch-up sweeper has no durable consumer to catch up, and the outbox sweeper finds nothing
- *       due because {@link StoryPeers} accepts every publish inline.
+ *       both keep dark. Nothing here publishes any more (the {@code SCMRelease} the release door
+ *       announced left with the door), so what this proves is the boot: the jar's datasource, its
+ *       Flyway lineage and its sweepers all start in a packaged process. It costs nothing in stray
+ *       traffic — the stream subscriber logs "no listener wants a signature: not dialling the event
+ *       stream" and never dials, and the outbox sweeper finds nothing due.
  *   <li><b>{@code qits.workspace.git.mirror-freshness-ms=0}</b> — the shipped 5 s window would make
  *       a story's fetch depend on how long the story before it took, which is an edge that comes and
  *       goes with the clock and a {@code networkHash} that never settles. Zero means every read
  *       fetches: more traffic, and the same traffic every run.
- *   <li><b>{@code qits.workspaces.release.entry-branch=environment/dev}</b> — the shipped default is
- *       {@code environment/prod}; a deployment names the ref of the environment it serves from, and
- *       the platform's dev tier names this one. It is also the kill switch, and blank outranks any
- *       repository — which is why a story about a library that promotes nowhere has to be a
- *       repository with no spec rather than this key emptied.
  * </ul>
  *
  * <h2>Two things are OFF, and both are stated coverage gaps</h2>
@@ -174,8 +168,7 @@ public class StoryProfile implements QuarkusTestProfile {
     config.put("qits.workspaces.data-dir", "target/story-workspaces-data");
     config.put("qits.workspace.git.mirror-freshness-ms", "0");
 
-    // --- where a release lands, and what it does not start -------------------------------------------
-    config.put("qits.workspaces.release.entry-branch", StoryTarget.ENTRY_BRANCH);
+    // --- what does not start -------------------------------------------------------------------------
     config.put("qits.services.autostart-enabled", "false");
     config.put("qits.bootstrap.autorun-enabled", "false");
 

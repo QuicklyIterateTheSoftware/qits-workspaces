@@ -23,11 +23,8 @@ package eu.wohlben.qits.workspaces.stories.support;
  * deliberately, so the two rules are visible side by side in one diagram set:
  *
  * <ul>
- *   <li>The release fixtures carry a <b>generated uuid</b> row id, so {@code GET
- *       /projects/api/repositories/{id}} is template-shaped, while the <i>public</i> identity beside
- *       it — {@code /projects/api/projects/qits/repositories/by-name/story-service} — is authored
- *       and survives verbatim. One request, both rules, and the label says which half of the
- *       repository identity is addressable outside the registry that minted it.
+ *   <li>A <b>generated uuid</b> row id is template-shaped in a label, so {@code GET
+ *       /projects/api/repositories/{id}} reads as the route rather than as one run's fixture.
  *   <li>The workspace fixture carries an <b>authored</b> row id ({@link #WORKSPACE_REPO_ID}),
  *       because it travels into a <i>container name</i> ({@code qits-ws-<label>-<repoId[0:8]>}) and
  *       out again as a path segment of every qits-containers call. A uuid there would put eight run
@@ -38,9 +35,9 @@ package eu.wohlben.qits.workspaces.stories.support;
  * </ul>
  *
  * <p><b>A query string never reaches a label from the shipped tap.</b> It labels {@code METHOD
- * <scrubbed PATH> -> <status>} and drops the query entirely, so {@code ?projectId=…&repositoryName=…}
- * is invisible to the release door's arrow — the addressing form is a step, not an edge. The
- * corollary is the trap: two routes differing only in their query are ONE edge.
+ * <scrubbed PATH> -> <status>} and drops the query entirely, so {@code ?repositoryId=…} is invisible
+ * to a door's arrow — the scope is a step, not an edge. The corollary is the trap: two routes
+ * differing only in their query are ONE edge.
  */
 public final class StoryTarget {
 
@@ -50,14 +47,16 @@ public final class StoryTarget {
   /** {@code /workspaces/api} — {@code quarkus.rest.path}. A resource's {@code @Path} is relative. */
   public static final String API_PATH = "/workspaces/api";
 
-  /** The release door this session drove seven services through. */
+  /**
+   * The branch-keyed merge door — one of the two verbs left under {@code /branches} now that the
+   * release door has gone to qits-projects. It is a person's door, and the refusal stories drive
+   * it for exactly that reason.
+   */
+  public static final String BRANCH_MERGE_PATH = API_PATH + "/branches/merge";
+
+  /** The retired release doors, so a story can assert they answer nothing. */
   public static final String BRANCH_RELEASE_PATH = API_PATH + "/branches/release";
 
-  /**
-   * The door split's execution arm — the landing the public door used to perform, kept whole for
-   * the gated executions and the operator's direct hand. The mechanics stories drive this one; the
-   * public door creates release requests in qits-projects now.
-   */
   public static final String BRANCH_EXECUTE_RELEASE_PATH = API_PATH + "/branches/execute-release";
 
   /** Workspaces, addressed by their own id — the collection. */
@@ -88,14 +87,12 @@ public final class StoryTarget {
   /** The project every fixture repository belongs to. Authored, so it survives a label. */
   public static final String PROJECT = "qits";
 
-  /** A deployable repository: it carries {@code .config/qits/deployments.yml}, so it promotes. */
-  public static final String SERVICE_REPO = "story-service";
-
-  /** A library: no deployment spec, so a release lands on the trunk and stops there. */
-  public static final String LIBRARY_REPO = "story-library";
-
-  /** A repository whose branch is already in its trunk — the "nothing to release" refusal. */
-  public static final String SETTLED_REPO = "story-settled";
+  /**
+   * The repository the refusal stories address. Authored and never registered anywhere: every
+   * refusal there happens before anything is looked up, and the one that does look up is armed to
+   * fail on the far side.
+   */
+  public static final String REFUSAL_REPO_ID = "story-refusal-repo";
 
   /** The repository the workspace stories create a workspace in. */
   public static final String WORKSPACE_REPO = "story-workspace";
@@ -152,18 +149,8 @@ public final class StoryTarget {
   /** The default branch of every fixture origin, and the one branch only a release may write. */
   public static final String MAIN = "main";
 
-  /**
-   * Where a release is promoted to. The shipped default is {@code environment/prod}; the platform's
-   * dev tier names this one, and the profile sets it — a release lands on the trunk and is pushed
-   * again onto the ref the environment listens to.
-   */
-  public static final String ENTRY_BRANCH = "environment/dev";
-
-  /** The branch the release stories release. */
+  /** The branch a refusal story asks about, which nothing ever reads. */
   public static final String WORK_BRANCH = "story-work";
-
-  /** A branch whose commits main already carries — the "already integrated" refusal. */
-  public static final String LANDED_BRANCH = "story-landed";
 
   /** The label the workspace stories ask for, which is also the branch they claim. */
   public static final String WORKSPACE_LABEL = "story-work";
@@ -174,14 +161,14 @@ public final class StoryTarget {
 
   private StoryTarget() {}
 
-  /** The release door's query string — the public identity pair, which the label never carries. */
-  public static String releaseQuery(String projectId, String repositoryName) {
-    return "?projectId=" + projectId + "&repositoryName=" + repositoryName;
+  /** The merge door's query string: a branch has no id of its own, so the repository narrows. */
+  public static String repositoryQuery(String repositoryId) {
+    return "?repositoryId=" + repositoryId;
   }
 
-  /** The request body of a release: the branch to land and the subject after the version scope. */
-  public static String releaseBody(String branch, String summary) {
-    return "{\"branch\":\"" + branch + "\",\"summary\":\"" + summary + "\"}";
+  /** The request body of a branch merge: what to land, and where. */
+  public static String mergeBody(String source, String target) {
+    return "{\"source\":\"" + source + "\",\"target\":\"" + target + "\"}";
   }
 
   /** The address of one workspace — what a create hands back and every later verb is keyed by. */

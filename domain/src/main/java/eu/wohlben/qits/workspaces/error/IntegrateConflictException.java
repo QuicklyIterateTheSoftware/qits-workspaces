@@ -29,9 +29,10 @@ public class IntegrateConflictException extends ConflictException {
    * does not recognise the value falls through to showing the message verbatim, which is exactly
    * the right treatment.
    *
-   * <p><b>The set is additive and stays that way.</b> {@link #RELEASE_REQUIRED} joined when the two
-   * doors split and {@link #VERSION_ALREADY_RELEASED} when the release grew a tag, which is the
-   * enum's whole purpose working: a new refusal is a new value, never a new envelope.
+   * <p><b>The set is additive and stays that way</b> — a new refusal is a new value, never a new
+   * envelope. It also shrinks when a flow leaves: {@code VERSION_ALREADY_RELEASED} and {@code
+   * HEAD_MOVED} went with the release door, which is qits-projects' now, and no code here can
+   * produce either.
    */
   public enum Reason {
     /** The preflight three-way merge conflicts. Nothing was attempted; no ref moved. */
@@ -45,39 +46,16 @@ public class IntegrateConflictException extends ConflictException {
     /** The git host refused the push. {@code message} is the host's own words. Not retryable. */
     PUSH_REJECTED,
     /**
-     * The version this release stamped is already a tag in the repository, so the release was
-     * refused whole — no commit landed and the default branch did not move.
-     *
-     * <p>The stamp has one-second resolution, so two releases of one repository in the same second
-     * would otherwise both land and claim one version. The tag is what makes that impossible: a
-     * non-forced push cannot overwrite an existing tag ref, and the release push is atomic, so the
-     * branch update goes down with it.
-     *
-     * <p><b>Retryable, unlike {@link #PUSH_REJECTED}</b>, which is why it is not that value: the
-     * next attempt stamps a different second and simply works. A client can offer the button again.
-     */
-    VERSION_ALREADY_RELEASED,
-    /**
      * The wrong door: this merge or integrate would land on the repository's default branch, which
-     * only a release writes. Nothing was attempted. The caller wants {@code
-     * POST /workspaces/api/workspaces/{id}/release} instead, and the message names it.
+     * this service does not write at all. Nothing was attempted. The caller wants a release request
+     * in qits-projects (or {@code POST /workspaces/api/workspaces/{id}/integrate} for the parent
+     * branch), and the message names both.
      *
-     * <p>A refusal about <em>which endpoint</em> rather than about the state of the branches, which
-     * is why it is worth a value of its own: a client can offer the right button instead of
+     * <p>A refusal about <em>which flow</em> rather than about the state of the branches, which is
+     * why it is worth a value of its own: a client can offer the right button instead of
      * word-matching prose for the endpoint name.
      */
-    RELEASE_REQUIRED,
-    /**
-     * The caller pinned the release to a commit ({@code expectedSha}) and the source branch's head
-     * is not that commit any more. Nothing was attempted; no ref moved.
-     *
-     * <p>The release-quality-gates flow is the caller this exists for: its gates evaluated one sha,
-     * and merging whatever the branch holds <em>now</em> would ship work nothing gated. The honest
-     * answer is a refusal naming both shas — the caller re-gates the new head and asks again.
-     * Retryable in that sense: not by repeating the same call, but by requesting the release of
-     * what the branch has become.
-     */
-    HEAD_MOVED
+    RELEASE_REQUIRED
   }
 
   private final Reason reason;

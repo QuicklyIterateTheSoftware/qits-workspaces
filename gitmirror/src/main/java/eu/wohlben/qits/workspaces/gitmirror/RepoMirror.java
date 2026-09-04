@@ -373,7 +373,8 @@ public final class RepoMirror {
    * new to build, and building it anyway is measurable waste — an aggregate branch tree creates a
    * branch in every registered repository at once, which queued one redundant run per repository on
    * a single-build queue. The option suppresses no event; the git host still announces the ref with
-   * {@code suppressCi} as a fact, exactly as the release flow's trunk push does.
+   * {@code suppressCi} as a fact. It is the only push option any caller of this module still sends
+   * — the release flow's {@code -o qits.release} left qits-workspaces with the release door.
    */
   public PushOutcome createBranch(String branch, String from) {
     return push(

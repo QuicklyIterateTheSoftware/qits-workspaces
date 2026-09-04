@@ -61,32 +61,6 @@ public class HttpRepositoryLookupTest {
     return "http://127.0.0.1:" + server.getAddress().getPort();
   }
 
-  /**
-   * Starts a stub whose answer depends on the path, because {@code findByName} is <b>two</b> reads
-   * in one call — the alias table, then the ordinary by-id view — and a single-answer stub would
-   * feed the second read the first one's body. A path the function has no body for is a 404.
-   */
-  private String serveRouted(java.util.function.Function<String, String> bodyForPath)
-      throws Exception {
-    server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-    server.createContext(
-        "/",
-        exchange -> {
-          String path = exchange.getRequestURI().getPath();
-          requestedPaths.add(path);
-          String body = bodyForPath.apply(path);
-          byte[] bytes =
-              body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-          exchange.getResponseHeaders().add("Content-Type", "application/json");
-          exchange.sendResponseHeaders(body == null ? 404 : 200, bytes.length == 0 ? -1 : bytes.length);
-          try (OutputStream out = exchange.getResponseBody()) {
-            out.write(bytes);
-          }
-        });
-    server.start();
-    return "http://127.0.0.1:" + server.getAddress().getPort();
-  }
-
   /** The bean wired to {@code baseUrl}, with a real generated client pointed at the same place. */
   private HttpRepositoryLookup lookupAgainst(String baseUrl) {
     HttpRepositoryLookup lookup = new HttpRepositoryLookup();
@@ -113,9 +87,8 @@ public class HttpRepositoryLookupTest {
 
   /**
    * The row id and the name are read as two separate answers, and the fixture makes them differ on
-   * purpose: a repository the projects self-seed registered carries a UUID id, so a view that
-   * quietly reported the id as the name would publish an SCMRelease no committed CI selection can
-   * address — which is the defect {@code repositoryName} closed.
+   * purpose: a repository the projects self-seed registered carries a UUID id, and a view that
+   * quietly reported the id as the name would name a repository nothing committed can address.
    */
   @Test
   public void aKnownRepositoryYieldsItsIdNameProjectAndMainBranch() throws Exception {
@@ -132,12 +105,12 @@ public class HttpRepositoryLookupTest {
 
     assertTrue(found.isPresent());
     assertEquals("7d45ae57-8cab-49dd-afbd-ac82c720ec6e", found.get().id());
-    assertEquals("qits-projects-daemon", found.get().name(), "SCMRelease names the repository");
+    assertEquals("qits-projects-daemon", found.get().name(), "the view names the repository");
     assertEquals("main", found.get().mainBranch());
-    assertEquals("p-1", found.get().projectId(), "SCMRelease names the project");
+    assertEquals("p-1", found.get().projectId(), "the view names the project");
   }
 
-  /** A registry answering with no name resolves anyway: the release must not depend on the field. */
+  /** A registry answering with no name resolves anyway: no flow may depend on the field. */
   @Test
   public void aRepositoryWithNoNameStillResolves() throws Exception {
     String base = serve(200, "{\"repository\":{\"id\":\"repo-1\",\"mainBranch\":\"main\"}}");
@@ -209,91 +182,6 @@ public class HttpRepositoryLookupTest {
   }
 
   // --- the public identity: (projectId, repoName) --------------------------------------------
-
-  /**
-   * The name form, end to end: the alias table answers an id and the ordinary by-id read answers
-   * the view. Both paths are asserted <b>in order</b>, because the two-call shape is the decision —
-   * a resolver that built a view out of the caller's own two strings would report a main branch
-   * nobody looked up.
-   */
-  @Test
-  public void aProjectScopedNameResolvesThroughTheAliasTableAndThenTheByIdRead() throws Exception {
-    String id = "7d45ae57-8cab-49dd-afbd-ac82c720ec6e";
-    String base =
-        serveRouted(
-            path ->
-                path.endsWith("/by-name/qits-workspaces")
-                    ? "{\"repositoryId\":\"" + id + "\"}"
-                    : ("""
-                       {"repository":{"id":"%s","name":"qits-workspaces","mainBranch":"main",\
-                       "projectId":"qits"}}""")
-                        .formatted(id));
-
-    Optional<RepositoryLookup.RepositoryView> found =
-        lookupAgainst(base).findByName("qits", "qits-workspaces");
-
-    assertEquals(
-        List.of(
-            "/projects/api/projects/qits/repositories/by-name/qits-workspaces",
-            "/projects/api/repositories/" + id),
-        requestedPaths);
-    assertTrue(found.isPresent());
-    assertEquals(id, found.get().id());
-    assertEquals("qits-workspaces", found.get().name());
-    assertEquals("qits", found.get().projectId());
-    assertEquals("main", found.get().mainBranch());
-  }
-
-  /**
-   * qits-projects answers 404 for an unknown project and an unknown name alike, and both are the
-   * same answer here: this project holds no repository by that name. The release door turns it into
-   * a 404 of its own naming the pair.
-   */
-  @Test
-  public void anUnknownNameIsEmptyRatherThanAnError() throws Exception {
-    String base = serve(404, "{\"message\":\"No repository named 'nope' in project qits\"}");
-
-    assertTrue(lookupAgainst(base).findByName("qits", "nope").isEmpty());
-  }
-
-  /**
-   * The distinction again, on the name path — and it matters more here than anywhere: the caller is
-   * a pipeline step, and an outage reported as "no such repository" would tell it its repository
-   * had been deleted.
-   */
-  @Test
-  public void anUnreachableRegistryThrowsWhileResolvingAName() {
-    HttpRepositoryLookup lookup = lookupAgainst("http://127.0.0.1:1");
-
-    IllegalStateException failure =
-        assertThrows(IllegalStateException.class, () -> lookup.findByName("qits", "qits-workspaces"));
-    assertTrue(
-        failure.getMessage().contains("unreachable"),
-        "expected the message to name the outage, got: " + failure.getMessage());
-  }
-
-  @Test
-  public void aServerErrorWhileResolvingANameThrowsInsteadOfReadingAsNotFound() throws Exception {
-    String base = serve(500, "boom");
-
-    IllegalStateException failure =
-        assertThrows(
-            IllegalStateException.class, () -> lookupAgainst(base).findByName("qits", "qits-qits"));
-    assertTrue(
-        failure.getMessage().contains("500"),
-        "expected the message to carry the status, got: " + failure.getMessage());
-  }
-
-  @Test
-  public void halfAnAddressIsNotWorthACall() throws Exception {
-    String base = serve(200, "{\"repositoryId\":\"repo-1\"}");
-    HttpRepositoryLookup lookup = lookupAgainst(base);
-
-    assertTrue(lookup.findByName("  ", "qits-qits").isEmpty());
-    assertTrue(lookup.findByName("qits", " ").isEmpty());
-    assertTrue(lookup.findByName(null, null).isEmpty());
-    assertTrue(requestedPaths.isEmpty(), "half an address should not reach the network");
-  }
 
   @Test
   public void anUnknownRepositoryIsEmptyRatherThanAnError() throws Exception {

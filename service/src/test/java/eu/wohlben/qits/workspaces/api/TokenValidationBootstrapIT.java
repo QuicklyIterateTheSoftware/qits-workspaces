@@ -45,10 +45,10 @@ import org.junit.jupiter.api.TestMethodOrder;
  * the story about it.
  *
  * <p><b>What moved out.</b> The refusals used to be here, both of them, and the second one is now
- * the last story of the last class ({@code stories.refusals.ReleaseDoorRefusalIT}). The reason is
+ * the last story of the last class ({@code stories.refusals.MergeDoorRefusalIT}). The reason is
  * ordering insurance rather than a fact about this class: a token whose {@code kid} the cached key
  * set does not hold makes quarkus-oidc refetch the JWKS before refusing, and that arrow lands in
- * whichever story drains next — which, from here, was the first release story. Measured, the mock's
+ * whichever story drains next — which, from here, was whatever ran first. Measured, the mock's
  * unknown key keeps the published {@code kid} and buys no refetch at all; the refusal story asserts
  * that absence, and stays last so a fixture that changed would not silently move an arrow into
  * somebody else's diagram. What stayed here is the wrong-audience refusal, which is about the token
@@ -106,7 +106,7 @@ public class TokenValidationBootstrapIT {
       at startup it fetches the signing keys (JWKS) from qits-platform-idp — discovery stays off,
       the path is configured — so the very first machine request is judged on the platform's own
       keys. The callers that depend on it are the ones that cannot log in: a workspace daemon
-      dialling its control socket, and the pipeline step that drives the release door.
+      dialling its control socket, and the machine callers that drive this service's API.
 
       It asks the idp a second question at boot, and it is not about keys at all. Every workspace
       container holds an idp client commissioned for it, handed back when the container is torn
@@ -179,7 +179,7 @@ public class TokenValidationBootstrapIT {
       """
       The flip side of trusting the platform's keys. Every service on qits-net is issued tokens by
       the same idp and validated against the same JWKS, so a signature alone says nothing about who
-      a token was for: a bearer good for qits-containers must not also open the release door. The
+      a token was for: a bearer good for qits-containers must not also open this service's doors. The
       audience claim is what draws that line, and it is checked at the door rather than anywhere a
       caller can reach.
 

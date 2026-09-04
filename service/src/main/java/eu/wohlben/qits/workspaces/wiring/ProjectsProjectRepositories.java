@@ -21,32 +21,6 @@ public interface ProjectsProjectRepositories {
       @PathParam("projectId") String projectId,
       @HeaderParam("Authorization") String authorization);
 
-  /**
-   * Resolves a project-scoped repository <b>name</b> to its row id — qits-projects' alias table,
-   * the single authority on the public {@code (projectId, repoName)} identity. 404 for an unknown
-   * project and an unknown name alike, in the same words, which is why {@link HttpRepositoryLookup}
-   * reports both as "no such name".
-   *
-   * <p>The route requires {@code qits:system}, so the call carries this service's own machine
-   * bearer like every other call on this client. It is the same read qits-githost makes to serve
-   * {@code /git/<projectId>/<repoName>}; nothing about it is workspaces-specific.
-   */
-  @GET
-  @Path("/{projectId}/repositories/by-name/{repoName}")
-  @Produces(MediaType.APPLICATION_JSON)
-  ByNameResponse byName(
-      @PathParam("projectId") String projectId,
-      @PathParam("repoName") String repoName,
-      @HeaderParam("Authorization") String authorization);
-
-  /**
-   * qits-projects' {@code ProjectController.ResolveRepositoryNameRequest.Response} — the opaque
-   * storage key the name addresses, and nothing else. The full view is then the ordinary by-id
-   * read, so this context has one description of a repository rather than two.
-   */
-  @JsonIgnoreProperties(ignoreUnknown = true)
-  record ByNameResponse(String repositoryId) {}
-
   @JsonIgnoreProperties(ignoreUnknown = true)
   record ListResponse(List<Entry> entries) {}
 

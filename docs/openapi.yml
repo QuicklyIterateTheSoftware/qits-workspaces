@@ -98,22 +98,6 @@ components:
           pattern: \S
         result:
           type: string
-    CreateBody:
-      type: object
-      properties:
-        branch:
-          type: string
-        commitSha:
-          type: string
-        summary:
-          type: string
-        requester:
-          type: string
-    CreateResponse:
-      type: object
-      properties:
-        request:
-          $ref: "#/components/schemas/RequestView"
     CreateWorkspaceRequest:
       type: object
       required:
@@ -184,13 +168,6 @@ components:
       properties:
         target:
           type: string
-    Promotion:
-      type: object
-      properties:
-        branch:
-          type: string
-        error:
-          type: string
     PromptAttachmentSource:
       type: string
       enum:
@@ -204,60 +181,7 @@ components:
       - NOT_FAST_FORWARD
       - ALREADY_INTEGRATED
       - PUSH_REJECTED
-      - VERSION_ALREADY_RELEASED
       - RELEASE_REQUIRED
-      - HEAD_MOVED
-    ReleaseBranchRequest:
-      type: object
-      required:
-      - branch
-      - summary
-      properties:
-        branch:
-          type: string
-          pattern: \S
-        summary:
-          type: string
-          maxLength: 100
-          pattern: \S
-        expectedSha:
-          type: string
-          pattern: "[0-9a-f]{7,64}"
-    ReleaseRequest:
-      type: object
-      required:
-      - summary
-      properties:
-        summary:
-          type: string
-          maxLength: 100
-          pattern: \S
-    ReleaseRequested:
-      type: object
-      properties:
-        requestId:
-          type: string
-        state:
-          type: string
-        branch:
-          type: string
-        commitSha:
-          type: string
-        detail:
-          type: string
-    RequestView:
-      type: object
-      properties:
-        id:
-          type: string
-        state:
-          type: string
-        branch:
-          type: string
-        commitSha:
-          type: string
-        detail:
-          type: string
     Response:
       type: object
       properties:
@@ -272,56 +196,41 @@ components:
     Response1:
       type: object
       properties:
-        version:
-          type: string
-        commitSha:
-          type: string
-        branch:
-          type: string
-        promotions:
-          type: array
-          items:
-            $ref: "#/components/schemas/Promotion"
+        success:
+          type: boolean
     Response10:
-      type: object
-      properties:
-        workspace:
-          $ref: "#/components/schemas/WorkspaceDto"
-        technicalProcessId:
-          type: string
-    Response11:
       type: object
       properties:
         success:
           type: boolean
-    Response12:
+    Response11:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
-    Response13:
+    Response12:
       type: object
       properties:
         technicalProcessId:
           type: string
-    Response14:
+    Response13:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
-    Response15:
+    Response14:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry1"
-    Response16:
+    Response15:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceHistoryDetailDto"
-    Response17:
+    Response16:
       type: object
       properties:
         id:
@@ -334,13 +243,18 @@ components:
           $ref: "#/components/schemas/PromptAttachmentSource"
         createdAt:
           $ref: "#/components/schemas/Instant"
-    Response18:
+    Response17:
       type: object
       properties:
         attachments:
           type: array
           items:
             $ref: "#/components/schemas/WorkspacePromptAttachmentDataDto"
+    Response18:
+      type: object
+      properties:
+        draft:
+          $ref: "#/components/schemas/WorkspacePromptDraftDto"
     Response19:
       type: object
       properties:
@@ -349,35 +263,25 @@ components:
     Response2:
       type: object
       properties:
-        success:
-          type: boolean
-    Response20:
-      type: object
-      properties:
-        draft:
-          $ref: "#/components/schemas/WorkspacePromptDraftDto"
-    Response3:
-      type: object
-      properties:
         events:
           type: array
           items:
             $ref: "#/components/schemas/ServiceEventDto"
-    Response4:
+    Response3:
       type: object
       properties:
         runs:
           type: array
           items:
             $ref: "#/components/schemas/BootstrapRunDto"
-    Response5:
+    Response4:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
         technicalProcessId:
           type: string
-    Response6:
+    Response5:
       type: object
       properties:
         commitHash:
@@ -386,14 +290,14 @@ components:
           type: boolean
         output:
           type: string
-    Response7:
+    Response6:
       type: object
       properties:
         entries:
           type: array
           items:
             $ref: "#/components/schemas/Entry"
-    Response8:
+    Response7:
       type: object
       properties:
         commitSha:
@@ -402,11 +306,18 @@ components:
           type: string
         targetBranch:
           type: string
+    Response8:
+      type: object
+      properties:
+        workspace:
+          $ref: "#/components/schemas/WorkspaceDto"
     Response9:
       type: object
       properties:
         workspace:
           $ref: "#/components/schemas/WorkspaceDto"
+        technicalProcessId:
+          type: string
     SavePromptDraftRequest:
       type: object
       required:
@@ -728,7 +639,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response2"
+                $ref: "#/components/schemas/Response1"
         "400":
           description: "The branch is not eligible: uncommitted changes, unmerged\
             \ commits, or dependents."
@@ -752,54 +663,6 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
-  /workspaces/api/branches/execute-release:
-    post:
-      parameters:
-      - name: projectId
-        in: query
-        schema:
-          type: string
-      - name: repositoryId
-        in: query
-        schema:
-          type: string
-      - name: repositoryName
-        in: query
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ReleaseBranchRequest"
-        required: true
-      responses:
-        "200":
-          description: Released; the version and the merge commit.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Response1"
-        "409":
-          description: Nothing was released and the default branch is unchanged. `reason`
-            says which refusal — HEAD_MOVED when the branch outran the pinned sha.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "401":
-          description: Not Authorized
-        "403":
-          description: Not Allowed
-        "400":
-          description: Bad Request
-      summary: Execute Release
-      tags:
-      - Branch Controller
-      security:
-      - SecurityScheme:
-        - qits:admin
-        - qits:system
   /workspaces/api/branches/merge:
     post:
       parameters:
@@ -834,7 +697,7 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "409":
           description: The target is the repository's default branch. `reason` is
-            RELEASE_REQUIRED and the message names the two endpoints that do write
+            RELEASE_REQUIRED and the message names the release flow that does write
             it.
           content:
             application/json:
@@ -845,61 +708,6 @@ paths:
         "403":
           description: Not Allowed
       summary: Merge Branch
-      tags:
-      - Branch Controller
-      security:
-      - SecurityScheme:
-        - qits:admin
-  /workspaces/api/branches/release:
-    post:
-      parameters:
-      - name: projectId
-        in: query
-        schema:
-          type: string
-      - name: repositoryId
-        in: query
-        schema:
-          type: string
-      - name: repositoryName
-        in: query
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ReleaseBranchRequest"
-        required: true
-      responses:
-        "200":
-          description: "The release request, created or converged — poll it until\
-            \ RELEASED, REJECTED or FAILED. Nothing has merged yet; the gates decide\
-            \ when it does."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReleaseRequested"
-        "400":
-          description: "A blank, dash-leading or oversized field — or the default\
-            \ branch itself, which a release lands on and cannot be released into\
-            \ — or the repository addressed both ways at once, or neither."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "404":
-          description: "No such repository, no repository by that name in that project,\
-            \ or the origin has no such branch."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "401":
-          description: Not Authorized
-        "403":
-          description: Not Allowed
-      summary: Release Branch
       tags:
       - Branch Controller
       security:
@@ -983,7 +791,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response15"
+                $ref: "#/components/schemas/Response14"
         "401":
           description: Not Authorized
         "403":
@@ -1015,7 +823,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response14"
+                $ref: "#/components/schemas/Response13"
         "401":
           description: Not Authorized
         "403":
@@ -1040,7 +848,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response16"
+                $ref: "#/components/schemas/Response15"
         "401":
           description: Not Authorized
         "403":
@@ -1051,35 +859,6 @@ paths:
       security:
       - SecurityScheme:
         - qits:admin
-  /workspaces/api/projects/api/repositories/{repoId}/release-requests:
-    post:
-      parameters:
-      - name: repoId
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: X-Qits-Roles
-        in: header
-        schema:
-          type: string
-      - name: X-Qits-User
-        in: header
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateBody"
-        required: true
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CreateResponse"
   /workspaces/api/service-events:
     get:
       parameters:
@@ -1124,7 +903,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response3"
+                $ref: "#/components/schemas/Response2"
         "401":
           description: Not Authorized
         "403":
@@ -1148,7 +927,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response7"
+                $ref: "#/components/schemas/Response6"
         "401":
           description: Not Authorized
         "403":
@@ -1172,7 +951,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response12"
+                $ref: "#/components/schemas/Response11"
         "401":
           description: Not Authorized
         "403":
@@ -1200,7 +979,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response9"
+                $ref: "#/components/schemas/Response8"
         "404":
           description: No such ACTIVE workspace.
           content:
@@ -1232,7 +1011,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response13"
+                $ref: "#/components/schemas/Response12"
         "401":
           description: Not Authorized
         "403":
@@ -1258,7 +1037,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response4"
+                $ref: "#/components/schemas/Response3"
         "404":
           description: No such ACTIVE workspace.
           content:
@@ -1327,7 +1106,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response11"
+                $ref: "#/components/schemas/Response10"
         "401":
           description: Not Authorized
         "403":
@@ -1355,7 +1134,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response10"
+                $ref: "#/components/schemas/Response9"
         "401":
           description: Not Authorized
         "403":
@@ -1387,7 +1166,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response8"
+                $ref: "#/components/schemas/Response7"
         "400":
           description: "No summary, an oversized one, or a workspace with no branch\
             \ to integrate."
@@ -1403,8 +1182,8 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "409":
           description: "Nothing landed and the target is unchanged — including when\
-            \ the parent is the default branch, which only /release may write. `reason`\
-            \ says which refusal."
+            \ the parent is the default branch, which only the release flow writes.\
+            \ `reason` says which refusal."
           content:
             application/json:
               schema:
@@ -1440,10 +1219,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response6"
+                $ref: "#/components/schemas/Response5"
         "409":
-          description: The target is the repository's default branch. Use /integrate
-            or /release.
+          description: "The target is the repository's default branch. Use /integrate,\
+            \ or ask qits-projects for a release request."
           content:
             application/json:
               schema:
@@ -1481,7 +1260,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response18"
+                $ref: "#/components/schemas/Response17"
         "404":
           description: No such ACTIVE workspace.
           content:
@@ -1518,7 +1297,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response17"
+                $ref: "#/components/schemas/Response16"
         "400":
           description: "Not valid base64, not a PNG or JPEG, or an unknown source."
           content:
@@ -1573,7 +1352,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response17"
+                $ref: "#/components/schemas/Response16"
         "400":
           description: "Not valid base64, not a PNG or JPEG, or an unknown source."
           content:
@@ -1690,7 +1469,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response19"
+                $ref: "#/components/schemas/Response18"
         "400":
           description: The content is not a well-formed JSON document.
           content:
@@ -1733,7 +1512,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response20"
+                $ref: "#/components/schemas/Response19"
         "404":
           description: "No such ACTIVE workspace, or it has no saved draft."
           content:
@@ -1792,59 +1571,12 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response5"
+                $ref: "#/components/schemas/Response4"
         "401":
           description: Not Authorized
         "403":
           description: Not Allowed
       summary: Recreate Container
-      tags:
-      - Workspace Controller
-      security:
-      - SecurityScheme:
-        - qits:admin
-  /workspaces/api/workspaces/{id}/release:
-    post:
-      parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ReleaseRequest"
-        required: true
-      responses:
-        "200":
-          description: "The release request for this workspace's branch, created or\
-            \ converged — poll it until RELEASED. The workspace resolves when the\
-            \ gated release executes, not at this call."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReleaseRequested"
-        "400":
-          description: "No summary, an oversized one, or a workspace with no branch\
-            \ to release."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "404":
-          description: No such workspace.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "401":
-          description: Not Authorized
-        "403":
-          description: Not Allowed
-      summary: Release
       tags:
       - Workspace Controller
       security:
@@ -1878,4 +1610,4 @@ paths:
         - qits:admin
 info:
   title: qits-workspaces API
-  version: 2026.901.71807
+  version: 2026.903.113417
