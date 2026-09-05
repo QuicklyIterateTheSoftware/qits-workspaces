@@ -12,6 +12,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import java.util.List;
+import java.util.Map;
 import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;
 
 /**
@@ -53,8 +54,20 @@ public interface IdpClients {
       @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization,
       @PathParam("clientId") String clientId);
 
-  /** What a caller asks for: which context this credential is being commissioned for. */
-  record CommissionRequest(String contextKind, String contextId) {}
+  /**
+   * What a caller asks for: which context this credential is being commissioned for, and what that
+   * context is about.
+   *
+   * <p>{@code claims} narrows the credential qits-idp is about to mint — {@code
+   * {"project":"<projectId>"}} here, so every token this workspace's container presents says which
+   * project it may act in. The issuer refuses anything it will not grant, including the wildcard, so
+   * a value this service cannot resolve travels as no member at all rather than as {@code "*"}.
+   *
+   * <p><b>An idp that predates the member ignores it</b> rather than refusing the call — the
+   * commission API tolerates unknown members, measured against the live one — which is what lets
+   * this service ship before the issuer does. What that costs is the scope, not the workspace.
+   */
+  record CommissionRequest(String contextKind, String contextId, Map<String, String> claims) {}
 
   /**
    * qits-idp's {@code IdpClientsController.CommissionResponse}, narrowed to the two fields this

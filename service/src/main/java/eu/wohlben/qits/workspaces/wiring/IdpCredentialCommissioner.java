@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
@@ -80,13 +81,13 @@ public class IdpCredentialCommissioner implements CredentialCommissioner {
   @Inject @RestClient IdpClients clients;
 
   @Override
-  public Optional<WorkspaceCredential> commission(Long rowId) {
+  public Optional<WorkspaceCredential> commission(Long rowId, String projectId) {
     String authorization = authorization();
     if (authorization == null || rowId == null) {
       return Optional.empty();
     }
     IdpClients.CommissionRequest request =
-        new IdpClients.CommissionRequest(CONTEXT_KIND, Long.toString(rowId));
+        new IdpClients.CommissionRequest(CONTEXT_KIND, Long.toString(rowId), claims(projectId));
     Instant giveUpAt = Instant.now().plus(patience);
     // Never pause past the window itself: a pause longer than the patience would make a short
     // patience mean one attempt while looking like a window.
@@ -164,6 +165,27 @@ public class IdpCredentialCommissioner implements CredentialCommissioner {
       LOG.warnf("Could not list this service's commissions at qits-idp: %s", e.toString());
       return List.of();
     }
+  }
+
+  /**
+   * What the commission states about this context: the project, or nothing.
+   *
+   * <p><b>A blank project is no member, never a blank value and never {@code "*"}.</b> qits-idp
+   * refuses both of those, and refusing is the right answer to them — but this service must not turn
+   * "the registry could not name the project" into a failed workspace launch, so the unresolved case
+   * simply asks for what every workspace credential asked for before scoping existed. What it costs
+   * is the narrowing; the container still starts and still has an identity.
+   */
+  private static Map<String, String> claims(String projectId) {
+    String project = projectId == null ? "" : projectId.trim();
+    if (project.isEmpty()) {
+      LOG.warn(
+          "Commissioning a workspace credential with no project scope: the repository registry named"
+              + " no project for it. The credential will be issued unscoped, as it was before"
+              + " per-context scoping.");
+      return null;
+    }
+    return Map.of(CredentialCommissioner.PROJECT_CLAIM, project);
   }
 
   /**

@@ -1093,6 +1093,18 @@ container on every resume. The row makes the spec reproducible at every ensure, 
 **secret** is a column and not something re-fetched: qits-idp hands it out once.
 `WorkspaceContainersTest` asserts the two specs differ, which is the same fact from the other side.
 
+**The commission says which project, and that is the whole of per-context scoping on this side.**
+`commissionFor` resolves `repoId` to its project through `RepositoryLookup` and passes it to
+`CredentialCommissioner.commission(rowId, projectId)`, where it becomes `claims.project` on the
+commission request. The row id and the project are deliberately different arguments carrying
+different facts: the row id is the `contextId` a reconcile compares against live workspaces, and the
+project is the scope a resource service judges the credential on. **An unresolved project is null and
+means unscoped**, matching `WorkspaceContainerFactory`'s standing reading that a project the registry
+cannot name costs a label and never a workspace — the wider credential is a worse answer than no
+workspace only if you have not had a registry blink during a launch. It is never sent as `"*"`;
+qits-idp refuses a commission that tries to widen itself, and asking would be asking for the thing
+this change exists to stop granting.
+
 **Four seams, and the reason there is no `WorkspaceResolved` observer.** Commissioning is in
 `provisionContainer` alone — the fresh arm of `ensureContainer` and, through it, recreate, so nothing
 else has to remember. Decommissioning is at three: `doDiscard` (every resolution verb), the

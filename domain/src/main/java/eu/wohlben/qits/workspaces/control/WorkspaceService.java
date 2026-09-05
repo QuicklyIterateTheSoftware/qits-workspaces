@@ -351,13 +351,21 @@ public class WorkspaceService {
    * <p>Its own transaction, and not the caller's: {@link #provisionContainer} runs outside one (each
    * status transition commits separately), and the pair must be committed before {@code
    * containers.run} asks the factory to read it back.
+   *
+   * <p><b>The commission says which project the credential is for</b>, resolved from the repository
+   * the workspace branches. That is the whole of per-context scoping on this side: the issuer turns
+   * it into a {@code project} claim, and a resource service then judges this container's token on the
+   * project rather than on its platform role alone — a workspace agent can have its own project's
+   * pipelines evaluated and nobody else's. The project the container is told about ({@code
+   * QITS_WORKSPACE_DAEMON_PROJECT_ID}, put there by {@link WorkspaceContainerFactory}) and the one
+   * the credential is scoped to are deliberately the same fact from the same registry.
    */
   private void commissionFor(String repoId, String workspaceId, Long rowId) {
     if (!commissioner.isResolvable()) {
       return;
     }
     decommissionFor(rowId);
-    Optional<WorkspaceCredential> issued = commissioner.get().commission(rowId);
+    Optional<WorkspaceCredential> issued = commissioner.get().commission(rowId, projectOf(repoId));
     if (issued.isEmpty()) {
       // No issuer wired. Supported, and the same as no implementation at all.
       return;
@@ -375,6 +383,34 @@ public class WorkspaceService {
                         }));
     LOG.debugf(
         "Commissioned %s for workspace %s/%s", credential.clientId(), repoId, workspaceId);
+  }
+
+  /**
+   * The project a repository belongs to, or null when the registry cannot say.
+   *
+   * <p><b>Null is not a failure here.</b> Every caller is a launch, and the registry answering
+   * nothing is a moment rather than a verdict — the same reading {@link WorkspaceContainerFactory}
+   * already takes for the label and the daemon's env, where a project it cannot resolve costs a
+   * label and never a workspace. So an unresolved project costs the credential its scope: it is
+   * commissioned exactly as workspace credentials were before scoping existed, which is wider than
+   * intended and still narrower than not starting.
+   */
+  private String projectOf(String repoId) {
+    if (repoId == null || repoId.isBlank()) {
+      return null;
+    }
+    try {
+      return repositories
+          .find(repoId)
+          .map(RepositoryLookup.RepositoryView::projectId)
+          .filter(project -> !project.isBlank())
+          .orElse(null);
+    } catch (RuntimeException registryDidNotAnswer) {
+      LOG.debugf(
+          "Could not resolve the project of %s to scope its workspace credential: %s",
+          repoId, registryDidNotAnswer.toString());
+      return null;
+    }
   }
 
   /**

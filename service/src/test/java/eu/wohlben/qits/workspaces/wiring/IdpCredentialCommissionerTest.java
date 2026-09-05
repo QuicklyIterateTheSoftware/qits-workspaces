@@ -35,6 +35,9 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 public class IdpCredentialCommissionerTest {
 
+  /** A project id in the shape the platform mints them — the value that reaches the claim. */
+  private static final String A_PROJECT = "b03b84b1-1875-4071-9dbf-854550156258";
+
   private HttpServer server;
   private final List<String> requests = new CopyOnWriteArrayList<>();
   private final List<String> authorizations = new CopyOnWriteArrayList<>();
@@ -94,7 +97,7 @@ public class IdpCredentialCommissionerTest {
     String url =
         serve(List.of(new Answer(201, "{\"clientId\":\"ws-7-a\",\"secret\":\"s3cr3t\"}")));
 
-    Optional<WorkspaceCredential> issued = commissionerAgainst(url).commission(7L);
+    Optional<WorkspaceCredential> issued = commissionerAgainst(url).commission(7L, A_PROJECT);
 
     assertEquals(Optional.of(new WorkspaceCredential("ws-7-a", "s3cr3t")), issued);
     assertEquals(List.of("POST /api/clients"), requests);
@@ -103,9 +106,47 @@ public class IdpCredentialCommissionerTest {
     assertEquals(
         List.of(IdpCredentialCommissioner.basic("dev-qits-workspaces", "service-secret")),
         authorizations);
-    // The triple per-context scoping will attach to: the kind, and the workspace row id.
+    // WHICH context this credential belongs to — the kind and the workspace row id, which is what
+    // the reconcile compares against live workspaces.
     assertTrue(bodies.get(0).contains("\"contextKind\":\"workspace\""), bodies.get(0));
     assertTrue(bodies.get(0).contains("\"contextId\":\"7\""), bodies.get(0));
+    // And what that context is ABOUT, which is what every resource service judges it on.
+    assertTrue(
+        bodies.get(0).contains("\"claims\":{\"project\":\"" + A_PROJECT + "\"}"), bodies.get(0));
+  }
+
+  @Test
+  public void anUnresolvedProjectCostsTheScopeAndNotTheLaunch() throws Exception {
+    // The registry could not name the project. That is a moment, not a verdict, and a workspace that
+    // does not start is a worse answer than a credential scoped as every one of them was before.
+    // No member at all — never a blank value and never "*", both of which qits-idp refuses.
+    String url =
+        serve(List.of(new Answer(201, "{\"clientId\":\"ws-7-a\",\"secret\":\"s3cr3t\"}")));
+
+    assertEquals(
+        Optional.of(new WorkspaceCredential("ws-7-a", "s3cr3t")),
+        commissionerAgainst(url).commission(7L, null));
+    assertFalse(bodies.get(0).contains("project"), bodies.get(0));
+    assertFalse(bodies.get(0).contains("*"), bodies.get(0));
+
+    // Blank and whitespace are the same fact as absent, and travel the same way.
+    commissionerAgainst(url).commission(8L, "   ");
+    assertFalse(bodies.get(1).contains("project"), bodies.get(1));
+  }
+
+  @Test
+  public void anIdpThatPredatesTheClaimStillCommissions() throws Exception {
+    // The deploy order this change ships in: this service moves before the issuer does. The
+    // commission API ignores members it does not know, so the call lands and the credential is
+    // simply unscoped until the issuer catches up — measured against the live idp, which answered
+    // the access-denied of an unentitled caller rather than a 400 about the body.
+    String url =
+        serve(List.of(new Answer(201, "{\"clientId\":\"ws-9-a\",\"secret\":\"s3cr3t\"}")));
+
+    assertEquals(
+        Optional.of(new WorkspaceCredential("ws-9-a", "s3cr3t")),
+        commissionerAgainst(url).commission(9L, A_PROJECT),
+        "the answer is read for the pair and nothing else");
   }
 
   @Test
@@ -116,7 +157,7 @@ public class IdpCredentialCommissionerTest {
 
     // The shipped posture. Empty is a configuration, not a failure — the same standing as no
     // implementation at all — so a workspace launches with no credential and no error.
-    assertEquals(Optional.empty(), commissioner.commission(7L));
+    assertEquals(Optional.empty(), commissioner.commission(7L, A_PROJECT));
     commissioner.decommission("ws-7-a");
     assertEquals(List.of(), commissioner.list());
     assertEquals(List.of(), requests, "an unwired commissioner dials nothing");
@@ -130,7 +171,7 @@ public class IdpCredentialCommissionerTest {
 
     // The switch on but no secret in the process is the same state: there is nothing to
     // authenticate with, so there is nothing to commission against.
-    assertEquals(Optional.empty(), commissioner.commission(7L));
+    assertEquals(Optional.empty(), commissioner.commission(7L, A_PROJECT));
     assertEquals(List.of(), requests);
   }
 
@@ -144,7 +185,7 @@ public class IdpCredentialCommissionerTest {
                 new Answer(401, "{\"error\":\"invalid_client\"}"),
                 new Answer(201, "{\"clientId\":\"ws-7-b\",\"secret\":\"s3cr3t\"}")));
 
-    Optional<WorkspaceCredential> issued = commissionerAgainst(url).commission(7L);
+    Optional<WorkspaceCredential> issued = commissionerAgainst(url).commission(7L, A_PROJECT);
 
     assertEquals(Optional.of(new WorkspaceCredential("ws-7-b", "s3cr3t")), issued);
     assertEquals(2, requests.size(), "the first answer was held through, not taken as a verdict");
@@ -157,7 +198,7 @@ public class IdpCredentialCommissionerTest {
     // Not a moment, so not retried — and it throws rather than answering empty, because a wired
     // issuer that refused is not the same fact as no issuer at all. The launch fails loudly.
     RuntimeException failure =
-        assertThrows(RuntimeException.class, () -> commissionerAgainst(url).commission(7L));
+        assertThrows(RuntimeException.class, () -> commissionerAgainst(url).commission(7L, A_PROJECT));
     assertTrue(failure.getMessage().contains("workspace 7"), failure.getMessage());
     assertEquals(1, requests.size(), "a refusal is one attempt");
   }

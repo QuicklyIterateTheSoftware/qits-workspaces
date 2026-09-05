@@ -40,6 +40,13 @@ public interface CredentialCommissioner {
    */
   String CONTEXT_KIND = "workspace";
 
+  /**
+   * The claim name the issuer scopes a credential by. Spelled here rather than inline for the reason
+   * {@code QitsClaims} spells it on the enforcement side: a typo in a claim name reads as "no
+   * claim", which is a credential that quietly keeps the wider grant.
+   */
+  String PROJECT_CLAIM = "project";
+
   /** One live commission as the owner's reconcile reads it back. Never carries a secret. */
   record Commission(String clientId, String contextKind, String contextId) {}
 
@@ -50,9 +57,23 @@ public interface CredentialCommissioner {
    * <p>The secret is returned <b>once</b>: the issuer stores a hash, so a caller that loses it has
    * to decommission and commission again.
    *
+   * <p><b>{@code projectId} is what the credential is ABOUT, and it is not the same fact as {@code
+   * rowId}.</b> The row id says which context this credential belongs to — it is the {@code
+   * contextId} a reconcile compares against live workspaces — while the project is the scope every
+   * resource service judges it on: a workspace belongs to a repository, a repository belongs to a
+   * project, and a credential handed to a container in one project has no business acting in
+   * another. The issuer turns it into a {@code project} claim on every token the credential mints,
+   * which is exactly what qits-ci's manual trigger reads to decide which repositories a caller may
+   * have evaluated.
+   *
+   * <p><b>Null is accepted and means unscoped</b>, which is what every workspace credential was
+   * before this argument existed. It is the answer when the repository registry could not name the
+   * project, and that must cost a scope rather than a launch: a registry blinking is a moment, and
+   * refusing to start a workspace over it would trade a narrower credential for no workspace at all.
+   *
    * @throws RuntimeException when an issuer is configured and the call did not succeed
    */
-  Optional<WorkspaceCredential> commission(Long rowId);
+  Optional<WorkspaceCredential> commission(Long rowId, String projectId);
 
   /**
    * Give a credential back — the container it belonged to is gone.

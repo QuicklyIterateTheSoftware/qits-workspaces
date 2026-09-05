@@ -204,6 +204,20 @@ itself to the in-container API, this set is the container proving itself to the 
 uses the token URL and audience with its client pair to authenticate its dial-home control socket;
 Git still asks for its own qits-githost-audience bearer.
 
+**It is scoped to the repository's project.** The commission states
+`{"claims":{"project":"<projectId>"}}`, resolved from the repository the workspace branches, and
+qits-idp turns that into a `project` claim on every token the pair mints. That is what lets a
+resource service judge this container on its project rather than on its platform role alone —
+qits-ci's manual trigger reads exactly this claim to decide which repositories a caller may have
+evaluated, so a workspace agent reaches its own project's pipelines and nobody else's. The project
+the credential is scoped to and the one the container is told about
+(`QITS_WORKSPACE_DAEMON_PROJECT_ID`) are the same fact from the same registry.
+
+A project the registry cannot name **costs the scope, not the launch**: the commission states no
+claim and the credential is issued as every workspace credential was before scoping existed. A
+blinking registry must not be able to stop a workspace from starting, and it is never sent as `"*"` —
+qits-idp refuses the wildcard on a commission by design.
+
 **It mirrors the container's lifetime, not the row's.** A provision commissions, a recreate
 commissions afresh and hands the old one back, `deleteContainer` hands it back while the workspace
 stays ACTIVE (the next start commissions again), and every resolution — integrate, discard, the

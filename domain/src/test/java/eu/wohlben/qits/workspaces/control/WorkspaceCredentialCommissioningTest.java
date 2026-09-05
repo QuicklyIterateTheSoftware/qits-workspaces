@@ -90,6 +90,15 @@ public class WorkspaceCredentialCommissioningTest {
         List.of(credential.clientId()),
         commissioner.liveClientIds(),
         "the issuer holds exactly the one credential the workspace claims");
+
+    // AND IT IS SCOPED TO THE REPOSITORY'S PROJECT. A workspace belongs to a repository, which
+    // belongs to a project, and that is the scope a resource service judges this container's token
+    // on — so the launch has to resolve it here rather than leave the credential covering every
+    // project the way it did before. It is the same project the container is told about.
+    assertEquals(
+        FakeRepositoryLookup.PROJECT_ID,
+        commissioner.scopeFor(workspaceIds.of(repoId, "feat")),
+        "the commission says which project this credential is for");
   }
 
   @Test

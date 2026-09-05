@@ -81,9 +81,24 @@ public class FakeCredentialCommissioner implements CredentialCommissioner {
     }
   }
 
+  /** The project each commission was scoped to, by row id. Null is the unscoped answer. */
+  private final java.util.Map<Long, String> scopes = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** What the service asked this credential to be scoped to, or null when it asked for nothing. */
+  public String scopeFor(Long rowId) {
+    return scopes.get(rowId);
+  }
+
   @Override
-  public Optional<WorkspaceCredential> commission(Long rowId) {
+  public Optional<WorkspaceCredential> commission(Long rowId, String projectId) {
     commissionedFor.add(rowId);
+    // Recorded before the wiring and failure arms, so a test can assert the scope a launch asked for
+    // even on the paths where nothing is issued.
+    if (projectId != null) {
+      scopes.put(rowId, projectId);
+    } else {
+      scopes.remove(rowId);
+    }
     if (!wired) {
       return Optional.empty();
     }
