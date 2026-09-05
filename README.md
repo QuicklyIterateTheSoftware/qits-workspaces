@@ -251,7 +251,7 @@ edge or on `qits-net`.
 
 | Prefix | What | Set by |
 |---|---|---|
-| `/workspaces/api/…` | the JSON API — `workspaces`, `branches`, `history`, `events`, `service-events`, `technical-processes`, `capture`, `editor` | `qits.rest.path`, which `quarkus.rest.path` is derived from |
+| `/workspaces/api/…` | the JSON API — `workspaces`, `branches`, `history`, `events`, `service-events`, `technical-processes`, `capture`, `editor`, `gc`, `pins` | `qits.rest.path`, which `quarkus.rest.path` is derived from |
 | `/workspaces/q/…` | `openapi`, `swagger-ui` — what the framework serves, not application code | `quarkus.http.non-application-root-path` |
 | `/workspaces/daemon/{id}` | the daemon's dial-home control socket | `DaemonControlSocket`, literal |
 | `/workspaces/service/{id}/{serviceId}/*` | the dev-server reverse proxy | `ServiceProxyPath.PREFIX`, literal |
@@ -326,6 +326,16 @@ non-numeric one and a soft-deleted row all answer the same 404 before anything c
 not gate on control-socket liveness: the daemon's HTTP server and its socket are independent
 listeners, so refusing while a socket is in reconnect backoff would take file browsing and every
 open terminal down for the length of a blip.
+
+**`GET /workspaces/api/pins` says which images a launch by this process would pull** —
+`{generatedAt, pins:[{image, version, launches}]}`, one row per configured pair (`workspace`,
+`editor`), the image registry-relative and a blank version omitted. It is a pin source for
+qits-artifacts' registry GC, read by qits-platform-orchestrator with a bearer and open to
+`qits:admin` beside `qits:system`, like `/workspaces/api/gc/branches`. It answers the **effective**
+version — what this running process resolved at boot — where qits-configuration answers the
+configured one, and the two differ until this service is deployed again; a launch pulls cold, so the
+lagging value is the one the GC must keep. It reads the same config `WorkspaceContainerFactory`
+launches from and dials nobody.
 
 The workspace routes take **no repository segment**: this context does not own repositories, so
 collections filter by `?repositoryId=` and a workspace is `{id}` alone. `AGENTS.md` has the rest.
