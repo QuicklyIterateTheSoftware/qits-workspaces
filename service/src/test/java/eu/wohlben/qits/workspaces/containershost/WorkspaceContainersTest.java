@@ -146,6 +146,12 @@ class WorkspaceContainersTest {
     assertEquals("main", spec.env().get("QITS_WORKSPACE_DAEMON_BRANCH"));
     assertEquals("/claude-home/.claude", spec.env().get("CLAUDE_CONFIG_DIR"));
     assertEquals("-Dmaven.repo.local=/caches/m2", spec.env().get("MAVEN_OPTS"));
+    // The Maven Central pull-through travels on the SPEC, which is the half that matters here:
+    // environment is part of it, so adding this variable is a Recreate.ifChanged replacement for
+    // every container already running — acceptable because /workspace is a volume, and only correct
+    // because the value is a constant off config that reads the same at every ensure.
+    assertEquals(
+        TestWorkspaceContainerFactory.MAVEN_CENTRAL_URL, spec.env().get("QITS_MAVEN_CENTRAL_URL"));
 
     // EXPLICIT: a workspace lives until somebody says otherwise and only a delete ends it. It is
     // also what makes a changed spec recreatable rather than a SPEC_CONFLICT.

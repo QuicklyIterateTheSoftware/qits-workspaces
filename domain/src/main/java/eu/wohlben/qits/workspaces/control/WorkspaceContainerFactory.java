@@ -151,6 +151,33 @@ public class WorkspaceContainerFactory {
   Optional<String> npmProxyUrl;
 
   /**
+   * Maven Central through qits-platform-mirror's pull-through cache — npm's proxy above, for the
+   * other package manager. Injected as {@code QITS_MAVEN_CENTRAL_URL}, which the workspace image's
+   * {@code /etc/qits/maven-settings.xml} activates its central-proxy profile on; blank injects
+   * nothing and a build resolves {@code repo1.maven.org} directly, exactly as before this key
+   * existed. That is the off switch, and it is the whole switch — the profile activates on a
+   * NON-EMPTY value (measured on Maven 3.9: an empty environment value does not activate a
+   * property-presence profile), so no call site needs a guard beyond the blank filter below.
+   *
+   * <p><b>Unlike the three keys above, this one SHIPS A DEFAULT.</b> Their addresses carry an
+   * environment name ({@code dev-qits-artifacts}), so a default would be a guess at the
+   * deployment's topology; qits-platform-mirror is a platform service deployed once, under a name
+   * with no environment in it, and a workspace container sits on qits-net — so the address is the
+   * same everywhere and nothing is being guessed. The mirror plane is on by default platform-wide
+   * (qits-ci ships its own two equivalents non-empty), and a workspace was the last builder still
+   * reaching Central directly.
+   *
+   * <p><b>It rides the spec, so it obeys the spec-hash rule</b> the editor and credential blocks
+   * carry: environment is part of the spec, and a spec that differs from the running container's is
+   * a {@code Recreate.ifChanged} REPLACEMENT. The value is therefore a CONSTANT off config, never
+   * derived per call — a per-call value would make every ensure a replacement. Adding it replaces
+   * each existing workspace container once, on its next ensure; {@code /workspace} is a volume and
+   * survives that.
+   */
+  @ConfigProperty(name = "qits.workspace.maven-central-url")
+  Optional<String> mavenCentralUrl;
+
+  /**
    * Name prefix for the per-workspace {@code /workspace} volume — {@code prefix + workspaceId} (the
    * stable {@code workspace_id}, safe as a docker volume name and 1:1 with the branch).
    * Branch/repo/ project ride as labels, not the name, so a rename never strands the volume. See
@@ -778,6 +805,13 @@ public class WorkspaceContainerFactory {
     mavenRepositoryUrl
         .filter(url -> !url.isBlank())
         .ifPresent(url -> container.env("QITS_MAVEN_REPOSITORY_URL", url));
+    // Maven Central through the platform's pull-through cache, the npm proxy's counterpart. The
+    // image's settings file already declares the mirror entry and the profile that switches Central
+    // over; this address is the only thing it is missing, and while it is missing the profile stays
+    // inert and the build resolves repo1.maven.org. Non-blank ⇒ mirrored, blank ⇒ direct.
+    mavenCentralUrl
+        .filter(url -> !url.isBlank())
+        .ifPresent(url -> container.env("QITS_MAVEN_CENTRAL_URL", url));
     npmProxyUrl.filter(url -> !url.isBlank()).ifPresent(url -> container.env("npm_config_registry", url));
     // NOT `npm_config_@qits:registry`, which is npm's own spelling and what this line used to be:
     // qits-containers refuses that name outright (`Invalid environment key`) because its env keys

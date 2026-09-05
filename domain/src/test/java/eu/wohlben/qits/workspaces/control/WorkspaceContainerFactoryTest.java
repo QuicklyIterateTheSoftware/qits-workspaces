@@ -55,6 +55,16 @@ class WorkspaceContainerFactoryTest {
 
   private static final String EDITOR_IMAGE = EDITOR_IMAGE_REPO + ":" + EDITOR_IMAGE_VERSION;
 
+  /**
+   * The Maven Central pull-through the service ships, read from config rather than written down for
+   * the reason the image halves are: a deployment may blank it (the off switch) or move it, and a
+   * literal here would go red on a change that works as intended. {@link
+   * #shipsTheMirrorAsTheCentralDefault} pins the exact shipped value once; every other case reuses
+   * this so it asserts the factory injects what config carries.
+   */
+  private static final String MAVEN_CENTRAL_URL =
+      ConfigProvider.getConfig().getValue("qits.workspace.maven-central-url", String.class);
+
   private WorkspaceContainerFactory factory() {
     WorkspaceContainerFactory f = new WorkspaceContainerFactory();
     f.imageRepo = IMAGE_REPO;
@@ -74,6 +84,10 @@ class WorkspaceContainerFactoryTest {
     f.mavenRepositoryUrl = Optional.empty();
     f.npmRegistryUrl = Optional.empty();
     f.npmProxyUrl = Optional.empty();
+    // …and the fourth registry key is the one that DOES ship an address, so the default factory
+    // carries it: qits-platform-mirror is a platform service with no environment in its name, which
+    // is exactly why a default is possible here and was not for the three above.
+    f.mavenCentralUrl = Optional.of(MAVEN_CENTRAL_URL);
     f.timezone = Optional.empty();
     // Mirrors the shipped default: a 4g memory cap with an 8g memory+swap total on every
     // container, pids/cpus off.
@@ -491,6 +505,57 @@ class WorkspaceContainerFactoryTest {
     assertNull(c.env().get("QITS_MAVEN_REPOSITORY_URL"));
     assertNull(c.env().get("npm_config_registry"));
     assertNull(c.env().get("npm_config_@qits:registry"));
+  }
+
+  @Test
+  void routesMavenCentralThroughTheMirrorByDefault() {
+    // The name is the CONTRACT, asserted literally for the reason the three above are: the workspace
+    // image's /etc/qits/maven-settings.xml activates its central-proxy profile on the PRESENCE of a
+    // non-empty QITS_MAVEN_CENTRAL_URL and mirrors the qits-central repository to its value. Rename
+    // it and every workspace build silently goes back out to repo1.maven.org, green.
+    WorkspaceContainer c = factory().forWorkspace("repo12345678abc", "work", 1L, "main", null);
+
+    assertEnv(c, "QITS_MAVEN_CENTRAL_URL", MAVEN_CENTRAL_URL);
+  }
+
+  @Test
+  void shipsTheMirrorAsTheCentralDefault() {
+    // The one place the shipped address is written down, and it is a STEP-PLANE address: a workspace
+    // container sits on qits-net, where the mirror answers under its own service alias on its own
+    // /mirror route. A published host name (mirror.<env>.<domain>) would resolve to nothing in
+    // there, and the /artifacts route belongs to the hosted registry, which does not proxy Central.
+    assertEquals("http://qits-platform-mirror:8080/mirror/maven/central", MAVEN_CENTRAL_URL);
+  }
+
+  @Test
+  void tellsTheContainerNothingAboutCentralWhenTheKeyIsBlanked() {
+    // Blanking the key is the OFF SWITCH and the only one. Nothing injected ⇒ the image's profile
+    // never activates (it is a property-presence activation, and an empty environment value does not
+    // activate one — measured on Maven 3.9) ⇒ the build resolves Maven Central directly, exactly as
+    // it did before this key existed. Asserted because the alternative — injecting an empty string —
+    // looks identical in a deployment's env and is NOT the same thing to a settings file.
+    WorkspaceContainerFactory f = factory();
+    f.mavenCentralUrl = Optional.of("");
+
+    assertNull(
+        f.forWorkspace("repo12345678abc", "work", 1L, "main", null)
+            .env()
+            .get("QITS_MAVEN_CENTRAL_URL"));
+  }
+
+  @Test
+  void answersTheSameCentralAddressOnEveryEnsure() {
+    // The value rides the SPEC, and a spec that differs from the running container's is a
+    // Recreate.ifChanged REPLACEMENT — so an address derived per call would turn every resume into a
+    // destroyed container. Two calls for two workspaces on one factory must carry the identical
+    // string, which is what "a constant off config" means here.
+    WorkspaceContainerFactory f = factory();
+
+    WorkspaceContainer first = f.forWorkspace("repo12345678abc", "work", 1L, "main", null);
+    WorkspaceContainer second = f.forWorkspace("repo12345678abc", "other", 2L, "feature", null);
+
+    assertEquals(
+        first.env().get("QITS_MAVEN_CENTRAL_URL"), second.env().get("QITS_MAVEN_CENTRAL_URL"));
   }
 
   // --- the admin posture ------------------------------------------------------------------------
