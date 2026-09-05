@@ -478,6 +478,33 @@ public class WorkspaceContainerFactory {
   }
 
   /**
+   * The two halves of the workspace reference, readable apart from the reference {@link #image()}
+   * joins them into. They exist for the launch-pin route ({@code GET /workspaces/api/pins}), which
+   * has to name the repository and the tag separately and must not re-declare either config key: the
+   * image a pin names and the image a launch pulls are the same value or the pin is worthless.
+   * Splitting {@link #image()} back on a colon would not do — the repo half carries the registry's
+   * own {@code host:port}.
+   */
+  public String imageRepo() {
+    return imageRepo;
+  }
+
+  /** The workspace image's calver tag; see {@link #imageRepo()}. */
+  public String imageVersion() {
+    return imageVersion;
+  }
+
+  /** The editor image's registry host and path; see {@link #imageRepo()}. */
+  public String editorImageRepo() {
+    return editorImageRepo;
+  }
+
+  /** The editor image's calver tag; see {@link #imageRepo()}. */
+  public String editorImageVersion() {
+    return editorImageVersion;
+  }
+
+  /**
    * The shared credential volume name (blank when the mount is disabled). The orchestrator creates
    * it and the other two at its own boot; this service only names them, so that the adapter can tell
    * a platform volume from the workspace's own when it builds the spec.
